@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Enterprise RAG MVP</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <main class="layout">
+      <aside class="sidebar">
+        <div class="brand">RAG 助手</div>
+        <div class="sub">语雀 + MCP</div>
+        <section class="panel">
+          <h3>MCP 能力</h3>
+          <div id="mcp-meta" class="meta">加载中...</div>
+          <ul id="mcp-tools" class="tool-list"></ul>
+        </section>
+      </aside>
+
+      <section class="chat-shell">
+        <header class="topbar">企业级 RAG 问答系统</header>
+        <div id="chat-list" class="chat-list"></div>
+
+        <section class="composer">
+          <textarea id="question" rows="3" placeholder="输入问题，Shift+Enter 换行，Enter 发送"></textarea>
+          <div class="actions">
+            <button id="submit">发送</button>
+            <button id="stop" class="stop-button" disabled>停止生成</button>
+          </div>
+        </section>
+      </section>
+    </main>
+    <script src="/assets/app.js"></script>
+  </body>
+</html>
+

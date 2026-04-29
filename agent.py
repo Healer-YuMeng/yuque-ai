@@ -160,7 +160,7 @@ def build_agent(
 
     system = SystemMessage(
         content=(
-            "你是企业知识库问答助手。你可以调用两个工具：\n"
+            "你是企业知识库问答助手。你可以调用下面工具：\n"
             "- yuque_search_docs：在语雀搜索可能相关的文档\n"
             "- yuque_get_doc：拉取文档正文\n"
             "- yuque_get_doc_subtree：获取文档在知识库目录树里的子树（目录结构/子文档）\n\n"
