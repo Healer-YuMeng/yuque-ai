@@ -35,6 +35,13 @@ class MCPDocMeta:
     title: str
     slug: str
     url: str
+    # 语雀 / MCP 若返回下列字段则保留，供「文档清单」合并展示
+    word_count: Optional[int] = None
+    body_length: Optional[int] = None
+    image_count: Optional[int] = None
+    doc_type: str = ""
+    public: Optional[bool] = None
+    visible: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -43,6 +50,7 @@ class MCPTocNode:
     level: int
     doc_id: str
     slug: str
+    visible: Optional[bool] = None
 
 
 class YuqueMCPClient:
@@ -235,12 +243,39 @@ class YuqueMCPClient:
         for item in raw_items:
             if not isinstance(item, dict):
                 continue
+
+            def _pick_int(*keys: str) -> Optional[int]:
+                for k in keys:
+                    v = item.get(k)
+                    if v is None:
+                        continue
+                    try:
+                        return int(v)
+                    except (TypeError, ValueError):
+                        continue
+                return None
+
+            wc = _pick_int("word_count", "words_count", "content_length", "body_length", "public_word_count")
+            bl = _pick_int("body_length", "content_length")
+            ic = _pick_int("image_count", "images_count", "img_count")
+            pub = item.get("public")
+            vis = item.get("visible")
+            pub_b: Optional[bool] = bool(pub) if isinstance(pub, (bool, int)) else None
+            vis_b: Optional[bool] = bool(vis) if isinstance(vis, (bool, int)) else None
+            dtype = str(item.get("type") or item.get("doc_type") or item.get("format") or "").strip()
+
             out.append(
                 MCPDocMeta(
                     doc_id=str(item.get("id") or ""),
                     title=str(item.get("title") or ""),
                     slug=str(item.get("slug") or ""),
                     url=str(item.get("url") or ""),
+                    word_count=wc,
+                    body_length=bl,
+                    image_count=ic,
+                    doc_type=dtype,
+                    public=pub_b,
+                    visible=vis_b,
                 )
             )
         return out
@@ -262,12 +297,15 @@ class YuqueMCPClient:
                 level = int(raw_level)
             except (TypeError, ValueError):
                 level = 1
+            vis = item.get("visible")
+            vis_b: Optional[bool] = bool(vis) if isinstance(vis, (bool, int)) else None
             out.append(
                 MCPTocNode(
                     title=str(item.get("title") or ""),
                     level=level,
                     doc_id=str(item.get("doc_id") or item.get("id") or ""),
                     slug=str(item.get("slug") or ""),
+                    visible=vis_b,
                 )
             )
         return out

@@ -254,3 +254,179 @@ async def test_retriever_uses_docs_title_match_for_content_questions() -> None:
     assert result.sources[0].title == "成大事三步法"
     assert "第一步" in result.contexts[0]
 
+
+@pytest.mark.asyncio
+async def test_classify_intent_skill_overrides_misclassified_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """有正文类 Skill 时，意图 LLM 误标 directory 也应回落到 content，避免 MCP 只拉 TOC。"""
+
+    async def fake_llm_intent(_question: str):
+        return "directory"
+
+    retriever = Retriever(
+        vector_store=FakeVectorStore([]),
+        embedder=None,
+        mcp_client=FakeMCPClient([]),
+        yuque_loader=None,
+        top_k=3,
+        score_threshold=0.5,
+    )
+    retriever._intent_client = object()  # 触发 LLM 分支
+    monkeypatch.setattr(retriever, "_classify_intent_with_llm", fake_llm_intent)
+
+    intent_plain, src_plain = await retriever._classify_intent("最终状态机提取金句")
+    assert intent_plain == "directory"
+    assert src_plain == "llm"
+
+    intent_skill, src_skill = await retriever._classify_intent("最终状态机提取金句", skill_id="reading-digest")
+    assert intent_skill == "content"
+    assert "skill_needs_body" in src_skill
+
+    intent_stale, _ = await retriever._classify_intent("知识库目录结构", skill_id="stale-detector")
+    assert intent_stale == "directory"
+
+
+@pytest.mark.asyncio
+async def test_retriever_doc_anchors_prefetch_skips_search() -> None:
+    class AnchorLoader(FakeYuqueLoader):
+        async def search_docs(self, query: str):
+            raise AssertionError("search_docs should not run when doc_anchors yield contexts")
+
+        async def get_doc(self, *, book, id_or_slug: str):
+            return SimpleNamespace(
+                title="锚定文档",
+                url="https://example.com/anchor",
+                body="锚定正文片段",
+                doc_id="42",
+            )
+
+    loader = AnchorLoader()
+    retriever = Retriever(
+        vector_store=FakeVectorStore([]),
+        embedder=None,
+        mcp_client=FakeMCPClient([]),
+        yuque_loader=loader,
+        top_k=3,
+        score_threshold=0.5,
+    )
+
+    result = await retriever.retrieve("任意问题", doc_anchors=[(42, None)])
+
+    assert result.fallback_used is False
+    assert "锚定正文" in result.contexts[0]
+    assert result.sources[0].doc_id == "42"
+    assert result.debug.get("retrieval_mode") == "yuque_anchor"
+
+
+@pytest.mark.asyncio
+async def test_retriever_vector_mode_prefers_anchored_chunks() -> None:
+    hits = [
+        SimpleNamespace(
+            chunk=SimpleNamespace(
+                chunk_id="a",
+                doc_id="9",
+                title="其它",
+                url="",
+                text="其它文档",
+                order=0,
+            ),
+            score=0.95,
+        ),
+        SimpleNamespace(
+            chunk=SimpleNamespace(
+                chunk_id="b",
+                doc_id="1",
+                title="目标",
+                url="",
+                text="目标文档正文",
+                order=0,
+            ),
+            score=0.25,
+        ),
+    ]
+    retriever = Retriever(
+        vector_store=FakeVectorStore(hits),
+        embedder=FakeEmbedder(),
+        mcp_client=FakeMCPClient([]),
+        yuque_loader=None,
+        top_k=3,
+        score_threshold=0.5,
+    )
+
+    result = await retriever.retrieve("问题", doc_anchors=[(1, None)])
+
+    assert result.contexts == ["目标文档正文"]
+    assert result.sources[0].doc_id == "1"
+    assert result.debug.get("retrieval_mode") == "vector_anchor"
+
+
+@pytest.mark.asyncio
+async def test_retriever_doc_anchors_prefetch_before_search() -> None:
+    class TrackingLoader(FakeYuqueLoader):
+        def __init__(self) -> None:
+            super().__init__()
+            self.get_doc_calls: list[tuple[object, str]] = []
+
+        async def get_doc(self, *, book, id_or_slug: str):
+            self.get_doc_calls.append((book, id_or_slug))
+            return SimpleNamespace(title="Pinned", url="https://example.com/p", body="ANCHOR_ONLY", doc_id="99")
+
+    loader = TrackingLoader()
+    retriever = Retriever(
+        vector_store=FakeVectorStore([]),
+        embedder=None,
+        mcp_client=FakeMCPClient([]),
+        yuque_loader=loader,
+        top_k=3,
+        score_threshold=0.5,
+    )
+
+    result = await retriever.retrieve("任意检索词", doc_anchors=[(99, "slug-fallback")])
+
+    assert getattr(loader, "last_query", None) is None
+    assert loader.get_doc_calls and loader.get_doc_calls[0][1] == "99"
+    assert "ANCHOR_ONLY" in result.contexts[0]
+    assert result.sources[0].doc_id == "99"
+    assert (result.debug or {}).get("retrieval_mode") == "yuque_anchor"
+
+
+@pytest.mark.asyncio
+async def test_retriever_vector_prefers_anchored_chunks_when_scores_weak() -> None:
+    hits = [
+        SimpleNamespace(
+            chunk=SimpleNamespace(
+                chunk_id="a",
+                doc_id="55",
+                title="Other",
+                url="",
+                text="high score other",
+                order=0,
+            ),
+            score=0.95,
+        ),
+        SimpleNamespace(
+            chunk=SimpleNamespace(
+                chunk_id="b",
+                doc_id="7",
+                title="Want",
+                url="",
+                text="anchored chunk text",
+                order=1,
+            ),
+            score=0.35,
+        ),
+    ]
+    retriever = Retriever(
+        vector_store=FakeVectorStore(hits),
+        embedder=FakeEmbedder(),
+        mcp_client=FakeMCPClient([]),
+        yuque_loader=None,
+        top_k=3,
+        score_threshold=0.5,
+    )
+
+    result = await retriever.retrieve("问题", doc_anchors=[(7, None)])
+
+    assert result.contexts == ["anchored chunk text"]
+    assert result.sources[0].doc_id == "7"
+    assert (result.debug or {}).get("retrieval_mode") == "vector_anchor"
+

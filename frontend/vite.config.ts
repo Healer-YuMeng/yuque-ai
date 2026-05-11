@@ -9,6 +9,7 @@ export default defineConfig({
       '/chat': 'http://127.0.0.1:8000',
       '/mcp': 'http://127.0.0.1:8000',
       '/docs': 'http://127.0.0.1:8000',
+      '/yuque': 'http://127.0.0.1:8000',
     },
   },
 })

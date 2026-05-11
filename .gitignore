@@ -6,6 +6,8 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+yuqueai/
+.DS_Store
 .idea/
 .vscode/
 

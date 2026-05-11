@@ -58,6 +58,11 @@ class YuqueLoader:
         if self._token:
             self._client = self._build_client()
 
+    @property
+    def scope(self) -> str:
+        """当前知识库作用域，形如 login/repo。"""
+        return self._scope
+
     async def close(self) -> None:
         if self._client is not None:
             await self._client.aclose()
@@ -169,11 +174,33 @@ class YuqueLoader:
             )
         return nodes
 
+    async def fetch_self_login(self) -> str:
+        """GET /user：当前 Token 对应的语雀用户 login（与知识库路径里的 login 可能不同）。"""
+        payload = await self._request("GET", "/user")
+        if not isinstance(payload, dict):
+            return ""
+        data = payload.get("data")
+        if isinstance(data, dict):
+            for key in ("login", "slug"):
+                v = str(data.get(key) or "").strip()
+                if v:
+                    return v
+        for key in ("login", "slug"):
+            v = str(payload.get(key) or "").strip()
+            if v:
+                return v
+        return ""
+
     async def list_docs(self, *, book: str | int, offset: int = 0, limit: int = 50) -> List[YuqueDocMeta]:
         key = str(int(book)) if isinstance(book, int) else str(book).strip().strip("/")
         if not key:
             return []
-        payload = await self._request("GET", f"/repos/{key}/docs", params={"offset": offset, "limit": limit})
+        # 语雀 OpenAPI：limit 超过 100 会返回 422
+        safe_limit = max(1, min(int(limit), 100))
+        safe_offset = max(0, int(offset))
+        payload = await self._request(
+            "GET", f"/repos/{key}/docs", params={"offset": safe_offset, "limit": safe_limit}
+        )
         items = (payload or {}).get("data") or []
         docs: List[YuqueDocMeta] = []
         for item in items:

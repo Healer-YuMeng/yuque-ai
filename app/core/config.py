@@ -50,7 +50,9 @@ class Settings:
     sqlite_path: Path = BASE_DIR / "data_runtime" / "rag_mvp.db"
 
     yuque_token: str = _env("YUQUE_TOKEN")
+    yuque_token_secondary: str = _env("YUQUE_TOKEN_SECONDARY", "")
     yuque_scope: str = _env("YUQUE_SCOPE")
+    yuque_scope_secondary: str = _env("YUQUE_SCOPE_SECONDARY", "")
     yuque_base_url: str = _env("YUQUE_BASE_URL", "https://www.yuque.com/api/v2")
     yuque_timeout_s: float = _env_float("YUQUE_TIMEOUT_S", 30.0)
 
@@ -98,10 +100,31 @@ class Settings:
     intent_llm_enabled: bool = _env_bool("INTENT_LLM_ENABLED", False)
     intent_llm_model: str = _env("INTENT_LLM_MODEL", _env("LLM_MODEL", "deepseek-chat"))
 
+    # 元问题：正则未命中时，可用一次 LLM 判断是否「只问助手自身」，减少无限扩写关键词（见 README / doc）
+    assistant_meta_llm_router: bool = _env_bool("ASSISTANT_META_LLM_ROUTER", False)
+    assistant_meta_router_max_chars: int = _env_int("ASSISTANT_META_ROUTER_MAX_CHARS", 120)
+    assistant_meta_router_model: str = _env(
+        "ASSISTANT_META_ROUTER_MODEL",
+        _env("INTENT_LLM_MODEL", _env("LLM_MODEL", "deepseek-chat")),
+    )
+
     web_dir: Path = BASE_DIR / "web"
     frontend_dir: Path = BASE_DIR / "frontend"
     frontend_dist_dir: Path = BASE_DIR / "frontend" / "dist"
     expose_source_urls: bool = _env_bool("EXPOSE_SOURCE_URLS", False)
+
+    # 语雀插图：不启用多模态时，仍可将命中文档内的图片以 Markdown（/yuque/asset 代理）追加进上下文，供主模型原样插入回答
+    doc_images_markdown_in_context: bool = _env_bool("DOC_IMAGES_MARKDOWN_IN_CONTEXT", True)
+    # 为 true 时：对每篇命中再拉全文抽图（易带入「整篇所有插图」）；默认 false，仅从检索片段 contexts 抽图
+    doc_images_full_document_fallback: bool = _env_bool("DOC_IMAGES_FULL_DOCUMENT_FALLBACK", False)
+
+    # 语雀插图：独立多模态识图（OpenAI 兼容）+ 主模型 DeepSeek 写回答；需 OPENAI_API_KEY
+    vision_enabled: bool = _env_bool("VISION_ENABLED", False)
+    vision_model: str = _env("VISION_MODEL", "gpt-4o-mini")
+    vision_max_images: int = _env_int("VISION_MAX_IMAGES", 4)
+    vision_max_bytes: int = _env_int("VISION_MAX_BYTES", 4_000_000)
+    vision_base_url: str = _env("VISION_BASE_URL", _env("OPENAI_BASE_URL"))
+    vision_api_key: str = _env("VISION_API_KEY", _env("OPENAI_API_KEY"))
 
     def ensure_runtime_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)

@@ -1,4 +1,5 @@
 SHELL := /bin/bash
+VENV_PY := $(CURDIR)/yuqueai/bin/python
 
 .PHONY: dev down status build-ui run test
 
@@ -15,7 +16,7 @@ build-ui:
 	./scripts/build_frontend.sh
 
 run:
-	uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+	$(VENV_PY) -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 test:
 	source scripts/activate.sh && pytest

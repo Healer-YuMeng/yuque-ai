@@ -11,11 +11,13 @@ from app.schemas.chat import SourceItem
 
 
 class FakeRetriever:
+    yuque_loader = None
+
     def __init__(self) -> None:
         self.last_question: Optional[str] = None
         self.last_skill_id: Optional[str] = None
 
-    async def retrieve(self, question: str, *, skill_id: Optional[str] = None) -> RetrievalResult:
+    async def retrieve(self, question: str, *, skill_id: Optional[str] = None, doc_anchors=None) -> RetrievalResult:
         self.last_question = question
         self.last_skill_id = skill_id
         return RetrievalResult(

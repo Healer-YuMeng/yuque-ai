@@ -25,11 +25,40 @@ class Generator(ABC):
 
 
 class DeepSeekGenerator(Generator):
+    _BASE_SYSTEM = (
+        "你必须使用中文并严格输出 Markdown。"
+        "回答结构固定为：\n"
+        "## 回答\n"
+        "<正文>\n\n"
+        "## 参考来源\n"
+        "- [1] <来源标题>\n"
+        "- [2] <来源标题>\n"
+        "若无来源，输出：- 无。\n"
+        "不要输出与该结构无关的额外标题。"
+    )
+
     def __init__(self, *, model: str, api_key: str, base_url: str) -> None:
         if not api_key:
             raise GeneratorConfigError("缺少 LLM API key。")
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url or None)
         self._model = model
+
+    @classmethod
+    def _system_message(cls, contexts: Sequence[str]) -> str:
+        extra = ""
+        if contexts and str(contexts[0]).startswith("【合并知识库清单"):
+            extra = (
+                "\n当前为「目录树 + 文档清单」合并上下文：在 ## 回答 的正文里，"
+                "必须先按层级完整输出目录树（与上下文中 level/缩进一致），"
+                "再输出含字数/图片数/可见性等列的 Markdown 表格；表中无数据的格填「未提供」，禁止臆造数字。"
+            )
+        elif any(str(c).startswith("【文档插图") for c in contexts):
+            extra = (
+                "\n上下文中含「文档插图」块：其中列出了须在 ## 回答 中插入的 Markdown 图片语法"
+                "（路径形如 `/yuque/asset?t=...`），可能附带多模态识读摘要。**必须原样使用**这些 `![...](...)` 行，"
+                "勿改写 URL 或查询参数；在正文合适位置插入，并可与块内说明文字配合组织段落。"
+            )
+        return cls._BASE_SYSTEM + extra
 
     @staticmethod
     def _build_prompt(*, question: str, contexts: Sequence[str], sources: Sequence[SourceItem]) -> str:
@@ -60,20 +89,7 @@ class DeepSeekGenerator(Generator):
             model=self._model,
             temperature=0.2,
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "你必须使用中文并严格输出 Markdown。"
-                        "回答结构固定为：\n"
-                        "## 回答\n"
-                        "<正文>\n\n"
-                        "## 参考来源\n"
-                        "- [1] <来源标题>\n"
-                        "- [2] <来源标题>\n"
-                        "若无来源，输出：- 无。\n"
-                        "不要输出与该结构无关的额外标题。"
-                    ),
-                },
+                {"role": "system", "content": self._system_message(contexts)},
                 {"role": "user", "content": prompt},
             ],
         )
@@ -87,20 +103,7 @@ class DeepSeekGenerator(Generator):
             model=self._model,
             temperature=0.2,
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "你必须使用中文并严格输出 Markdown。"
-                        "回答结构固定为：\n"
-                        "## 回答\n"
-                        "<正文>\n\n"
-                        "## 参考来源\n"
-                        "- [1] <来源标题>\n"
-                        "- [2] <来源标题>\n"
-                        "若无来源，输出：- 无。\n"
-                        "不要输出与该结构无关的额外标题。"
-                    ),
-                },
+                {"role": "system", "content": self._system_message(contexts)},
                 {"role": "user", "content": prompt},
             ],
             stream=True,

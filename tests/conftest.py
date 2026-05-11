@@ -14,4 +14,6 @@ if str(ROOT) not in sys.path:
 os.environ.setdefault("FORCE_MCP_FALLBACK", "false")
 os.environ.setdefault("AUTO_MCP_TOOL_ROUTER", "false")
 os.environ.setdefault("INTENT_LLM_ENABLED", "false")
+os.environ.setdefault("ASSISTANT_META_LLM_ROUTER", "false")
+os.environ.setdefault("VISION_ENABLED", "false")
 
