@@ -92,8 +92,9 @@ class Settings:
 
     mcp_server_command: str = _env("YUQUE_MCP_COMMAND")
     mcp_server_args: str = _env("YUQUE_MCP_ARGS")
-    mcp_search_tool: str = _env("YUQUE_MCP_SEARCH_TOOL", "search")
-    mcp_get_doc_tool: str = _env("YUQUE_MCP_GET_DOC_TOOL", "get_doc")
+    # 语雀官方 MCP 注册名为 yuque_*；旧版示例曾用 search/get_doc，会导致 Unknown tool
+    mcp_search_tool: str = _env("YUQUE_MCP_SEARCH_TOOL", "yuque_search")
+    mcp_get_doc_tool: str = _env("YUQUE_MCP_GET_DOC_TOOL", "yuque_get_doc")
     mcp_timeout_s: float = _env_float("YUQUE_MCP_TIMEOUT_S", 20.0)
     force_mcp_fallback: bool = _env_bool("FORCE_MCP_FALLBACK", False)
     auto_mcp_tool_router: bool = _env_bool("AUTO_MCP_TOOL_ROUTER", False)

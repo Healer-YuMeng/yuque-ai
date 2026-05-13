@@ -12,7 +12,7 @@ from app.api.chat_api import router as chat_router
 from app.core.config import settings
 from app.core.logger import setup_logging
 from app.data.yuque_loader import YuqueLoader
-from app.db.repositories import DocumentRepository, QALogRepository
+from app.db.repositories import ChatSessionRepository, DocumentRepository, LeadCaptureRepository, QALogRepository
 from app.db.session import DatabaseSessionFactory
 from app.service.qa_service import QAService
 from app.storage.vector_store import VectorStore
@@ -32,6 +32,8 @@ async def lifespan(application: FastAPI):
         vector_store=VectorStore(vector_dir=settings.vector_dir),
         document_repository=DocumentRepository(session_factory),
         qa_log_repository=QALogRepository(session_factory),
+        lead_capture_repository=LeadCaptureRepository(session_factory),
+        chat_session_repository=ChatSessionRepository(session_factory),
     )
     await qa_service.startup()
     application.state.qa_service = qa_service

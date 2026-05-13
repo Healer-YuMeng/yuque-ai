@@ -11,3 +11,6 @@ yuqueai/
 .idea/
 .vscode/
 
+# Optional local clone to refresh .cursor/skills from upstream SKILL.md
+vendor/agent-skills/
+

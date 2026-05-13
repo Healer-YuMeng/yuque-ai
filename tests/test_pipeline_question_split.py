@@ -33,12 +33,24 @@ class FakeGenerator:
         self.last_question: Optional[str] = None
 
     async def generate(
-        self, *, question: str, contexts: List[str], sources: List[SourceItem]
+        self,
+        *,
+        question: str,
+        contexts: List[str],
+        sources: List[SourceItem],
+        visitor_sales: bool = False,
     ) -> str:
         self.last_question = question
         return "answer-ok"
 
-    async def stream_generate(self, *, question: str, contexts: List[str], sources: List[SourceItem]):
+    async def stream_generate(
+        self,
+        *,
+        question: str,
+        contexts: List[str],
+        sources: List[SourceItem],
+        visitor_sales: bool = False,
+    ):
         raise NotImplementedError
 
 

@@ -23,6 +23,8 @@ from app.schemas.docs import DocMeta, DocSuggestRequest, DocSuggestResponse
 from app.schemas.chat import (
     ChatRequest,
     ChatResponse,
+    ChatHistoryResponse,
+    ChatMessageItem,
     HealthResponse,
     MCPCapabilitiesResponse,
     RebuildIndexResponse,
@@ -119,6 +121,22 @@ def get_qa_service() -> QAService:
     return app.state.qa_service
 
 
+@router.get("/chat/history", response_model=ChatHistoryResponse)
+async def chat_history(
+    session_id: str = Query(..., min_length=1, max_length=120),
+    limit: int = Query(default=20, ge=1, le=200),
+    qa_service: QAService = Depends(get_qa_service),
+) -> ChatHistoryResponse:
+    """拉取服务端持久化的会话消息，用于前端刷新/换标签页恢复上下文。"""
+    rows = await qa_service.list_session_messages(session_id=session_id, limit=limit)
+    items = [
+        ChatMessageItem(role=("user" if r.role == "user" else "assistant"), text=r.content, created_at=r.created_at)
+        for r in rows
+        if (r.role in ("user", "assistant") and (r.content or "").strip())
+    ]
+    return ChatHistoryResponse(session_id=session_id, messages=items)
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     return HealthResponse(status="ok")
@@ -149,6 +167,8 @@ async def chat(request: ChatRequest, qa_service: QAService = Depends(get_qa_serv
             owner=request.owner,
             selected_yuque_docs=request.selected_yuque_docs,
             token_profile=request.token_profile,
+            chat_mode=request.chat_mode,
+            session_id=request.session_id,
         )
     except (GeneratorConfigError, YuqueLoaderError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -165,6 +185,8 @@ async def chat_stream(request: ChatRequest, qa_service: QAService = Depends(get_
                 owner=request.owner,
                 selected_yuque_docs=request.selected_yuque_docs,
                 token_profile=request.token_profile,
+                chat_mode=request.chat_mode,
+                session_id=request.session_id,
             ):
                 yield (
                     f"event: {item['event']}\n"

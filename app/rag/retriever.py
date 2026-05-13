@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from openai import AsyncOpenAI
 from app.core.config import settings
-from app.data.mcp_client import MCPDocMeta, MCPTocNode, YuqueMCPClient
+from app.data.mcp_client import MCPClientError, MCPDocMeta, MCPTocNode, YuqueMCPClient
 from app.data.yuque_loader import YuqueLoader, YuqueLoaderError, YuqueTocNode
 from app.core.logger import get_logger
 from app.rag.embedder import Embedder
@@ -758,7 +758,11 @@ class Retriever:
 
         for query in self._build_search_queries(question):
             mcp_queries.append(query)
-            mcp_results = await self._mcp_client.search(query)
+            try:
+                mcp_results = await self._mcp_client.search(query)
+            except MCPClientError as exc:
+                logger.warning("mcp_search_failed query=%r err=%s", query, exc)
+                continue
             logger.info("mcp_search query=%r results=%d", query, len(mcp_results))
             if not mcp_results:
                 continue
@@ -813,7 +817,11 @@ class Retriever:
             )
 
         # MCP 搜索未命中时，回退到 docs 标题匹配，避免口语问法导致 search=0
-        docs = await self._mcp_client.list_docs()
+        try:
+            docs = await self._mcp_client.list_docs()
+        except MCPClientError as exc:
+            logger.warning("mcp_list_docs_title_fallback_failed err=%s", exc)
+            docs = []
         keywords = self._keyword_parts(question)
         normalized_question = re.sub(r"\s+", "", question)
         matched_docs = []
