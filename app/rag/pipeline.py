@@ -61,6 +61,7 @@ class RAGPipeline:
         retrieval: RetrievalResult,
         *,
         generation_question: str,
+        visitor_sales: bool = False,
     ) -> AsyncIterator[str]:
         if self._generator is None:
             raise GeneratorConfigError("缺少 LLM API key，请在 .env 中配置 DEEPSEEK_API_KEY 或 LLM_API_KEY。")
@@ -68,6 +69,7 @@ class RAGPipeline:
             question=generation_question,
             contexts=retrieval.contexts,
             sources=retrieval.sources,
+            visitor_sales=visitor_sales,
         )
 
     async def run(
@@ -78,6 +80,7 @@ class RAGPipeline:
         generation_question: str | None = None,
         skill_id: str | None = None,
         doc_anchors: Optional[List[tuple[int, Optional[str]]]] = None,
+        visitor_sales: bool = False,
     ) -> ChatResponse:
         retrieval_question = retrieval_question or question
         generation_question = generation_question or question
@@ -92,6 +95,7 @@ class RAGPipeline:
             question=generation_question,
             contexts=retrieval.contexts,
             sources=retrieval.sources,
+            visitor_sales=visitor_sales,
         )
         return ChatResponse(
             answer=answer,
@@ -108,6 +112,7 @@ class RAGPipeline:
         generation_question: str | None = None,
         skill_id: str | None = None,
         doc_anchors: Optional[List[tuple[int, Optional[str]]]] = None,
+        visitor_sales: bool = False,
     ) -> tuple[RetrievalResult, Dict[str, Any], AsyncIterator[str]]:
         retrieval_question = retrieval_question or question
         generation_question = generation_question or question
@@ -118,6 +123,6 @@ class RAGPipeline:
             skill_id=skill_id,
             doc_anchors=doc_anchors,
         )
-        stream = self.stream_answer_tokens(retrieval, generation_question=generation_question)
+        stream = self.stream_answer_tokens(retrieval, generation_question=generation_question, visitor_sales=visitor_sales)
         return retrieval, debug, stream
 

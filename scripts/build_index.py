@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 from app.core.config import settings
 from app.data.yuque_loader import YuqueLoader
-from app.db.repositories import DocumentRepository, QALogRepository
+from app.db.repositories import DocumentRepository, LeadCaptureRepository, QALogRepository
 from app.db.session import DatabaseSessionFactory
 from app.service.qa_service import QAService
 from app.storage.vector_store import VectorStore
@@ -27,6 +27,7 @@ async def main() -> None:
         vector_store=VectorStore(vector_dir=settings.vector_dir),
         document_repository=DocumentRepository(session_factory),
         qa_log_repository=QALogRepository(session_factory),
+        lead_capture_repository=LeadCaptureRepository(session_factory),
     )
     await service.startup()
     docs, chunks = await service.rebuild_index(bootstrap_query=bootstrap_query)

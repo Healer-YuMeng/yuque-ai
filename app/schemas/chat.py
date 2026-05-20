@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class SelectedYuqueDocRef(BaseModel):
@@ -24,6 +24,10 @@ class SourceItem(BaseModel):
 
 class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
+    # visitor_sales：有为 AI 销售咨询（默认）；rag：原知识库问答形态（含参考来源结构）
+    chat_mode: Literal["visitor_sales", "rag"] = "visitor_sales"
+    # 访客会话标识，用于 lead_captures 去重与关联；建议前端每会话 UUID
+    session_id: Optional[str] = Field(default=None, min_length=1, max_length=120)
     # 前端可选：模型与语雀所有者（用于动态路由/作用域）
     model: Optional[str] = Field(default=None, min_length=1, max_length=120)
     owner: Optional[str] = Field(default=None, min_length=1, max_length=120)
@@ -32,12 +36,36 @@ class ChatRequest(BaseModel):
     # 从目录 / @ 选择的多篇文档；优先按 doc_id 拉取正文锚定检索
     selected_yuque_docs: Optional[List[SelectedYuqueDocRef]] = Field(default=None, max_length=20)
 
+    @field_validator("session_id", "model", "owner", "token_profile", mode="before")
+    @classmethod
+    def _empty_str_to_none(cls, value: Any) -> Any:
+        """前端常发 \"\"；Optional+min_length=1 会把空串判为非法，统一视为未传。"""
+        if value == "":
+            return None
+        return value
+
 
 class ChatResponse(BaseModel):
     answer: str
     sources: List[SourceItem]
     fallback_used: bool = False
     debug: Optional[Dict[str, Any]] = None
+
+
+class ChatMessageItem(BaseModel):
+    role: Literal["user", "assistant"]
+    text: str
+    created_at: str
+
+
+class ChatHistoryResponse(BaseModel):
+    session_id: str
+    messages: List[ChatMessageItem]
+
+
+class ResetSessionRequest(BaseModel):
+    session_id: str = Field(..., min_length=1, max_length=120)
+    chat_mode: Literal["visitor_sales", "rag"] = "visitor_sales"
 
 
 class RebuildIndexResponse(BaseModel):

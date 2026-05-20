@@ -12,7 +12,10 @@ from app.core.yuque_credentials import (
 from app.data.mcp_client import YuqueMCPClient
 from app.data.splitter import RecursiveTextSplitter, TextChunk
 from app.data.yuque_loader import YuqueDocument, YuqueLoader, YuqueLoaderError
-from app.db.repositories import DocumentRepository, QALogRepository
+from app.conversation.contact_extractor import extract_contact
+from app.conversation.visitor_prompt import build_visitor_generation_question
+from app.conversation.visitor_profile import detect_visitor_type
+from app.db.repositories import ChatMessageRow, ChatSessionRepository, DocumentRepository, LeadCaptureRepository, QALogRepository
 from app.rag.embedder import BGESmallEmbedder, Embedder, OpenAIEmbedder
 from app.rag.generator import DeepSeekGenerator, Generator, GeneratorConfigError, OpenAIGenerator
 from app.rag.skill_router import route_skill
@@ -71,6 +74,10 @@ def _vision_stage_detail(debug: Optional[Dict[str, Any]]) -> str:
     return "已完成文档插图识读，正在生成回答…"
 
 
+def _is_visitor_sales(chat_mode: Optional[str]) -> bool:
+    return (chat_mode or "visitor_sales") == "visitor_sales"
+
+
 class QAService:
     def __init__(
         self,
@@ -79,11 +86,15 @@ class QAService:
         vector_store: VectorStore,
         document_repository: DocumentRepository,
         qa_log_repository: QALogRepository,
+        lead_capture_repository: LeadCaptureRepository,
+        chat_session_repository: ChatSessionRepository,
     ) -> None:
         self._yuque_loader = yuque_loader
         self._vector_store = vector_store
         self._document_repository = document_repository
         self._qa_log_repository = qa_log_repository
+        self._lead_capture_repository = lead_capture_repository
+        self._chat_session_repository = chat_session_repository
         self._splitter = RecursiveTextSplitter(
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap,
@@ -111,6 +122,8 @@ class QAService:
 
     async def startup(self) -> None:
         await self._document_repository.init_db()
+        # 最小实现：启动时做一次过期清理，避免数据无限增长（默认 7 天）。
+        await self._chat_session_repository.prune_older_than_days(retention_days=7)
 
     async def shutdown(self) -> None:
         await self._yuque_loader.close()
@@ -123,14 +136,34 @@ class QAService:
         owner: Optional[str] = None,
         selected_yuque_docs: Optional[List[SelectedYuqueDocRef]] = None,
         token_profile: Optional[str] = None,
+        chat_mode: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> ChatResponse:
-        skill_route = route_skill(question)
-        skill_id = skill_route.skill_id if skill_route else None
-        generation_question = (
-            f"[skill_id={skill_id}]\n{skill_route.generation_instruction}\n\n用户问题：{question}"
-            if skill_route
-            else question
-        )
+        visitor = _is_visitor_sales(chat_mode)
+        sid = (session_id or "").strip()
+        if sid:
+            await self._chat_session_repository.ensure_session(
+                session_id=sid, chat_mode=(chat_mode or "visitor_sales"), advisor_role="sales"
+            )
+            await self._chat_session_repository.append_message(session_id=sid, role="user", content=question)
+            vt = detect_visitor_type(question)
+            if vt != "unknown":
+                await self._chat_session_repository.update_visitor_type(session_id=sid, visitor_type=vt)
+
+        history = await self._history_block_for_session(sid)
+        if visitor:
+            skill_route = None
+            skill_id: Optional[str] = None
+            generation_question = self._with_history(build_visitor_generation_question(question), history)
+        else:
+            skill_route = route_skill(question)
+            skill_id = skill_route.skill_id if skill_route else None
+            base_q = (
+                f"[skill_id={skill_id}]\n{skill_route.generation_instruction}\n\n用户问题：{question}"
+                if skill_route
+                else question
+            )
+            generation_question = self._with_history(base_q, history)
         anchors = _doc_anchor_pairs(selected_yuque_docs)
         if model is None and owner is None and normalize_yuque_token_profile(token_profile) == "secondary":
             if not secondary_yuque_configured():
@@ -143,6 +176,8 @@ class QAService:
                 generation_question=generation_question,
                 selected_yuque_docs=selected_yuque_docs,
                 token_profile=token_profile,
+                chat_mode=chat_mode,
+                session_id=session_id,
             )
         if model is None and owner is None:
             mode, label = self.runtime_mode()
@@ -153,6 +188,7 @@ class QAService:
                 generation_question=generation_question,
                 skill_id=skill_id,
                 doc_anchors=anchors,
+                visitor_sales=visitor,
             )
             if not settings.expose_source_urls:
                 for source in response.sources:
@@ -166,6 +202,14 @@ class QAService:
                 response.fallback_used,
             )
             await self._qa_log_repository.log_chat(question=question, response=response)
+            if visitor:
+                response = await self._apply_visitor_sales_client_mask(
+                    question=question, session_id=session_id, response=response
+                )
+            if sid:
+                await self._chat_session_repository.append_message(
+                    session_id=sid, role="assistant", content=response.answer
+                )
             return response
 
         response = await self._run_one(
@@ -176,7 +220,11 @@ class QAService:
             generation_question=generation_question,
             selected_yuque_docs=selected_yuque_docs,
             token_profile=token_profile,
+            chat_mode=chat_mode,
+            session_id=session_id,
         )
+        if sid:
+            await self._chat_session_repository.append_message(session_id=sid, role="assistant", content=response.answer)
         return response
 
     async def chat_stream(
@@ -187,14 +235,34 @@ class QAService:
         owner: Optional[str] = None,
         selected_yuque_docs: Optional[List[SelectedYuqueDocRef]] = None,
         token_profile: Optional[str] = None,
+        chat_mode: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        skill_route = route_skill(question)
-        skill_id = skill_route.skill_id if skill_route else None
-        generation_question = (
-            f"[skill_id={skill_id}]\n{skill_route.generation_instruction}\n\n用户问题：{question}"
-            if skill_route
-            else question
-        )
+        visitor = _is_visitor_sales(chat_mode)
+        sid = (session_id or "").strip()
+        if sid:
+            await self._chat_session_repository.ensure_session(
+                session_id=sid, chat_mode=(chat_mode or "visitor_sales"), advisor_role="sales"
+            )
+            await self._chat_session_repository.append_message(session_id=sid, role="user", content=question)
+            vt = detect_visitor_type(question)
+            if vt != "unknown":
+                await self._chat_session_repository.update_visitor_type(session_id=sid, visitor_type=vt)
+
+        history = await self._history_block_for_session(sid)
+        if visitor:
+            skill_route = None
+            skill_id: Optional[str] = None
+            generation_question = self._with_history(build_visitor_generation_question(question), history)
+        else:
+            skill_route = route_skill(question)
+            skill_id = skill_route.skill_id if skill_route else None
+            base_q = (
+                f"[skill_id={skill_id}]\n{skill_route.generation_instruction}\n\n用户问题：{question}"
+                if skill_route
+                else question
+            )
+            generation_question = self._with_history(base_q, history)
         anchors = _doc_anchor_pairs(selected_yuque_docs)
         if model is None and owner is None and normalize_yuque_token_profile(token_profile) == "secondary":
             if not secondary_yuque_configured():
@@ -207,6 +275,8 @@ class QAService:
                 generation_question=generation_question,
                 selected_yuque_docs=selected_yuque_docs,
                 token_profile=token_profile,
+                chat_mode=chat_mode,
+                session_id=session_id,
             ):
                 yield event
             return
@@ -239,7 +309,7 @@ class QAService:
                 retrieval_mode=(debug or {}).get("retrieval_mode"),
             )
             answer_stream = self._pipeline.stream_answer_tokens(
-                retrieval, generation_question=generation_question
+                retrieval, generation_question=generation_question, visitor_sales=visitor
             )
             answer_parts: List[str] = []
             async for token in answer_stream:
@@ -264,6 +334,14 @@ class QAService:
                 response.fallback_used,
             )
             await self._qa_log_repository.log_chat(question=question, response=response)
+            if visitor:
+                response = await self._apply_visitor_sales_client_mask(
+                    question=question, session_id=session_id, response=response
+                )
+            if sid:
+                await self._chat_session_repository.append_message(
+                    session_id=sid, role="assistant", content=response.answer
+                )
             yield {"event": "done", "data": response.model_dump()}
             return
 
@@ -275,13 +353,52 @@ class QAService:
             generation_question=generation_question,
             selected_yuque_docs=selected_yuque_docs,
             token_profile=token_profile,
+            chat_mode=chat_mode,
+            session_id=session_id,
         ):
+            if event.get("event") == "done" and sid:
+                try:
+                    data = event.get("data") or {}
+                    answer = str((data.get("answer") if isinstance(data, dict) else "") or "")
+                    if answer.strip():
+                        await self._chat_session_repository.append_message(
+                            session_id=sid, role="assistant", content=answer
+                        )
+                except Exception:
+                    pass
             yield event
 
     def runtime_mode(self) -> tuple[str, str]:
         if self._embedder is None:
             return "direct_yuque", "语雀直连模式"
         return "rag", "RAG 向量模式"
+
+    async def _apply_visitor_sales_client_mask(
+        self,
+        *,
+        question: str,
+        session_id: Optional[str],
+        response: ChatResponse,
+    ) -> ChatResponse:
+        contact = extract_contact(question)
+        vt = detect_visitor_type(question)
+        vt_s = vt if vt != "unknown" else None
+        lead_saved = False
+        sid = (session_id or "").strip()
+        if contact and sid:
+            lead_saved = await self._lead_capture_repository.try_insert_lead(
+                session_id=sid,
+                contact_type=contact.contact_type,
+                contact_value=contact.value,
+                visitor_type=vt_s,
+            )
+        dbg = dict(response.debug or {})
+        dbg["visitor_sales"] = {
+            "visitor_type": vt,
+            "contact_detected": bool(contact),
+            "lead_saved": lead_saved,
+        }
+        return response.model_copy(update={"sources": [], "debug": dbg})
 
     async def _run_one(
         self,
@@ -293,7 +410,10 @@ class QAService:
         generation_question: str,
         selected_yuque_docs: Optional[List[SelectedYuqueDocRef]] = None,
         token_profile: Optional[str] = None,
+        chat_mode: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> ChatResponse:
+        visitor = _is_visitor_sales(chat_mode)
         # 语雀作用域与向量检索作用域可能不一致：当 owner 非默认作用域时，强制走直连（embedder=None）。
         scope = self._compute_yuque_scope(owner, token_profile)
         embedder_for_retriever = self._embedder_for_profile(token_profile, scope)
@@ -320,6 +440,7 @@ class QAService:
                 generation_question=generation_question,
                 skill_id=skill_id,
                 doc_anchors=anchors,
+                visitor_sales=visitor,
             )
         finally:
             await yuque_loader.close()
@@ -333,6 +454,10 @@ class QAService:
             response.fallback_used,
         )
         await self._qa_log_repository.log_chat(question=question, response=response)
+        if visitor:
+            return await self._apply_visitor_sales_client_mask(
+                question=question, session_id=session_id, response=response
+            )
         return response
 
     async def _run_one_stream(
@@ -345,7 +470,10 @@ class QAService:
         generation_question: str,
         selected_yuque_docs: Optional[List[SelectedYuqueDocRef]] = None,
         token_profile: Optional[str] = None,
+        chat_mode: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> AsyncIterator[dict[str, Any]]:
+        visitor = _is_visitor_sales(chat_mode)
         scope = self._compute_yuque_scope(owner, token_profile)
         embedder_for_retriever = self._embedder_for_profile(token_profile, scope)
         generator = self._build_generator_by_selected_model(model or settings.llm_model)
@@ -396,7 +524,7 @@ class QAService:
                 retrieval_mode=(debug or {}).get("retrieval_mode"),
             )
             answer_stream = pipeline.stream_answer_tokens(
-                retrieval, generation_question=generation_question
+                retrieval, generation_question=generation_question, visitor_sales=visitor
             )
             answer_parts: List[str] = []
             async for token in answer_stream:
@@ -423,11 +551,62 @@ class QAService:
             )
             await self._qa_log_repository.log_chat(question=question, response=response)
             completed = True
+            if visitor:
+                response = await self._apply_visitor_sales_client_mask(
+                    question=question, session_id=session_id, response=response
+                )
             yield {"event": "done", "data": response.model_dump()}
         finally:
             if not completed:
                 logger.info("chat_stream(dyn) ended_before_done owner=%r scope=%r", owner, scope)
             await yuque_loader.close()
+
+    async def list_session_messages(self, *, session_id: str, limit: int) -> List[ChatMessageRow]:
+        sid = (session_id or "").strip()
+        if not sid:
+            return []
+        safe_limit = max(1, min(int(limit), 200))
+        return await self._chat_session_repository.list_recent_messages(session_id=sid, limit=safe_limit)
+
+    async def reset_session(self, *, session_id: str, chat_mode: str = "visitor_sales") -> None:
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        await self._chat_session_repository.reset_session(session_id=sid, chat_mode=chat_mode, advisor_role="sales")
+
+    async def _history_block_for_session(self, session_id: str) -> str:
+        """取最近 10 轮（=20 条消息）作为生成上下文；不用于向量检索。"""
+        sid = (session_id or "").strip()
+        if not sid:
+            return ""
+        msgs = await self._chat_session_repository.list_recent_messages(session_id=sid, limit=20)
+        if not msgs:
+            return ""
+        lines: List[str] = []
+        for m in msgs:
+            role = "用户" if m.role == "user" else "助手"
+            content = (m.content or "").strip()
+            if not content:
+                continue
+            # 防止历史块无限膨胀：每条最多截断
+            if len(content) > 800:
+                content = content[:800] + "…"
+            lines.append(f"{role}：{content}")
+        if not lines:
+            return ""
+        body = "\n".join(lines)
+        return (
+            "【以下为本会话最近对话记录，仅用于你承接上下文与避免重复提问；"
+            "不要逐字复述记录内容，也不要暴露内部分析标签。】\n"
+            + body
+        )
+
+    @staticmethod
+    def _with_history(generation_question: str, history_block: str) -> str:
+        if not history_block.strip():
+            return generation_question
+        q = (generation_question or "").strip()
+        return history_block + "\n\n本轮问题：\n" + q
 
     def _compute_yuque_scope(self, owner: Optional[str], token_profile: Optional[str] = None) -> str:
         default_scope = default_yuque_scope_for_profile(token_profile).strip().strip("/")

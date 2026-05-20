@@ -9,7 +9,17 @@ from app.schemas.chat import ChatResponse, SourceItem
 
 
 class FakeQAService:
-    async def chat(self, question: str, *, model=None, owner=None, selected_yuque_docs=None, token_profile=None) -> ChatResponse:
+    async def chat(
+        self,
+        question: str,
+        *,
+        model=None,
+        owner=None,
+        selected_yuque_docs=None,
+        token_profile=None,
+        chat_mode=None,
+        session_id=None,
+    ) -> ChatResponse:
         return ChatResponse(
             answer=f"回答: {question}",
             fallback_used=False,
@@ -22,8 +32,32 @@ class FakeQAService:
     def runtime_mode(self):
         return "direct_yuque", "语雀直连模式"
 
-    async def chat_stream(self, question: str, *, model=None, owner=None, selected_yuque_docs=None, token_profile=None):
+    async def chat_stream(
+        self,
+        question: str,
+        *,
+        model=None,
+        owner=None,
+        selected_yuque_docs=None,
+        token_profile=None,
+        chat_mode=None,
+        session_id=None,
+    ):
         yield {"event": "done", "data": {"answer": "ok", "sources": [], "fallback_used": False, "debug": {}}}
+
+    async def list_session_messages(self, *, session_id: str, limit: int):
+        class _Row:
+            def __init__(self, role: str, content: str, created_at: str) -> None:
+                self.role = role
+                self.content = content
+                self.created_at = created_at
+
+        if session_id == "s1":
+            return [
+                _Row("user", "你好", "2026-01-01 00:00:00"),
+                _Row("assistant", "你好，有什么想了解的？", "2026-01-01 00:00:01"),
+            ][:limit]
+        return []
 
 
 def build_test_app() -> FastAPI:
@@ -62,6 +96,16 @@ def test_chat_endpoint() -> None:
     assert payload["sources"][0]["title"] == "测试文档"
 
 
+def test_chat_history_endpoint() -> None:
+    client = TestClient(build_test_app())
+
+    r = client.get("/chat/history", params={"session_id": "s1", "limit": 20})
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["session_id"] == "s1"
+    assert [m["role"] for m in payload["messages"]] == ["user", "assistant"]
+
+
 def test_runtime_mode_endpoint() -> None:
     client = TestClient(build_test_app())
 
@@ -73,7 +117,17 @@ def test_runtime_mode_endpoint() -> None:
 
 def test_chat_endpoint_returns_503_for_missing_llm_key() -> None:
     class BrokenQAService(FakeQAService):
-        async def chat(self, question: str, *, model=None, owner=None, selected_yuque_docs=None, token_profile=None) -> ChatResponse:
+        async def chat(
+            self,
+            question: str,
+            *,
+            model=None,
+            owner=None,
+            selected_yuque_docs=None,
+            token_profile=None,
+            chat_mode=None,
+            session_id=None,
+        ) -> ChatResponse:
             raise GeneratorConfigError("缺少 LLM API key。")
 
     app = FastAPI()
@@ -88,7 +142,17 @@ def test_chat_endpoint_returns_503_for_missing_llm_key() -> None:
 
 def test_chat_stream_returns_sse_error_on_llm_connection_failure() -> None:
     class StreamConnFail(FakeQAService):
-        async def chat_stream(self, question: str, *, model=None, owner=None, selected_yuque_docs=None, token_profile=None):
+        async def chat_stream(
+            self,
+            question: str,
+            *,
+            model=None,
+            owner=None,
+            selected_yuque_docs=None,
+            token_profile=None,
+            chat_mode=None,
+            session_id=None,
+        ):
             yield {"event": "stage", "data": {"stage": "generating", "detail": "…"}}
             raise APIConnectionError(request=httpx.Request("POST", "https://api.example/v1"))
 
@@ -119,7 +183,17 @@ def test_chat_stream_returns_friendly_sse_error_on_llm_503() -> None:
     )
 
     class Stream503(FakeQAService):
-        async def chat_stream(self, question: str, *, model=None, owner=None, selected_yuque_docs=None, token_profile=None):
+        async def chat_stream(
+            self,
+            question: str,
+            *,
+            model=None,
+            owner=None,
+            selected_yuque_docs=None,
+            token_profile=None,
+            chat_mode=None,
+            session_id=None,
+        ):
             yield {"event": "stage", "data": {"stage": "generating", "detail": "…"}}
             raise APIStatusError("Service is too busy.", response=resp, body=resp.json())
 
