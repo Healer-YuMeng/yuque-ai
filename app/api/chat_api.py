@@ -25,6 +25,7 @@ from app.schemas.chat import (
     ChatResponse,
     ChatHistoryResponse,
     ChatMessageItem,
+    ResetSessionRequest,
     HealthResponse,
     MCPCapabilitiesResponse,
     RebuildIndexResponse,
@@ -135,6 +136,16 @@ async def chat_history(
         if (r.role in ("user", "assistant") and (r.content or "").strip())
     ]
     return ChatHistoryResponse(session_id=session_id, messages=items)
+
+
+@router.post("/chat/session/reset")
+async def reset_chat_session(
+    request: ResetSessionRequest,
+    qa_service: QAService = Depends(get_qa_service),
+) -> dict[str, str]:
+    """强制清空某个 session 的服务端历史，保证“新会话从零开始”不串话。"""
+    await qa_service.reset_session(session_id=request.session_id, chat_mode=request.chat_mode)
+    return {"status": "ok"}
 
 
 @router.get("/health", response_model=HealthResponse)

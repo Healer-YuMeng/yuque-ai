@@ -568,6 +568,12 @@ class QAService:
         safe_limit = max(1, min(int(limit), 200))
         return await self._chat_session_repository.list_recent_messages(session_id=sid, limit=safe_limit)
 
+    async def reset_session(self, *, session_id: str, chat_mode: str = "visitor_sales") -> None:
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        await self._chat_session_repository.reset_session(session_id=sid, chat_mode=chat_mode, advisor_role="sales")
+
     async def _history_block_for_session(self, session_id: str) -> str:
         """取最近 10 轮（=20 条消息）作为生成上下文；不用于向量检索。"""
         sid = (session_id or "").strip()

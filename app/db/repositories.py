@@ -199,6 +199,23 @@ class ChatSessionRepository:
         finally:
             await conn.close()
 
+    async def reset_session(self, *, session_id: str, chat_mode: str = "visitor_sales", advisor_role: str = "sales") -> None:
+        """清空该 session 的历史消息，并重置会话衍生状态。用于“强制新会话”语义兜底。"""
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        conn = await self._session_factory.connect()
+        try:
+            await conn.execute("DELETE FROM chat_messages WHERE session_id=?", (sid,))
+            await conn.execute(
+                "INSERT OR REPLACE INTO chat_sessions(session_id, chat_mode, advisor_role, visitor_type, created_at, updated_at) "
+                "VALUES (?, ?, ?, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (sid, (chat_mode or "visitor_sales"), (advisor_role or "sales")),
+            )
+            await conn.commit()
+        finally:
+            await conn.close()
+
     async def list_recent_messages(self, *, session_id: str, limit: int) -> List[ChatMessageRow]:
         sid = (session_id or "").strip()
         if not sid or limit <= 0:

@@ -177,7 +177,16 @@ function touchSession(session: SessionState): SessionState {
   return { ...session, updatedAt: Date.now() };
 }
 
+function generateSessionId(): string {
+  const uuid =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `s-${uuid}`;
+}
+
 const SESSIONS_STORAGE_KEY = "rag_frontend_sessions_v2";
+const SESSION_TITLE_SEQ_KEY = "rag_frontend_session_title_seq_v1";
 
 function normalizeSessionForVisitor(s: SessionState): SessionState {
   const flags = {
@@ -227,10 +236,27 @@ function readStoredSessionState(): { sessions: SessionState[]; activeSessionId: 
     if (!raw) return fallback();
     const parsed = JSON.parse(raw) as { activeSessionId?: string; sessions?: SessionState[] };
     if (!parsed?.sessions?.length) return fallback();
-    const sessions = parsed.sessions.map((x) => normalizeSessionForVisitor(x));
+    // 迁移：旧版本会话 id 可能是 s-<timestamp>，容易碰撞并串到服务端历史。
+    // 对“未真正开始聊天”的会话（无 user 消息），自动换新 id，确保新会话一定从零开始。
+    const idMap = new Map<string, string>();
+    const sessions = parsed.sessions.map((x) => {
+      const normalized = normalizeSessionForVisitor(x);
+      const hasUser = normalized.messages.some((m) => m.role === "user" && (m.text || "").trim());
+      if (hasUser) return normalized;
+      const oldId = normalized.id;
+      if (oldId === "default") return normalized;
+      const newId = generateSessionId();
+      idMap.set(oldId, newId);
+      return {
+        ...normalized,
+        id: newId,
+        messages: emptySessionMessages(`welcome-${newId}`),
+      };
+    });
+    const mappedActive = idMap.get(parsed.activeSessionId || "") || parsed.activeSessionId;
     return {
       sessions,
-      activeSessionId: parsed.activeSessionId || sessions[0].id,
+      activeSessionId: mappedActive || sessions[0].id,
     };
   } catch {
     return fallback();
@@ -274,6 +300,8 @@ function App() {
   const questionRef = useRef(question);
   const isStreamingRef = useRef(isStreaming);
   const historyHydratedRef = useRef<Set<string>>(new Set());
+  const resetPendingRef = useRef<Map<string, Promise<void>>>(new Map());
+  const sessionTitleSeqRef = useRef<number | null>(null);
   const [inactivityEpoch, setInactivityEpoch] = useState(0);
   const suggestDebounceTimerRef = useRef<number | null>(null);
   const latestSuggestReqIdRef = useRef(0);
@@ -315,6 +343,20 @@ function App() {
   useEffect(() => {
     activeSessionRef.current = activeSessionId;
   }, [activeSessionId]);
+
+  const setActiveSession = useCallback((sid: string) => {
+    activeSessionRef.current = sid;
+    setActiveSessionId(sid);
+    // 前端兜底：切换到“未开始聊天”的会话时，强制只显示欢迎语，避免 UI 残留造成“看起来复制了其它会话历史”。
+    setSessions((prev) =>
+      prev.map((s) => {
+        if (s.id !== sid) return s;
+        const hasUser = s.messages.some((m) => m.role === "user" && (m.text || "").trim());
+        if (hasUser) return s;
+        return { ...touchSession(s), messages: emptySessionMessages(`welcome-${sid}`) };
+      }),
+    );
+  }, []);
 
   useEffect(() => {
     questionRef.current = question;
@@ -694,14 +736,49 @@ function App() {
     controllerRef.current?.abort();
   };
 
+  const nextSessionTitle = useCallback((): string => {
+    if (sessionTitleSeqRef.current === null) {
+      let raw = "0";
+      try {
+        raw = localStorage.getItem(SESSION_TITLE_SEQ_KEY) || "0";
+      } catch {
+        /* ignore */
+      }
+      const n = Number.parseInt(raw, 10);
+      sessionTitleSeqRef.current = Number.isFinite(n) && n >= 0 ? n : 0;
+    }
+    const next = (sessionTitleSeqRef.current || 0) + 1;
+    sessionTitleSeqRef.current = next;
+    try {
+      localStorage.setItem(SESSION_TITLE_SEQ_KEY, String(next));
+    } catch {
+      /* ignore */
+    }
+    return `新会话 #${next}`;
+  }, []);
+
   const createSession = useCallback(() => {
-    const id = `s-${Date.now()}`;
+    const id = generateSessionId();
+    // 新建会话必须“从零开始”：禁止用服务端历史覆盖该会话的欢迎语
+    historyHydratedRef.current.add(id);
     setSessions((prev) => {
-      const title = `新会话 ${prev.length + 1}`;
+      const title = nextSessionTitle();
       return [{ id, title, updatedAt: Date.now(), messages: emptySessionMessages(`welcome-${id}`) }, ...prev];
     });
-    setActiveSessionId(id);
-  }, []);
+    setActiveSession(id);
+    // 服务端兜底：强制重置该 session，避免任何串话（即便曾经碰撞/复用过）
+    const p = fetch("/chat/session/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: id, chat_mode: "visitor_sales" }),
+    })
+      .then(() => {})
+      .catch(() => {})
+      .finally(() => {
+        resetPendingRef.current.delete(id);
+      });
+    resetPendingRef.current.set(id, p);
+  }, [nextSessionTitle, setActiveSession]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -843,6 +920,15 @@ function App() {
       connectTimer = window.setTimeout(() => {
         controller.abort();
       }, STREAM_CONNECT_MS);
+
+      // 新建会话后会触发服务端 reset：在首条消息发出前，尽量等待 reset 完成，避免串历史。
+      const pendingReset = resetPendingRef.current.get(sessionId);
+      if (pendingReset) {
+        await Promise.race([
+          pendingReset,
+          new Promise<void>((resolve) => window.setTimeout(() => resolve(), 1200)),
+        ]);
+      }
 
       const response = await fetch("/chat/stream", {
         method: "POST",
@@ -1312,7 +1398,7 @@ function App() {
                               className="session-main"
                               onClick={() => {
                                 setOpenSessionMenuId(null);
-                                setActiveSessionId(session.id);
+                                setActiveSession(session.id);
                               }}
                             >
                               <span className="session-title">{session.title}</span>
@@ -1475,7 +1561,7 @@ function App() {
                     </div>
                   </div>
                 ) : (
-                  <div className="chat-list chat-list--thread" ref={chatListRef}>
+                  <div className="chat-list chat-list--thread" ref={chatListRef} key={activeSessionId}>
                     {chatItems.map((item) => (
                       <div className={`msg ${item.role}`} key={item.id}>
                         <div style={{ width: "100%" }}>
