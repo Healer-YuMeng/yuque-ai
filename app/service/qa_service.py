@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import time
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from app.core.config import settings
@@ -13,15 +16,22 @@ from app.data.mcp_client import YuqueMCPClient
 from app.data.splitter import RecursiveTextSplitter, TextChunk
 from app.data.yuque_loader import YuqueDocument, YuqueLoader, YuqueLoaderError
 from app.conversation.contact_extractor import extract_contact
+from app.conversation.lead_nudge_policy import LeadNudgePolicy
+from app.conversation.trial_account_pool import allocate_trial_account, load_trial_accounts
+from app.conversation.v4_lead_outreach import V4LeadOutreach
 from app.conversation.visitor_prompt import build_visitor_generation_question
 from app.conversation.visitor_profile import detect_visitor_type
 from app.db.repositories import ChatMessageRow, ChatSessionRepository, DocumentRepository, LeadCaptureRepository, QALogRepository
+from app.db.profile_repository import ChatSessionProfileRepository
 from app.rag.embedder import BGESmallEmbedder, Embedder, OpenAIEmbedder
 from app.rag.generator import DeepSeekGenerator, Generator, GeneratorConfigError, OpenAIGenerator
 from app.rag.skill_router import route_skill
 from app.rag.pipeline import RAGPipeline
 from app.rag.retriever import Retriever
-from app.schemas.chat import ChatResponse, SelectedYuqueDocRef
+from app.schemas.chat import ChatMediaBundle, ChatResponse, ChatV2Response, SelectedYuqueDocRef, TrialCredentialsResponse
+from app.service.media_answer_orchestrator import MediaAnswerOrchestrator
+from app.service.sales_dialog_orchestrator_v3 import SalesDialogOrchestratorV3
+from app.service.sales_dialog_orchestrator_v4 import SalesDialogOrchestratorV4, _strip_media_urls_from_text
 from app.storage.vector_store import StoredChunk, VectorStore
 from app.core.logger import get_logger
 
@@ -88,6 +98,7 @@ class QAService:
         qa_log_repository: QALogRepository,
         lead_capture_repository: LeadCaptureRepository,
         chat_session_repository: ChatSessionRepository,
+        chat_session_profile_repository: ChatSessionProfileRepository,
     ) -> None:
         self._yuque_loader = yuque_loader
         self._vector_store = vector_store
@@ -119,13 +130,26 @@ class QAService:
             ),
             generator=self._generator,
         )
+        self._guide_doc_titles: List[str] = []
+        self._guide_toc_nodes: List[Dict[str, Any]] = []
+        self._guide_titles_refreshed_at: float = 0.0
+        self._guide_titles_refresh_lock = asyncio.Lock()
+        self._guide_titles_refresh_task: Optional[asyncio.Task[None]] = None
+        self._lead_nudge_policy = LeadNudgePolicy(
+            rounds_threshold=settings.chat_v15_lead_nudge_rounds,
+            stay_seconds_threshold=settings.chat_v15_lead_nudge_stay_s,
+        )
+        self._chat_session_profile_repository = chat_session_profile_repository
 
     async def startup(self) -> None:
         await self._document_repository.init_db()
         # 最小实现：启动时做一次过期清理，避免数据无限增长（默认 7 天）。
         await self._chat_session_repository.prune_older_than_days(retention_days=7)
+        await self._refresh_guide_doc_titles_if_stale(force=True)
+        self._start_guide_titles_refresh_loop()
 
     async def shutdown(self) -> None:
+        await self._stop_guide_titles_refresh_loop()
         await self._yuque_loader.close()
 
     async def chat(
@@ -368,6 +392,264 @@ class QAService:
                     pass
             yield event
 
+    async def chat_v2(
+        self,
+        question: str,
+        *,
+        model: Optional[str] = None,
+        owner: Optional[str] = None,
+        token_profile: Optional[str] = None,
+        chat_mode: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> ChatV2Response:
+        await self._refresh_guide_doc_titles_if_stale()
+        sid = (session_id or "").strip()
+        if sid:
+            await self._chat_session_repository.ensure_session(
+                session_id=sid, chat_mode=(chat_mode or "visitor_sales"), advisor_role="sales"
+            )
+            await self._chat_session_repository.append_message(session_id=sid, role="user", content=question)
+            vt = detect_visitor_type(question)
+            if vt != "unknown":
+                await self._chat_session_repository.update_visitor_type(session_id=sid, visitor_type=vt)
+
+        scope = self._compute_yuque_scope(owner, token_profile)
+        generator = self._build_generator_by_selected_model(model or settings.llm_model)
+        mcp_client = self._build_mcp_client(scope)
+        orchestrator = self._build_media_orchestrator(mcp_client=mcp_client, generator=generator)
+
+        skill_route = route_skill(question)
+        skill_instruction = (
+            skill_route.generation_instruction if skill_route else self._auto_skill_instruction_for_v2(question)
+        )
+        response = await orchestrator.answer(
+            question=question,
+            session_id=sid or None,
+            skill_instruction=skill_instruction,
+        )
+        if sid:
+            await self._chat_session_repository.append_message(
+                session_id=sid, role="assistant", content=response.answer
+            )
+        return response
+
+    async def chat_v2_stream(
+        self,
+        question: str,
+        *,
+        model: Optional[str] = None,
+        owner: Optional[str] = None,
+        token_profile: Optional[str] = None,
+        chat_mode: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        await self._refresh_guide_doc_titles_if_stale()
+        sid = (session_id or "").strip()
+        if sid:
+            await self._chat_session_repository.ensure_session(
+                session_id=sid, chat_mode=(chat_mode or "visitor_sales"), advisor_role="sales"
+            )
+            await self._chat_session_repository.append_message(session_id=sid, role="user", content=question)
+            vt = detect_visitor_type(question)
+            if vt != "unknown":
+                await self._chat_session_repository.update_visitor_type(session_id=sid, visitor_type=vt)
+
+        scope = self._compute_yuque_scope(owner, token_profile)
+        generator = self._build_generator_by_selected_model(model or settings.llm_model)
+        mcp_client = self._build_mcp_client(scope)
+        orchestrator = self._build_media_orchestrator(mcp_client=mcp_client, generator=generator)
+
+        skill_route = route_skill(question)
+        skill_instruction = (
+            skill_route.generation_instruction if skill_route else self._auto_skill_instruction_for_v2(question)
+        )
+        yield _sse_stage("retrieving", "正在检索知识库并聚合多媒体上下文…", mode="mcp_v15")
+        yield _sse_stage("generating", "正在流式生成回答…", mode="mcp_v15")
+        async for event in orchestrator.answer_stream(
+            question=question,
+            session_id=sid or None,
+            skill_instruction=skill_instruction,
+        ):
+            if event.get("event") == "done" and sid:
+                try:
+                    data = event.get("data") or {}
+                    answer = str((data.get("answer") if isinstance(data, dict) else "") or "")
+                    if answer.strip():
+                        await self._chat_session_repository.append_message(
+                            session_id=sid, role="assistant", content=answer
+                        )
+                except Exception:
+                    pass
+            yield event
+
+    async def chat_v3_stream(
+        self,
+        question: str,
+        *,
+        model: Optional[str] = None,
+        owner: Optional[str] = None,
+        token_profile: Optional[str] = None,
+        chat_mode: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """V3：会话画像 + 兴趣推荐 + follow-up 优先答复（SSE）。"""
+        await self._refresh_guide_doc_titles_if_stale()
+        sid = (session_id or "").strip()
+        if sid:
+            await self._chat_session_repository.ensure_session(
+                session_id=sid, chat_mode=(chat_mode or "visitor_sales"), advisor_role="sales"
+            )
+            await self._chat_session_repository.append_message(session_id=sid, role="user", content=question)
+
+        scope = self._compute_yuque_scope(owner, token_profile)
+        generator = self._build_generator_by_selected_model(model or settings.llm_model)
+        mcp_client = self._build_mcp_client(scope)
+        orch = SalesDialogOrchestratorV3(
+            mcp_client=mcp_client,
+            generator=generator,
+            profile_repo=self._chat_session_profile_repository,
+            toc_nodes=self._guide_toc_nodes,
+        )
+
+        history = await self._chat_session_repository.list_recent_messages(session_id=sid, limit=20) if sid else []
+        answer_parts: List[str] = []
+        async for event in orch.answer_stream(question=question, session_id=sid, history=history):
+            if event.get("event") == "token":
+                try:
+                    tok = str((event.get("data") or {}).get("token") or "")
+                    if tok:
+                        answer_parts.append(tok)
+                except Exception:
+                    pass
+            if event.get("event") == "done":
+                # 用累计 token 覆盖 answer，确保前端/存储一致
+                data = event.get("data") or {}
+                if isinstance(data, dict):
+                    data["answer"] = "".join(answer_parts).strip() or str(data.get("answer") or "")
+                if sid:
+                    try:
+                        ans = str(data.get("answer") or "")
+                        if ans.strip():
+                            await self._chat_session_repository.append_message(session_id=sid, role="assistant", content=ans)
+                    except Exception:
+                        pass
+                yield {"event": "done", "data": data}
+                continue
+            yield event
+
+    async def chat_v4_stream(
+        self,
+        question: str,
+        *,
+        model: Optional[str] = None,
+        owner: Optional[str] = None,
+        token_profile: Optional[str] = None,
+        chat_mode: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """V4：目录状态机 + 目录内关联讲解（SSE）。"""
+        await self._refresh_guide_doc_titles_if_stale()
+        sid = (session_id or "").strip()
+        if sid:
+            await self._chat_session_repository.ensure_session(
+                session_id=sid, chat_mode=(chat_mode or "visitor_sales"), advisor_role="sales"
+            )
+            await self._chat_session_repository.append_message(session_id=sid, role="user", content=question)
+
+        scope = self._compute_yuque_scope(owner, token_profile)
+        generator = self._build_generator_by_selected_model(model or settings.llm_model)
+        mcp_client = self._build_mcp_client(scope)
+        lead_outreach = V4LeadOutreach(
+            lead_policy=self._lead_nudge_policy,
+            lead_capture_repository=self._lead_capture_repository,
+        )
+        orch = SalesDialogOrchestratorV4(
+            mcp_client=mcp_client,
+            generator=generator,
+            profile_repo=self._chat_session_profile_repository,
+            toc_nodes=self._guide_toc_nodes,
+            lead_outreach=lead_outreach,
+        )
+
+        history = await self._chat_session_repository.list_recent_messages(session_id=sid, limit=20) if sid else []
+        answer_parts: List[str] = []
+        async for event in orch.answer_stream(question=question, session_id=sid, history=history):
+            if event.get("event") == "token":
+                try:
+                    tok = str((event.get("data") or {}).get("token") or "")
+                    if tok:
+                        answer_parts.append(tok)
+                except Exception:
+                    pass
+            if event.get("event") == "done":
+                data = event.get("data") or {}
+                if isinstance(data, dict):
+                    ans = "".join(answer_parts).strip() or str(data.get("answer") or "")
+                    media_raw = data.get("media")
+                    if media_raw and ans:
+                        try:
+                            bundle = (
+                                ChatMediaBundle.model_validate(media_raw)
+                                if isinstance(media_raw, dict)
+                                else media_raw
+                            )
+                            ans = _strip_media_urls_from_text(ans, bundle)
+                        except Exception:
+                            pass
+                    data["answer"] = ans
+                if sid:
+                    try:
+                        ans = str(data.get("answer") or "")
+                        if ans.strip():
+                            await self._chat_session_repository.append_message(
+                                session_id=sid, role="assistant", content=ans
+                            )
+                    except Exception:
+                        pass
+                yield {"event": "done", "data": data}
+                continue
+            yield event
+
+    async def issue_v4_trial_credentials(self, *, session_id: str) -> TrialCredentialsResponse:
+        sid = (session_id or "").strip()
+        if not sid:
+            return TrialCredentialsResponse(ok=False, message="缺少会话标识。")
+        accounts = load_trial_accounts()
+        if not accounts:
+            return TrialCredentialsResponse(ok=False, message="暂未配置试用账号，请联系顾问。")
+        profile = await self._chat_session_profile_repository.get_profile(session_id=sid)
+        wants = False
+        if profile and isinstance(profile.interests, dict):
+            lead = profile.interests.get("_lead")
+            if isinstance(lead, dict):
+                wants = bool(lead.get("wants_trial"))
+        if not wants:
+            return TrialCredentialsResponse(
+                ok=False,
+                message="请先说明希望申请测试或试用，我再为您开通试用账号。",
+            )
+        picked = allocate_trial_account(sid, accounts)
+        if not picked:
+            return TrialCredentialsResponse(ok=False, message="试用账号分配失败，请稍后重试。")
+        return TrialCredentialsResponse(
+            ok=True,
+            username=picked.username,
+            password=picked.password,
+            label=picked.label,
+            message="以下为您的试用账号，请妥善保管。",
+        )
+
+    @staticmethod
+    def _auto_skill_instruction_for_v2(question: str) -> str:
+        q = (question or "").strip()
+        if not q:
+            return ""
+        if any(k in q for k in ("怎么", "如何", "步骤", "流程", "上手")):
+            return "请优先给出可执行步骤，并补充适用场景与注意事项。"
+        if any(k in q for k in ("案例", "介绍", "了解", "看看", "是什么", "功能")):
+            return "请先给出简洁总览，再给出2-3个可继续深入的问题方向。"
+        return ""
+
     def runtime_mode(self) -> tuple[str, str]:
         if self._embedder is None:
             return "direct_yuque", "语雀直连模式"
@@ -574,6 +856,30 @@ class QAService:
             return
         await self._chat_session_repository.reset_session(session_id=sid, chat_mode=chat_mode, advisor_role="sales")
 
+    def guide_titles_state(self) -> dict[str, Any]:
+        refresh_s = max(0, int(settings.chat_v15_guide_refresh_s))
+        age_s: Optional[float] = None
+        if self._guide_titles_refreshed_at > 0:
+            age_s = max(0.0, time.monotonic() - self._guide_titles_refreshed_at)
+        nodes = self._build_guide_toc_tree()
+        max_level = 0
+        for node in self._guide_toc_nodes:
+            try:
+                max_level = max(max_level, int(node.get("level") or 0))
+            except Exception:
+                continue
+        return {
+            "v15_enabled": bool(settings.chat_v15_enabled),
+            "count": len(self._guide_doc_titles),
+            "titles": list(self._guide_doc_titles),
+            "total_nodes": len(self._guide_toc_nodes),
+            "root_nodes": len(nodes),
+            "max_level": max_level,
+            "nodes": nodes,
+            "refresh_interval_s": refresh_s,
+            "refreshed_seconds_ago": age_s,
+        }
+
     async def _history_block_for_session(self, session_id: str) -> str:
         """取最近 10 轮（=20 条消息）作为生成上下文；不用于向量检索。"""
         sid = (session_id or "").strip()
@@ -607,6 +913,169 @@ class QAService:
             return generation_question
         q = (generation_question or "").strip()
         return history_block + "\n\n本轮问题：\n" + q
+
+    def _build_media_orchestrator(
+        self,
+        *,
+        mcp_client: YuqueMCPClient,
+        generator: Generator,
+    ) -> MediaAnswerOrchestrator:
+        return MediaAnswerOrchestrator(
+            mcp_client=mcp_client,
+            generator=generator,
+            lead_policy=self._lead_nudge_policy,
+            lead_capture_repository=self._lead_capture_repository,
+            chat_session_repository=self._chat_session_repository,
+            max_images=settings.chat_v15_max_images,
+            max_videos=settings.chat_v15_max_videos,
+            max_docs=settings.chat_v15_max_docs,
+            prefetched_titles=self._guide_doc_titles,
+            prefetched_toc_nodes=self._guide_toc_nodes,
+            image_rerank_mode=("rule" if settings.chat_v15_image_rerank_mode == "rule" else "text_rerank"),
+        )
+
+    async def _warmup_guide_doc_titles(self) -> None:
+        """启动时预加载语雀目录标题，用于 V1.5 的提问引导。"""
+        titles: List[str] = []
+        toc_nodes_data: List[Dict[str, Any]] = []
+        scope = (settings.yuque_scope or "").strip().strip("/")
+        if not scope:
+            self._guide_doc_titles = []
+            self._guide_toc_nodes = []
+            return
+        try:
+            toc_nodes = await self._yuque_loader.get_book_toc(book=scope)
+            for node in toc_nodes:
+                title = (getattr(node, "title", "") or "").strip()
+                if not title:
+                    continue
+                raw_level = getattr(node, "level", 1)
+                try:
+                    level = max(1, int(raw_level or 1))
+                except Exception:
+                    level = 1
+                toc_nodes_data.append(
+                    {
+                        "uuid": str(getattr(node, "uuid", "") or ""),
+                        "title": title,
+                        "level": level,
+                        "parent_uuid": str(getattr(node, "parent_uuid", "") or ""),
+                        "node_type": str(getattr(node, "type", "") or ""),
+                        "url": (getattr(node, "url", "") or "").strip() or None,
+                        "doc_id": getattr(node, "doc_id", None),
+                    }
+                )
+                titles.append(title)
+                if len(titles) >= 80:
+                    break
+        except Exception:
+            titles = []
+            toc_nodes_data = []
+        if not titles:
+            try:
+                docs = await self._yuque_loader.list_docs(book=scope, offset=0, limit=80)
+                titles = [(getattr(d, "title", "") or "").strip() for d in docs]
+                toc_nodes_data = []
+                for idx, d in enumerate(docs):
+                    title = (getattr(d, "title", "") or "").strip()
+                    if not title:
+                        continue
+                    doc_id = getattr(d, "id", None)
+                    node_uuid = f"doc-{doc_id or idx}"
+                    toc_nodes_data.append(
+                        {
+                            "uuid": node_uuid,
+                            "title": title,
+                            "level": 1,
+                            "parent_uuid": "",
+                            "node_type": "doc",
+                            "url": (getattr(d, "url", "") or "").strip() or None,
+                            "doc_id": doc_id,
+                        }
+                    )
+            except Exception:
+                titles = []
+                toc_nodes_data = []
+        seen: set[str] = set()
+        dedup: List[str] = []
+        for t in titles:
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            dedup.append(t)
+        self._guide_doc_titles = dedup[:80]
+        self._guide_toc_nodes = toc_nodes_data[:200]
+        self._guide_titles_refreshed_at = time.monotonic()
+
+    def _build_guide_toc_tree(self) -> List[Dict[str, Any]]:
+        if not self._guide_toc_nodes:
+            return []
+        nodes: List[Dict[str, Any]] = []
+        by_uuid: Dict[str, Dict[str, Any]] = {}
+        for item in self._guide_toc_nodes:
+            node = {
+                "uuid": str(item.get("uuid") or ""),
+                "title": str(item.get("title") or ""),
+                "level": int(item.get("level") or 1),
+                "parent_uuid": str(item.get("parent_uuid") or ""),
+                "node_type": str(item.get("node_type") or ""),
+                "url": item.get("url"),
+                "doc_id": item.get("doc_id"),
+                "children": [],
+            }
+            nodes.append(node)
+            if node["uuid"] and node["uuid"] not in by_uuid:
+                by_uuid[node["uuid"]] = node
+        roots: List[Dict[str, Any]] = []
+        for node in nodes:
+            parent_uuid = node["parent_uuid"]
+            if parent_uuid and parent_uuid in by_uuid and parent_uuid != node["uuid"]:
+                by_uuid[parent_uuid]["children"].append(node)
+                continue
+            roots.append(node)
+        return roots
+
+    async def _refresh_guide_doc_titles_if_stale(self, *, force: bool = False) -> None:
+        refresh_s = max(0, int(settings.chat_v15_guide_refresh_s))
+        now = time.monotonic()
+        if not force and refresh_s > 0 and self._guide_doc_titles:
+            if (now - self._guide_titles_refreshed_at) < float(refresh_s):
+                return
+        async with self._guide_titles_refresh_lock:
+            now = time.monotonic()
+            if not force and refresh_s > 0 and self._guide_doc_titles:
+                if (now - self._guide_titles_refreshed_at) < float(refresh_s):
+                    return
+            await self._warmup_guide_doc_titles()
+
+    def _start_guide_titles_refresh_loop(self) -> None:
+        refresh_s = max(0, int(settings.chat_v15_guide_refresh_s))
+        if refresh_s <= 0:
+            logger.info("guide_titles_auto_refresh_disabled interval_s=%s", refresh_s)
+            return
+        if self._guide_titles_refresh_task and not self._guide_titles_refresh_task.done():
+            return
+        self._guide_titles_refresh_task = asyncio.create_task(
+            self._guide_titles_refresh_loop(refresh_s),
+            name="guide-titles-refresh",
+        )
+
+    async def _stop_guide_titles_refresh_loop(self) -> None:
+        task = self._guide_titles_refresh_task
+        self._guide_titles_refresh_task = None
+        if not task:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    async def _guide_titles_refresh_loop(self, refresh_s: int) -> None:
+        while True:
+            await asyncio.sleep(refresh_s)
+            try:
+                await self._refresh_guide_doc_titles_if_stale(force=True)
+            except Exception as exc:
+                logger.warning("guide_titles_auto_refresh_failed err=%s", exc)
 
     def _compute_yuque_scope(self, owner: Optional[str], token_profile: Optional[str] = None) -> str:
         default_scope = default_yuque_scope_for_profile(token_profile).strip().strip("/")

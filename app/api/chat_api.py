@@ -23,6 +23,17 @@ from app.schemas.docs import DocMeta, DocSuggestRequest, DocSuggestResponse
 from app.schemas.chat import (
     ChatRequest,
     ChatResponse,
+    ChatV2Request,
+    ChatV2Response,
+    ChatV3Request,
+    ChatV3Response,
+    ChatV3CapabilitiesResponse,
+    ChatV4Request,
+    ChatV4Response,
+    ChatV4CapabilitiesResponse,
+    TrialCredentialsRequest,
+    TrialCredentialsResponse,
+    GuideDocTitlesResponse,
     ChatHistoryResponse,
     ChatMessageItem,
     ResetSessionRequest,
@@ -218,6 +229,223 @@ async def chat_stream(request: ChatRequest, qa_service: QAService = Depends(get_
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+@router.post("/chat/v2", response_model=ChatV2Response)
+async def chat_v2(request: ChatV2Request, qa_service: QAService = Depends(get_qa_service)) -> ChatV2Response:
+    if not settings.chat_v15_enabled:
+        raise HTTPException(status_code=503, detail="V1.5 多媒体链路未开启，请先设置 CHAT_V15_ENABLED=true。")
+    try:
+        _ensure_yuque_token_for_profile(request.token_profile)
+        return await qa_service.chat_v2(
+            request.question,
+            model=request.model,
+            owner=request.owner,
+            token_profile=request.token_profile,
+            chat_mode=request.chat_mode,
+            session_id=request.session_id,
+        )
+    except (GeneratorConfigError, YuqueLoaderError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/chat/v2/stream")
+async def chat_v2_stream(request: ChatV2Request, qa_service: QAService = Depends(get_qa_service)) -> StreamingResponse:
+    async def event_generator():
+        if not settings.chat_v15_enabled:
+            payload = {"message": "V1.5 多媒体链路未开启，请先设置 CHAT_V15_ENABLED=true。"}
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            return
+        try:
+            _ensure_yuque_token_for_profile(request.token_profile)
+            async for item in qa_service.chat_v2_stream(
+                request.question,
+                model=request.model,
+                owner=request.owner,
+                token_profile=request.token_profile,
+                chat_mode=request.chat_mode,
+                session_id=request.session_id,
+            ):
+                yield (
+                    f"event: {item['event']}\n"
+                    f"data: {json.dumps(item['data'], ensure_ascii=False)}\n\n"
+                )
+        except (GeneratorConfigError, YuqueLoaderError) as exc:
+            payload = {"message": str(exc)}
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        except (APIConnectionError, APITimeoutError, APIError, RateLimitError) as exc:
+            logger.warning("chat_v2_stream_llm_client_error err=%s", exc)
+            payload = {"message": _chat_stream_error_message(exc)}
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        except Exception:
+            logger.exception("chat_v2_stream_unhandled")
+            payload = {"message": "V1.5 流式问答失败，请稍后重试。"}
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@router.get("/chat/v2/guide-titles", response_model=GuideDocTitlesResponse)
+async def chat_v2_guide_titles(qa_service: QAService = Depends(get_qa_service)) -> GuideDocTitlesResponse:
+    data = qa_service.guide_titles_state()
+    return GuideDocTitlesResponse(**data)
+
+
+@router.get("/chat/v3/capabilities", response_model=ChatV3CapabilitiesResponse)
+async def chat_v3_capabilities(qa_service: QAService = Depends(get_qa_service)) -> ChatV3CapabilitiesResponse:
+    data = qa_service.guide_titles_state()
+    return ChatV3CapabilitiesResponse(
+        enabled=bool(settings.chat_v3_enabled),
+        toc_loaded=bool((data.get("total_nodes") or 0) > 0),
+        profile_enabled=True,
+    )
+
+
+@router.post("/chat/v3", response_model=ChatV3Response)
+async def chat_v3(request: ChatV3Request, qa_service: QAService = Depends(get_qa_service)) -> ChatV3Response:
+    if not settings.chat_v3_enabled:
+        raise HTTPException(status_code=503, detail="V3 链路未开启，请先设置 CHAT_V3_ENABLED=true。")
+    try:
+        _ensure_yuque_token_for_profile(request.token_profile)
+        # 非流式：复用 stream 结果拼装（简单实现）
+        answer = ""
+        async for item in qa_service.chat_v3_stream(
+            request.question,
+            model=request.model,
+            owner=request.owner,
+            token_profile=request.token_profile,
+            chat_mode=request.chat_mode,
+            session_id=request.session_id,
+        ):
+            if item.get("event") == "token":
+                answer += str((item.get("data") or {}).get("token") or "")
+            if item.get("event") == "done":
+                data = item.get("data") or {}
+                if isinstance(data, dict):
+                    data["answer"] = answer.strip() or str(data.get("answer") or "")
+                    return ChatV3Response(**data)
+        return ChatV3Response(answer=answer or "未生成回答。", sources=[], fallback_used=True)
+    except (GeneratorConfigError, YuqueLoaderError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/chat/v3/stream")
+async def chat_v3_stream(request: ChatV3Request, qa_service: QAService = Depends(get_qa_service)) -> StreamingResponse:
+    async def event_generator():
+        if not settings.chat_v3_enabled:
+            payload = {"message": "V3 链路未开启，请先设置 CHAT_V3_ENABLED=true。"}
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            return
+        try:
+            _ensure_yuque_token_for_profile(request.token_profile)
+            async for item in qa_service.chat_v3_stream(
+                request.question,
+                model=request.model,
+                owner=request.owner,
+                token_profile=request.token_profile,
+                chat_mode=request.chat_mode,
+                session_id=request.session_id,
+            ):
+                yield (
+                    f"event: {item['event']}\n"
+                    f"data: {json.dumps(item['data'], ensure_ascii=False)}\n\n"
+                )
+        except (GeneratorConfigError, YuqueLoaderError) as exc:
+            payload = {"message": str(exc)}
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        except (APIConnectionError, APITimeoutError, APIError, RateLimitError) as exc:
+            logger.warning("chat_v3_stream_llm_client_error err=%s", exc)
+            payload = {"message": _chat_stream_error_message(exc)}
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        except Exception:
+            logger.exception("chat_v3_stream_unhandled")
+            payload = {"message": "V3 流式问答失败，请稍后重试。"}
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@router.get("/chat/v4/capabilities", response_model=ChatV4CapabilitiesResponse)
+async def chat_v4_capabilities(qa_service: QAService = Depends(get_qa_service)) -> ChatV4CapabilitiesResponse:
+    data = qa_service.guide_titles_state()
+    return ChatV4CapabilitiesResponse(
+        enabled=bool(settings.chat_v4_enabled),
+        toc_loaded=bool((data.get("total_nodes") or 0) > 0),
+        catalog_state_enabled=True,
+    )
+
+
+@router.post("/chat/v4", response_model=ChatV4Response)
+async def chat_v4(request: ChatV4Request, qa_service: QAService = Depends(get_qa_service)) -> ChatV4Response:
+    if not settings.chat_v4_enabled:
+        raise HTTPException(status_code=503, detail="V4 链路未开启，请先设置 CHAT_V4_ENABLED=true。")
+    try:
+        _ensure_yuque_token_for_profile(request.token_profile)
+        answer = ""
+        async for item in qa_service.chat_v4_stream(
+            request.question,
+            model=request.model,
+            owner=request.owner,
+            token_profile=request.token_profile,
+            chat_mode=request.chat_mode,
+            session_id=request.session_id,
+        ):
+            if item.get("event") == "token":
+                answer += str((item.get("data") or {}).get("token") or "")
+            if item.get("event") == "done":
+                data = item.get("data") or {}
+                if isinstance(data, dict):
+                    data["answer"] = answer.strip() or str(data.get("answer") or "")
+                    return ChatV4Response(**data)
+        return ChatV4Response(answer=answer or "未生成回答。", sources=[], fallback_used=True)
+    except (GeneratorConfigError, YuqueLoaderError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/chat/v4/stream")
+async def chat_v4_stream(request: ChatV4Request, qa_service: QAService = Depends(get_qa_service)) -> StreamingResponse:
+    async def event_generator():
+        if not settings.chat_v4_enabled:
+            payload = {"message": "V4 链路未开启，请先设置 CHAT_V4_ENABLED=true。"}
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            return
+        try:
+            _ensure_yuque_token_for_profile(request.token_profile)
+            async for item in qa_service.chat_v4_stream(
+                request.question,
+                model=request.model,
+                owner=request.owner,
+                token_profile=request.token_profile,
+                chat_mode=request.chat_mode,
+                session_id=request.session_id,
+            ):
+                yield (
+                    f"event: {item['event']}\n"
+                    f"data: {json.dumps(item['data'], ensure_ascii=False)}\n\n"
+                )
+        except (GeneratorConfigError, YuqueLoaderError) as exc:
+            payload = {"message": str(exc)}
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        except (APIConnectionError, APITimeoutError, APIError, RateLimitError) as exc:
+            logger.warning("chat_v4_stream_llm_client_error err=%s", exc)
+            payload = {"message": _chat_stream_error_message(exc)}
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        except Exception:
+            logger.exception("chat_v4_stream_unhandled")
+            payload = {"message": "V4 流式问答失败，请稍后重试。"}
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@router.post("/chat/v4/trial-credentials", response_model=TrialCredentialsResponse)
+async def chat_v4_trial_credentials(
+    request: TrialCredentialsRequest,
+    qa_service: QAService = Depends(get_qa_service),
+) -> TrialCredentialsResponse:
+    if not settings.chat_v4_enabled:
+        raise HTTPException(status_code=503, detail="V4 链路未开启。")
+    return await qa_service.issue_v4_trial_credentials(session_id=request.session_id)
+
+
 @router.post("/index/rebuild", response_model=RebuildIndexResponse)
 async def rebuild_index(qa_service: QAService = Depends(get_qa_service)) -> RebuildIndexResponse:
     docs, chunks = await qa_service.rebuild_index(bootstrap_query="退款")
@@ -260,6 +488,7 @@ def _toc_node_to_doc_meta(node: YuqueTocNode) -> DocMeta:
         url=node.url or None,
         updated_at=None,
         toc_uuid=node.uuid or None,
+        toc_parent_uuid=node.parent_uuid or None,
         toc_level=node.level,
         toc_kind=kind,
         toc_selectable=is_doc,

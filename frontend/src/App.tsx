@@ -7,6 +7,7 @@ import { normalizeMarkdownAutolinks } from "./markdownAutolink";
 import {
   INACTIVITY_MS,
   INACTIVITY_REMINDER_TEXT,
+  VISITOR_WELCOME_TEXT,
   VISITOR_QUICK_QUESTIONS,
   looksLikeContactInUserMessage,
   looksLikeDeclineFollowup,
@@ -19,6 +20,56 @@ const STREAM_READ_IDLE_MS = 120_000;
 const STREAM_CONNECT_MS = 45_000;
 /** 超过该秒数后显示「可能较慢」说明 */
 const STREAM_SLOW_HINT_SEC = 20;
+const CHAT_V2_ENV_ENABLED = String(import.meta.env.VITE_CHAT_V2_ENABLED ?? "false").toLowerCase() === "true";
+const CHAT_V3_ENV_ENABLED = String(import.meta.env.VITE_CHAT_V3_ENABLED ?? "false").toLowerCase() === "true";
+const CHAT_V4_ENV_ENABLED = String(import.meta.env.VITE_CHAT_V4_ENABLED ?? "false").toLowerCase() === "true";
+/** 是否为访客专用入口：/visitor 开头的路径 */
+const IS_VISITOR_ROUTE =
+  typeof window !== "undefined" && window.location && window.location.pathname.startsWith("/visitor");
+const FOCUS_SCENE_ITEMS = ["人工智能通识教育", "智能招生", "跨学科项目化学习", "学校AI场景定制"] as const;
+/** 开发者侧栏（运行追踪）；生产构建建议 VITE_SHOW_DEV_PANEL=false
+ * 访客入口（/visitor）下强制关闭开发者面板。
+ */
+const SHOW_DEV_PANEL =
+  !IS_VISITOR_ROUTE &&
+  String(import.meta.env.VITE_SHOW_DEV_PANEL ?? "true").toLowerCase() === "true";
+
+type TurnTraceMcpCall = {
+  tool: string;
+  query?: string;
+  doc_id?: string;
+  title?: string;
+  hit_count?: number;
+  body_chars?: number;
+};
+
+type TurnTraceSkill = {
+  skill_id: string;
+  reason?: string;
+};
+
+type TurnTraceDocument = {
+  doc_id?: string;
+  title?: string;
+  role?: string;
+  source_type?: string;
+  snippet?: string;
+};
+
+type TurnTracePayload = {
+  pipeline?: string;
+  catalog_path?: string[];
+  dialog_level?: number;
+  mcp_calls?: TurnTraceMcpCall[];
+  skills?: TurnTraceSkill[];
+  documents?: TurnTraceDocument[];
+};
+
+function parseTurnTrace(debug: Record<string, unknown> | null | undefined): TurnTracePayload | null {
+  const raw = debug?.turn_trace;
+  if (!raw || typeof raw !== "object") return null;
+  return raw as TurnTracePayload;
+}
 
 async function readStreamChunkWithIdle(
   reader: ReadableStreamDefaultReader<Uint8Array>,
@@ -57,11 +108,27 @@ type ChatItem = {
   id: string;
   role: Role;
   text: string;
+  media?: ChatMediaBundle;
   debug?: string;
   /** 流式阶段提示（来自 SSE event: stage），完成或出错后清除 */
   streamStage?: string;
   /** 本轮流式已等待秒数（前端计时，完成或出错后清除） */
   streamElapsedSec?: number;
+  /** V4：是否展示「申请测试账号」按钮 */
+  trialApplyAvailable?: boolean;
+  trialCredentialsShown?: boolean;
+};
+
+type ChatMediaItem = {
+  url: string;
+  title?: string;
+  doc_title?: string;
+  doc_id?: string | null;
+};
+
+type ChatMediaBundle = {
+  images: ChatMediaItem[];
+  videos: ChatMediaItem[];
 };
 
 type SessionState = {
@@ -101,6 +168,7 @@ type DocMeta = {
   url?: string | null;
   updated_at?: string | null;
   toc_uuid?: string | null;
+  toc_parent_uuid?: string | null;
   toc_level?: number | null;
   toc_kind?: string | null;
   toc_selectable?: boolean | null;
@@ -108,6 +176,10 @@ type DocMeta = {
 
 function docMetaSelectable(doc: DocMeta): boolean {
   return doc.toc_selectable !== false;
+}
+
+function normalizeTocLevel(level: number | null | undefined): number {
+  return Math.max(1, Math.min(3, level ?? 1));
 }
 
 function firstSelectableDocIndex(docs: DocMeta[]): number {
@@ -159,6 +231,32 @@ function parseSseEvent(block: string): { event: string; data: string } {
   return { event, data };
 }
 
+function parseChatMedia(input: unknown): ChatMediaBundle | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const raw = input as { images?: unknown; videos?: unknown };
+  const normalize = (value: unknown): ChatMediaItem[] => {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((item) => {
+        if (!item || typeof item !== "object") return null;
+        const x = item as Record<string, unknown>;
+        const url = typeof x.url === "string" ? x.url.trim() : "";
+        if (!url) return null;
+        return {
+          url,
+          title: typeof x.title === "string" ? x.title : "",
+          doc_title: typeof x.doc_title === "string" ? x.doc_title : "",
+          doc_id: typeof x.doc_id === "string" ? x.doc_id : null,
+        } as ChatMediaItem;
+      })
+      .filter((x): x is ChatMediaItem => Boolean(x));
+  };
+  const images = normalize(raw.images);
+  const videos = normalize(raw.videos);
+  if (images.length === 0 && videos.length === 0) return undefined;
+  return { images, videos };
+}
+
 /** 访客销售：新会话首条为 AI 欢迎语 */
 function emptySessionMessages(welcomeId: string): ChatItem[] {
   return visitorWelcomeMessages(welcomeId);
@@ -187,6 +285,64 @@ function generateSessionId(): string {
 
 const SESSIONS_STORAGE_KEY = "rag_frontend_sessions_v2";
 const SESSION_TITLE_SEQ_KEY = "rag_frontend_session_title_seq_v1";
+/** localStorage 最多保留会话数，避免长期堆积占满浏览器配额 */
+const MAX_STORED_SESSIONS = 40;
+/** 单会话最多持久化消息条数 */
+const MAX_MESSAGES_PER_SESSION = 100;
+/** 流式 token 批量刷 UI 间隔（毫秒），避免逐字 setState */
+const STREAM_FLUSH_MS = 48;
+/** 会话写入 localStorage 防抖（毫秒） */
+const STORAGE_DEBOUNCE_MS = 800;
+
+function sanitizeMessageForStorage(m: ChatItem): ChatItem {
+  const copy = { ...m };
+  delete copy.streamStage;
+  delete copy.streamElapsedSec;
+  return copy;
+}
+
+function sanitizeSessionsForStorage(
+  sessions: SessionState[],
+  activeSessionId: string,
+): { activeSessionId: string; sessions: SessionState[] } {
+  const byRecent = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt);
+  let trimmed = byRecent.slice(0, MAX_STORED_SESSIONS);
+  if (activeSessionId && !trimmed.some((s) => s.id === activeSessionId)) {
+    const active = sessions.find((s) => s.id === activeSessionId);
+    if (active) {
+      trimmed = [active, ...trimmed.slice(0, MAX_STORED_SESSIONS - 1)];
+    }
+  }
+  return {
+    activeSessionId,
+    sessions: trimmed.map((s) => ({
+      ...s,
+      messages: s.messages.slice(-MAX_MESSAGES_PER_SESSION).map(sanitizeMessageForStorage),
+    })),
+  };
+}
+
+function persistSessionsToStorage(sessions: SessionState[], activeSessionId: string): void {
+  if (!sessions.length) return;
+  const payload = sanitizeSessionsForStorage(sessions, activeSessionId);
+  try {
+    localStorage.setItem(SESSIONS_STORAGE_KEY, JSON.stringify(payload));
+  } catch {
+    // 配额不足时再裁一轮
+    const emergency = {
+      activeSessionId: payload.activeSessionId,
+      sessions: payload.sessions.slice(0, Math.max(5, Math.floor(MAX_STORED_SESSIONS / 2))).map((s) => ({
+        ...s,
+        messages: s.messages.slice(-30).map(sanitizeMessageForStorage),
+      })),
+    };
+    try {
+      localStorage.setItem(SESSIONS_STORAGE_KEY, JSON.stringify(emergency));
+    } catch {
+      /* 仍失败则放弃写入，避免拖垮页面 */
+    }
+  }
+}
 
 function normalizeSessionForVisitor(s: SessionState): SessionState {
   const flags = {
@@ -210,6 +366,49 @@ function formatUnknownDebug(v: unknown): string {
   } catch {
     return String(v);
   }
+}
+
+function formatSessionTranscript(session: SessionState): string {
+  const title = (session.title || "会话").trim();
+  const lines: string[] = [
+    `「${title}」· 有为销售顾问对话记录`,
+    `导出时间：${new Date().toLocaleString("zh-CN", { hour12: false })}`,
+    "",
+  ];
+  let hasContent = false;
+  for (const item of session.messages) {
+    const text = (item.text || "").trim();
+    const images = item.media?.images ?? [];
+    const videos = item.media?.videos ?? [];
+    if (!text && images.length === 0 && videos.length === 0) {
+      continue;
+    }
+    hasContent = true;
+    const roleLabel = item.role === "user" ? "访客" : "顾问";
+    lines.push(`${roleLabel}：`);
+    if (text) {
+      lines.push(text);
+    }
+    if (images.length > 0) {
+      lines.push(`[相关图片 ${images.length} 张]`);
+      images.forEach((img, idx) => {
+        const label = (img.title || img.doc_title || "图片").trim();
+        lines.push(`  ${idx + 1}. ${label}: ${img.url}`);
+      });
+    }
+    if (videos.length > 0) {
+      lines.push(`[相关视频 ${videos.length} 个]`);
+      videos.forEach((video, idx) => {
+        const label = (video.title || video.doc_title || "视频").trim();
+        lines.push(`  ${idx + 1}. ${label}: ${video.url}`);
+      });
+    }
+    lines.push("");
+  }
+  if (!hasContent) {
+    return "";
+  }
+  return lines.join("\n").trimEnd();
 }
 
 function readStoredSessionState(): { sessions: SessionState[]; activeSessionId: string } {
@@ -264,8 +463,12 @@ function readStoredSessionState(): { sessions: SessionState[]; activeSessionId: 
 }
 
 function App() {
+  const [chatV2Enabled, setChatV2Enabled] = useState(CHAT_V2_ENV_ENABLED);
+  const [chatV3Enabled, setChatV3Enabled] = useState(CHAT_V3_ENV_ENABLED);
+  const [chatV4Enabled, setChatV4Enabled] = useState(CHAT_V4_ENV_ENABLED);
   const [question, setQuestion] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [historySessionPicked, setHistorySessionPicked] = useState(false);
   const [selectedModel, setSelectedModel] = useState("deepseek-chat");
   /** 左侧开发者面板收起（仅保留展开条） */
   const [devSidebarCollapsed, setDevSidebarCollapsed] = useState(false);
@@ -281,6 +484,7 @@ function App() {
   const [kbPanelLoading, setKbPanelLoading] = useState(false);
   const [kbPanelError, setKbPanelError] = useState("");
   const [kbPanelDocs, setKbPanelDocs] = useState<DocMeta[]>([]);
+  const [collapsedKbNodeIds, setCollapsedKbNodeIds] = useState<Set<string>>(new Set());
   /** 最近一次完成的 RAG / 检索 debug（SSE done） */
   const [lastPipelineDebug, setLastPipelineDebug] = useState<Record<string, unknown> | null>(null);
   /** 最近一次请求携带的模型、作用域等（便于与 debug 对照） */
@@ -289,13 +493,17 @@ function App() {
     owner: string;
     chat_mode: string;
     token_profile: string;
+    stream_path: string;
   } | null>(null);
   const [composerDocGateHint, setComposerDocGateHint] = useState("");
+  const [activeFocusScene, setActiveFocusScene] = useState<(typeof FOCUS_SCENE_ITEMS)[number]>(FOCUS_SCENE_ITEMS[0]);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [sessionCopied, setSessionCopied] = useState(false);
   const controllerRef = useRef<AbortController | null>(null);
   /** 用户点击「停止」触发的 abort，与超时/空闲 abort 区分 */
   const userStreamStopRef = useRef(false);
   const chatListRef = useRef<HTMLDivElement | null>(null);
+  const [streamingAssistantId, setStreamingAssistantId] = useState<string | null>(null);
   const activeSessionRef = useRef(activeSessionId);
   const questionRef = useRef(question);
   const isStreamingRef = useRef(isStreaming);
@@ -307,6 +515,7 @@ function App() {
   const latestSuggestReqIdRef = useRef(0);
   const docTokenRangeRef = useRef<{ start: number; end: number } | null>(null);
   const messageIdSeqRef = useRef(0);
+  const floatingInitDoneRef = useRef(false);
   const composerInputWrapRef = useRef<HTMLDivElement | null>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const docFloatRootRef = useRef<HTMLDivElement | null>(null);
@@ -396,11 +605,12 @@ function App() {
 
   useEffect(() => {
     if (!sessions.length) return;
-    localStorage.setItem(
-      SESSIONS_STORAGE_KEY,
-      JSON.stringify({ activeSessionId, sessions })
-    );
-  }, [sessions, activeSessionId]);
+    if (isStreaming) return;
+    const tid = window.setTimeout(() => {
+      persistSessionsToStorage(sessions, activeSessionId);
+    }, STORAGE_DEBOUNCE_MS);
+    return () => window.clearTimeout(tid);
+  }, [sessions, activeSessionId, isStreaming]);
 
   useEffect(() => {
     const sid = activeSessionId;
@@ -458,13 +668,167 @@ function App() {
     return () => document.removeEventListener("visibilitychange", onVis);
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    const detectV2Availability = async () => {
+      try {
+        const resp = await fetch("/chat/v2/guide-titles");
+        if (!resp.ok) {
+          // 后端未开启或不存在该路由时，回退到环境变量控制
+          if (!cancelled) setChatV2Enabled(CHAT_V2_ENV_ENABLED);
+          return;
+        }
+        const data = (await resp.json()) as { v15_enabled?: boolean };
+        if (cancelled) return;
+        // 只要后端确认 V1.5 已开启，前端优先走 /chat/v2/stream
+        if (data?.v15_enabled === true) {
+          setChatV2Enabled(true);
+          return;
+        }
+        setChatV2Enabled(CHAT_V2_ENV_ENABLED);
+      } catch {
+        if (!cancelled) setChatV2Enabled(CHAT_V2_ENV_ENABLED);
+      }
+    };
+    void detectV2Availability();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const detectV3Availability = async () => {
+      try {
+        const resp = await fetch("/chat/v3/capabilities");
+        if (!resp.ok) {
+          if (!cancelled) setChatV3Enabled(CHAT_V3_ENV_ENABLED);
+          return;
+        }
+        const data = (await resp.json()) as { enabled?: boolean };
+        if (cancelled) return;
+        if (data?.enabled === true) {
+          setChatV3Enabled(true);
+          return;
+        }
+        setChatV3Enabled(CHAT_V3_ENV_ENABLED);
+      } catch {
+        if (!cancelled) setChatV3Enabled(CHAT_V3_ENV_ENABLED);
+      }
+    };
+    void detectV3Availability();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const detectV4Availability = async () => {
+      try {
+        const resp = await fetch("/chat/v4/capabilities");
+        if (!resp.ok) {
+          if (!cancelled) setChatV4Enabled(CHAT_V4_ENV_ENABLED);
+          return;
+        }
+        const data = (await resp.json()) as { enabled?: boolean };
+        if (cancelled) return;
+        if (data?.enabled === true) {
+          setChatV4Enabled(true);
+          return;
+        }
+        setChatV4Enabled(CHAT_V4_ENV_ENABLED);
+      } catch {
+        if (!cancelled) setChatV4Enabled(CHAT_V4_ENV_ENABLED);
+      }
+    };
+    void detectV4Availability();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const activeSession = useMemo(
     () => sessions.find((item) => item.id === activeSessionId) || null,
     [sessions, activeSessionId]
   );
   const chatItems = useMemo(() => activeSession?.messages ?? [], [activeSession]);
-  /** 无消息时展示欢迎屏（访客模式首条为欢迎语，通常不触发） */
-  const showWelcomeHero = useMemo(() => chatItems.length === 0, [chatItems]);
+  const sessionTranscript = useMemo(
+    () => (activeSession ? formatSessionTranscript(activeSession) : ""),
+    [activeSession],
+  );
+  const copySessionTranscript = useCallback(async () => {
+    if (!sessionTranscript) return;
+    await copyTextToClipboard(sessionTranscript);
+    setSessionCopied(true);
+    window.setTimeout(() => setSessionCopied(false), 1500);
+  }, [sessionTranscript]);
+
+  const requestTrialCredentials = useCallback(async (assistantId: string) => {
+    const sid = activeSessionRef.current;
+    if (!sid) return;
+    try {
+      const resp = await fetch("/chat/v4/trial-credentials", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sid }),
+      });
+      const data = (await resp.json()) as {
+        ok?: boolean;
+        username?: string;
+        password?: string;
+        label?: string;
+        message?: string;
+      };
+      const block = data.ok
+        ? `\n\n【试用账号】\n账号：${data.username || ""}\n密码：${data.password || ""}${
+            data.label ? `\n说明：${data.label}` : ""
+          }`
+        : `\n\n${data.message || "暂时无法获取试用账号，请稍后再试。"}`;
+      setSessions((prev) =>
+        prev.map((session) =>
+          session.id === sid
+            ? {
+                ...touchSession(session),
+                messages: session.messages.map((item) =>
+                  item.id === assistantId
+                    ? {
+                        ...item,
+                        text: (item.text || "") + block,
+                        trialApplyAvailable: false,
+                        trialCredentialsShown: true,
+                      }
+                    : item
+                ),
+              }
+            : session
+        )
+      );
+    } catch {
+      setSessions((prev) =>
+        prev.map((session) =>
+          session.id === sid
+            ? {
+                ...touchSession(session),
+                messages: session.messages.map((item) =>
+                  item.id === assistantId
+                    ? {
+                        ...item,
+                        text: `${item.text || ""}\n\n获取试用账号失败，请稍后重试。`,
+                      }
+                    : item
+                ),
+              }
+            : session
+        )
+      );
+    }
+  }, []);
+  /** 默认优先展示“新对话欢迎屏”；只有选择历史会话后，才按历史消息渲染 */
+  const showWelcomeHero = useMemo(() => {
+    if (historySessionPicked) return false;
+    return !chatItems.some((item) => item.role === "user" && (item.text || "").trim());
+  }, [chatItems, historySessionPicked]);
 
   const newChatShortcutLabel = useMemo(
     () =>
@@ -758,6 +1122,7 @@ function App() {
   }, []);
 
   const createSession = useCallback(() => {
+    setHistorySessionPicked(false);
     const id = generateSessionId();
     // 新建会话必须“从零开始”：禁止用服务端历史覆盖该会话的欢迎语
     historyHydratedRef.current.add(id);
@@ -779,6 +1144,19 @@ function App() {
       });
     resetPendingRef.current.set(id, p);
   }, [nextSessionTitle, setActiveSession]);
+
+  useEffect(() => {
+    if (floatingInitDoneRef.current) return;
+    if (!activeSession) return;
+    floatingInitDoneRef.current = true;
+    const hasUser = activeSession.messages.some((m) => m.role === "user" && (m.text || "").trim());
+    if (hasUser) {
+      const tid = window.setTimeout(() => {
+        createSession();
+      }, 0);
+      return () => window.clearTimeout(tid);
+    }
+  }, [activeSession, createSession]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -862,8 +1240,8 @@ function App() {
     }
   };
 
-  const askQuestion = async () => {
-    const text = question.trim();
+  const askQuestion = async (presetQuestion?: string) => {
+    const text = (presetQuestion ?? question).trim();
     if (!text || isStreaming) return;
     setComposerDocGateHint("");
     // 允许用户使用 @ 选文档：后端基于文档标题做匹配时不需要这个前缀符号
@@ -878,13 +1256,22 @@ function App() {
     const docsForRequest = selectedYuqueDocs.filter((d) => d.docId >= 1);
     setSelectedYuqueDocs([]);
     closeDocSuggest();
+    const streamPathForMeta = chatV4Enabled
+      ? "/chat/v4/stream"
+      : chatV3Enabled
+        ? "/chat/v3/stream"
+        : chatV2Enabled
+          ? "/chat/v2/stream"
+          : "/chat/stream";
     setLastRequestMeta({
       model: selectedModel,
       owner: yuqueOwnerForApi,
       chat_mode: "visitor_sales",
       token_profile: "primary",
+      stream_path: streamPathForMeta,
     });
     userStreamStopRef.current = false;
+    setStreamingAssistantId(assistantId);
     setIsStreaming(true);
     setSessions((prev) =>
       prev.map((session) =>
@@ -915,6 +1302,98 @@ function App() {
     let connectTimer: number | null = null;
     let elapsedTimer: number | null = null;
     let elapsedSec = 0;
+    let streamTextBuf = "";
+    let streamFlushTimer: number | null = null;
+    let pendingDonePayload: Record<string, unknown> | null = null;
+    let receivedAnyToken = false;
+
+    const flushStreamText = () => {
+      if (!streamTextBuf) return;
+      const chunk = streamTextBuf;
+      streamTextBuf = "";
+      appendTokenToMessage(chunk);
+    };
+
+    const scheduleStreamFlush = () => {
+      if (streamFlushTimer != null) return;
+      streamFlushTimer = window.setTimeout(() => {
+        streamFlushTimer = null;
+        flushStreamText();
+        if (pendingDonePayload && !streamTextBuf) {
+          const payload = pendingDonePayload;
+          pendingDonePayload = null;
+          applyDonePayload(payload);
+        }
+      }, STREAM_FLUSH_MS);
+    };
+
+    const flushStreamTextNow = () => {
+      if (streamFlushTimer != null) {
+        window.clearTimeout(streamFlushTimer);
+        streamFlushTimer = null;
+      }
+      flushStreamText();
+    };
+
+    const appendTokenToMessage = (token: string) => {
+      if (!token) return;
+      setSessions((prev) =>
+        prev.map((session) =>
+          session.id === sessionId
+            ? {
+                ...session,
+                messages: session.messages.map((item) =>
+                  item.id === assistantId
+                    ? {
+                        ...item,
+                        text: item.text + token,
+                        ...(token.trim() ? { streamStage: undefined } : {}),
+                      }
+                    : item
+                ),
+              }
+            : session
+        )
+      );
+    };
+
+    const applyDonePayload = (payload: Record<string, unknown>) => {
+      const dbg = payload.debug as Record<string, unknown> | undefined;
+      const media = parseChatMedia(payload.media);
+      if (dbg && typeof dbg === "object") {
+        setLastPipelineDebug({ ...dbg });
+      }
+      const vs = dbg?.visitor_sales as Record<string, unknown> | undefined;
+      const serverContact = Boolean(
+        vs && vs.contact_detected === true
+      ) || Boolean(dbg && dbg.contact_detected === true);
+      const trialApplyAvailable = payload.trial_apply_available === true;
+      setSessions((prev) =>
+        prev.map((session) =>
+          session.id === sessionId
+            ? {
+                ...touchSession(session),
+                contactCollected: Boolean(session.contactCollected || serverContact),
+                messages: session.messages.map((item) =>
+                  item.id === assistantId
+                    ? {
+                        ...item,
+                        media,
+                        streamStage: undefined,
+                        streamElapsedSec: undefined,
+                        trialApplyAvailable,
+                        text:
+                          item.text ||
+                          (typeof payload.answer === "string" && payload.answer) ||
+                          "没有返回回答。",
+                      }
+                    : item
+                ),
+              }
+            : session
+        )
+      );
+    };
 
     try {
       connectTimer = window.setTimeout(() => {
@@ -930,7 +1409,14 @@ function App() {
         ]);
       }
 
-      const response = await fetch("/chat/stream", {
+      const streamPath = chatV4Enabled
+        ? "/chat/v4/stream"
+        : chatV3Enabled
+          ? "/chat/v3/stream"
+          : chatV2Enabled
+            ? "/chat/v2/stream"
+            : "/chat/stream";
+      const response = await fetch(streamPath, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -960,7 +1446,7 @@ function App() {
           prev.map((session) =>
             session.id === sessionId
               ? {
-                  ...touchSession(session),
+                  ...session,
                   messages: session.messages.map((item) =>
                     item.id === assistantId ? { ...item, streamElapsedSec: elapsedSec } : item
                   ),
@@ -968,7 +1454,7 @@ function App() {
               : session
           )
         );
-      }, 1000);
+      }, 2000);
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder("utf-8");
@@ -986,25 +1472,12 @@ function App() {
           const parsed = parseSseEvent(block);
           if (parsed.event === "token") {
             const payload = JSON.parse(parsed.data || "{}");
-            const token = payload.token || "";
-            setSessions((prev) =>
-              prev.map((session) =>
-                session.id === sessionId
-                  ? {
-                      ...touchSession(session),
-                      messages: session.messages.map((item) =>
-                        item.id === assistantId
-                          ? {
-                              ...item,
-                              text: item.text + token,
-                              ...(token.trim() ? { streamStage: undefined } : {}),
-                            }
-                          : item
-                      ),
-                    }
-                  : session
-              )
-            );
+            const token = String(payload.token || "");
+            if (token) {
+              receivedAnyToken = true;
+              streamTextBuf += token;
+              scheduleStreamFlush();
+            }
           } else if (parsed.event === "stage") {
             const payload = JSON.parse(parsed.data || "{}") as Record<string, unknown>;
             const detail = typeof payload.detail === "string" ? payload.detail : "";
@@ -1025,35 +1498,11 @@ function App() {
           } else if (parsed.event === "done") {
             doneReceived = true;
             const payload = JSON.parse(parsed.data || "{}") as Record<string, unknown>;
-            const dbg = payload.debug as Record<string, unknown> | undefined;
-            if (dbg && typeof dbg === "object") {
-              setLastPipelineDebug({ ...dbg });
+            if (streamTextBuf || streamFlushTimer != null) {
+              pendingDonePayload = payload;
+            } else {
+              applyDonePayload(payload);
             }
-            const vs = dbg?.visitor_sales as Record<string, unknown> | undefined;
-            const serverContact = Boolean(vs && vs.contact_detected === true);
-            setSessions((prev) =>
-              prev.map((session) =>
-                session.id === sessionId
-                  ? {
-                      ...touchSession(session),
-                      contactCollected: Boolean(session.contactCollected || serverContact),
-                      messages: session.messages.map((item) =>
-                        item.id === assistantId
-                          ? {
-                              ...item,
-                              streamStage: undefined,
-                              streamElapsedSec: undefined,
-                              text:
-                                (typeof payload.answer === "string" && payload.answer) ||
-                                item.text ||
-                                "没有返回回答。",
-                            }
-                          : item
-                      ),
-                    }
-                  : session
-              )
-            );
           } else if (parsed.event === "error") {
             const payload = JSON.parse(parsed.data || "{}");
             throw new Error(payload.message || "请求失败");
@@ -1107,6 +1556,22 @@ function App() {
         fallbackText = errMsg || "请求失败，请稍后重试。";
       }
 
+      // 兼容后端重启后的旧会话：若本次一个 token 都没收到且直接失败，
+      // 自动重置服务端该 session，减少“必须手动新建会话”。
+      if (!receivedAnyToken && sessionId) {
+        try {
+          await fetch("/chat/session/reset", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: sessionId, chat_mode: "visitor_sales" }),
+          });
+          fallbackText =
+            `${fallbackText}\n\n检测到会话状态异常，已自动重置当前会话上下文。请直接重试这条问题。`;
+        } catch {
+          // 忽略重置失败，保留原始错误提示
+        }
+      }
+
       setSessions((prev) =>
         prev.map((session) =>
           session.id === sessionId
@@ -1133,7 +1598,14 @@ function App() {
       if (elapsedTimer != null) {
         window.clearInterval(elapsedTimer);
       }
+      flushStreamTextNow();
+      if (pendingDonePayload) {
+        const payload = pendingDonePayload;
+        pendingDonePayload = null;
+        applyDonePayload(payload);
+      }
       controllerRef.current = null;
+      setStreamingAssistantId(null);
       userStreamStopRef.current = false;
       setIsStreaming(false);
       setInactivityEpoch((e) => e + 1);
@@ -1142,36 +1614,139 @@ function App() {
 
   const showDocSuggest = docSuggestOpen && docSuggestDocs.length > 0;
   const docFloatPortalOpen = showDocSuggest;
+  const handleFocusSceneShortcut = (scene: (typeof FOCUS_SCENE_ITEMS)[number]) => {
+    if (isStreaming) return;
+    setActiveFocusScene(scene);
+    void askQuestion(`我想要咨询${scene}的内容，请帮我解答。`);
+  };
 
-  const retrievalMode = lastPipelineDebug?.retrieval_mode;
-  const skillId = lastPipelineDebug?.skill_id;
-  const skillInstruction = lastPipelineDebug?.skill_instruction;
-  const fallbackUsed = lastPipelineDebug?.fallback_used;
+  const turnTrace = parseTurnTrace(lastPipelineDebug);
+  const pipelineMode = typeof lastPipelineDebug?.mode === "string" ? lastPipelineDebug.mode : turnTrace?.pipeline;
+  const kbNodeId = useCallback((doc: DocMeta, idx: number) => {
+    return doc.toc_uuid || `${doc.toc_kind || "doc"}-${doc.id ?? doc.slug ?? doc.title}-${idx}`;
+  }, []);
+  const kbTreeRows = useMemo(() => {
+    const rows: Array<{
+      doc: DocMeta;
+      idx: number;
+      level: number;
+      nodeId: string;
+      hasChildren: boolean;
+      isCollapsed: boolean;
+    }> = [];
+    const byUuid = new Map<string, DocMeta>();
+    kbPanelDocs.forEach((doc) => {
+      const id = (doc.toc_uuid || "").trim();
+      if (id) byUuid.set(id, doc);
+    });
+    const levelMemo = new Map<string, number>();
+    const computeLevel = (doc: DocMeta, visiting: Set<string> = new Set()): number => {
+      const selfId = (doc.toc_uuid || "").trim();
+      if (selfId && levelMemo.has(selfId)) return levelMemo.get(selfId)!;
+      const parentId = (doc.toc_parent_uuid || "").trim();
+      const fallback = normalizeTocLevel(doc.toc_level);
+      if (!parentId || !byUuid.has(parentId)) {
+        if (selfId) levelMemo.set(selfId, fallback);
+        return fallback;
+      }
+      if (selfId && visiting.has(selfId)) return fallback;
+      const nextVisiting = new Set(visiting);
+      if (selfId) nextVisiting.add(selfId);
+      const parent = byUuid.get(parentId)!;
+      const level = Math.max(1, Math.min(3, computeLevel(parent, nextVisiting) + 1));
+      if (selfId) levelMemo.set(selfId, level);
+      return level;
+    };
+    const childrenCount = new Map<string, number>();
+    kbPanelDocs.forEach((doc) => {
+      const parentId = (doc.toc_parent_uuid || "").trim();
+      if (!parentId) return;
+      childrenCount.set(parentId, (childrenCount.get(parentId) || 0) + 1);
+    });
+    const hiddenAncestorLevels: number[] = [];
+    for (let idx = 0; idx < kbPanelDocs.length; idx += 1) {
+      const doc = kbPanelDocs[idx]!;
+      const level = computeLevel(doc);
+      while (
+        hiddenAncestorLevels.length > 0 &&
+        level <= hiddenAncestorLevels[hiddenAncestorLevels.length - 1]!
+      ) {
+        hiddenAncestorLevels.pop();
+      }
+      const nodeId = kbNodeId(doc, idx);
+      const selfId = (doc.toc_uuid || "").trim();
+      const hasChildren = Boolean(selfId && childrenCount.get(selfId));
+      const isCollapsed = collapsedKbNodeIds.has(nodeId);
+      const hidden = hiddenAncestorLevels.length > 0;
+      if (!hidden) {
+        rows.push({ doc, idx, level, nodeId, hasChildren, isCollapsed });
+      }
+      if (hasChildren && isCollapsed) {
+        hiddenAncestorLevels.push(level);
+      }
+    }
+    return rows;
+  }, [kbPanelDocs, kbNodeId, collapsedKbNodeIds]);
+
+  useEffect(() => {
+    setCollapsedKbNodeIds((prev) => {
+      if (!prev.size) return prev;
+      const validIds = new Set(kbPanelDocs.map((doc, idx) => kbNodeId(doc, idx)));
+      let changed = false;
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (validIds.has(id)) next.add(id);
+        else changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [kbPanelDocs, kbNodeId]);
 
   return (
     <>
-      <div className={`app-shell${devSidebarCollapsed ? " app-shell--dev-collapsed" : ""}`}>
+      <div
+        className={`app-shell${
+          !SHOW_DEV_PANEL
+            ? " app-shell--no-dev"
+            : devSidebarCollapsed
+              ? " app-shell--dev-collapsed"
+              : ""
+        }`}
+      >
         <header className="app-top-nav">
           <div className="app-top-nav-inner">
-            <div className="app-top-brand">
-              <span className="app-top-brand-mark" aria-hidden />
-              <span className="app-top-brand-text">有为人工智能教育平台 AI 顾问</span>
+            <div className="consult-top-brand">
+              <img className="consult-top-brand-image" src="/youwei-logo.png" alt="有为 Logo" />
             </div>
-            <nav className="app-top-nav-links" aria-label="主导航">
-              <a className="app-nav-link app-nav-link--primary" href="/">
-                首页
-              </a>
-              <button type="button" className="app-nav-link">
-                登录
-              </button>
-              <button type="button" className="app-nav-link app-nav-link--cta">
-                注册
-              </button>
-            </nav>
+            <span className="consult-top-page-title">预约方案咨询</span>
+            <button type="button" className="consult-top-ghost-btn" aria-label="咨询工作台">
+              咨询工作台
+            </button>
           </div>
         </header>
 
         <div className="app-body">
+          <aside className="focus-scene-sidebar" aria-label="你最关注的场景">
+            <div className="focus-scene-title">你最关注的场景</div>
+            <div className="focus-scene-list">
+              {FOCUS_SCENE_ITEMS.map((scene) => (
+                <button
+                  key={scene}
+                  type="button"
+                  className={`focus-scene-btn${activeFocusScene === scene ? " focus-scene-btn--active" : ""}`}
+                  onClick={() => handleFocusSceneShortcut(scene)}
+                  disabled={isStreaming}
+                >
+                  {scene}
+                </button>
+              ))}
+            </div>
+            <button type="button" className="focus-scene-consult-btn" disabled={isStreaming}>
+              咨询
+            </button>
+            <p className="focus-scene-consult-hint">快速选择下方重点问题，不中断当天进度。</p>
+          </aside>
+          {SHOW_DEV_PANEL ? (
           <aside className={`dev-sidebar${devSidebarCollapsed ? " dev-sidebar--collapsed" : ""}`}>
             {devSidebarCollapsed ? (
               <div className="dev-sidebar-collapsed-stack">
@@ -1195,7 +1770,7 @@ function App() {
                 <div className="dev-sidebar-header">
                   <div>
                     <div className="dev-sidebar-title">开发者面板</div>
-                    <div className="dev-sidebar-sub">Skill · MCP · RAG · 模型</div>
+                    <div className="dev-sidebar-sub">运行追踪 · MCP · Skill · 文档</div>
                   </div>
                   <button
                     type="button"
@@ -1243,59 +1818,114 @@ function App() {
                         <dt>上次请求 model</dt>
                         <dd>{lastRequestMeta?.model ?? "—"}</dd>
                       </div>
+                      <div>
+                        <dt>API 路径</dt>
+                        <dd className="dev-mono">{lastRequestMeta?.stream_path ?? "—"}</dd>
+                      </div>
+                      <div>
+                        <dt>pipeline</dt>
+                        <dd>{formatUnknownDebug(pipelineMode ?? "—")}</dd>
+                      </div>
                     </dl>
                   </section>
 
                   <section className="dev-panel-section">
-                    <div className="dev-panel-section-title">RAG / 检索链路（最近一轮）</div>
+                    <div className="dev-panel-section-title">本轮 MCP 调用</div>
                     {!lastPipelineDebug ? (
-                      <p className="dev-muted">完成一次对话后，这里会显示后端 debug（retrieval_mode、fallback 等）。</p>
+                      <p className="dev-muted">完成一次对话后显示本轮实际 MCP 调用。</p>
+                    ) : turnTrace?.mcp_calls && turnTrace.mcp_calls.length > 0 ? (
+                      <table className="dev-trace-table">
+                        <thead>
+                          <tr>
+                            <th>工具</th>
+                            <th>参数</th>
+                            <th>结果</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {turnTrace.mcp_calls.map((row, idx) => (
+                            <tr key={`${row.tool}-${idx}`}>
+                              <td className="dev-mono">{row.tool}</td>
+                              <td>
+                                {row.tool === "yuque_search"
+                                  ? row.query || "—"
+                                  : row.doc_id
+                                    ? `${row.doc_id}${row.title ? ` · ${row.title}` : ""}`
+                                    : "—"}
+                              </td>
+                              <td>
+                                {row.tool === "yuque_search"
+                                  ? `命中 ${row.hit_count ?? 0}`
+                                  : `${row.body_chars ?? 0} 字`}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     ) : (
-                      <dl className="dev-kv">
-                        <div>
-                          <dt>retrieval_mode</dt>
-                          <dd>{formatUnknownDebug(retrievalMode)}</dd>
-                        </div>
-                        <div>
-                          <dt>fallback_used</dt>
-                          <dd>{formatUnknownDebug(fallbackUsed)}</dd>
-                        </div>
-                        <div>
-                          <dt>source_count</dt>
-                          <dd>{formatUnknownDebug(lastPipelineDebug.source_count)}</dd>
-                        </div>
-                        <div>
-                          <dt>source_types</dt>
-                          <dd>{formatUnknownDebug(lastPipelineDebug.source_types)}</dd>
-                        </div>
-                        <div>
-                          <dt>visitor_sales</dt>
-                          <dd>{formatUnknownDebug(lastPipelineDebug.visitor_sales)}</dd>
-                        </div>
-                      </dl>
+                      <p className="dev-muted">
+                        {pipelineMode === "v4_guide" || turnTrace?.pipeline === "v4_guide"
+                          ? "本层为目录引导，未调用 MCP。"
+                          : "本轮无 MCP 记录（可能未开启 EXPOSE_TURN_TRACE）。"}
+                      </p>
                     )}
-                    {lastPipelineDebug ? (
-                      <details className="dev-json-details">
-                        <summary>完整 debug JSON</summary>
-                        <pre className="dev-json-pre">{JSON.stringify(lastPipelineDebug, null, 2)}</pre>
-                      </details>
-                    ) : null}
                   </section>
 
                   <section className="dev-panel-section">
-                    <div className="dev-panel-section-title">Skill 路由</div>
-                    <p className="dev-small">
-                      {skillId != null && String(skillId).trim() !== ""
-                        ? `skill_id：${String(skillId)}`
-                        : "当前为 visitor_sales：后端不做 skill 路由（无 skill_id）。"}
-                    </p>
-                    {typeof skillInstruction === "string" && skillInstruction.trim() ? (
-                      <pre className="dev-pre">{skillInstruction.trim().slice(0, 400)}</pre>
-                    ) : null}
+                    <div className="dev-panel-section-title">本轮 Skill</div>
+                    {!lastPipelineDebug ? (
+                      <p className="dev-muted">完成一次深度讲解后显示动态选中的 Skill。</p>
+                    ) : turnTrace?.skills && turnTrace.skills.length > 0 ? (
+                      <ul className="dev-tool-list">
+                        {turnTrace.skills.map((s) => (
+                          <li key={s.skill_id}>
+                            <span className="dev-mono">{s.skill_id}</span>
+                            <span className="dev-tool-meta">{s.reason || "—"}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="dev-muted">
+                        {pipelineMode === "v4_guide" || (turnTrace?.dialog_level ?? 0) <= 1
+                          ? "本层为目录引导，未启用 Skill。"
+                          : "本轮未选中 Skill。"}
+                      </p>
+                    )}
                   </section>
 
                   <section className="dev-panel-section">
-                    <div className="dev-panel-section-title">MCP</div>
+                    <div className="dev-panel-section-title">本轮文档</div>
+                    {!lastPipelineDebug ? (
+                      <p className="dev-muted">检索到的语雀文档将列于此。</p>
+                    ) : turnTrace?.documents && turnTrace.documents.length > 0 ? (
+                      <table className="dev-trace-table">
+                        <thead>
+                          <tr>
+                            <th>标题</th>
+                            <th>角色</th>
+                            <th>预览</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {turnTrace.documents.map((d, idx) => (
+                            <tr key={`${d.doc_id || d.title}-${idx}`}>
+                              <td>
+                                <div>{d.title || "—"}</div>
+                                {d.doc_id ? <div className="dev-mono dev-small">{d.doc_id}</div> : null}
+                              </td>
+                              <td>{d.role || "related"}</td>
+                              <td className="dev-trace-snippet">{d.snippet || "—"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    ) : (
+                      <p className="dev-muted">本轮未拉取文档（引导/澄清轮为空）。</p>
+                    )}
+                  </section>
+
+                  <section className="dev-panel-section">
+                    <div className="dev-panel-section-title">MCP 服务配置</div>
                     {!mcpData ? (
                       <p className="dev-muted">加载中或未配置…</p>
                     ) : (
@@ -1322,6 +1952,15 @@ function App() {
                     )}
                   </section>
 
+                  {lastPipelineDebug ? (
+                    <section className="dev-panel-section">
+                      <details className="dev-json-details">
+                        <summary>完整 debug JSON</summary>
+                        <pre className="dev-json-pre">{JSON.stringify(lastPipelineDebug, null, 2)}</pre>
+                      </details>
+                    </section>
+                  ) : null}
+
                   <section className="dev-panel-section">
                     <div className="dev-panel-section-head">
                       <span className="dev-panel-section-title">知识库目录</span>
@@ -1336,29 +1975,44 @@ function App() {
                       </p>
                     ) : null}
                     <div className="dev-kb-scroll">
-                      {kbPanelDocs.map((doc, idx) => {
-                        const depth = Math.max(0, (doc.toc_level ?? 1) - 1);
-                        const pad = 4 + depth * 10;
-                        if (!docMetaSelectable(doc)) {
-                          return (
-                            <div
-                              key={doc.toc_uuid ?? `kb-h-${doc.title}-${idx}`}
-                              className="dev-kb-heading"
-                              style={{ paddingLeft: pad }}
-                            >
-                              {doc.title}
-                            </div>
-                          );
-                        }
+                      {kbTreeRows.map(({ doc, level, nodeId, hasChildren, isCollapsed }) => {
+                        const levelClass = `dev-kb-row--l${level}`;
+                        const selectable = docMetaSelectable(doc);
+                        const isTitle = !selectable;
+                        const expandable = hasChildren;
                         return (
                           <button
-                            key={doc.toc_uuid ?? doc.id ?? doc.slug ?? `kb-${doc.title}-${idx}`}
+                            key={nodeId}
                             type="button"
-                            className="dev-kb-row"
-                            style={{ paddingLeft: pad }}
-                            onClick={() => pickDocFromKbPanel(doc)}
+                            className={`dev-kb-row ${selectable ? "dev-kb-row--doc" : "dev-kb-row--title"} ${levelClass}${
+                              expandable ? " dev-kb-row--expandable" : ""
+                            }`}
+                            onClick={() => {
+                              if (expandable) {
+                                setCollapsedKbNodeIds((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(nodeId)) next.delete(nodeId);
+                                  else next.add(nodeId);
+                                  return next;
+                                });
+                                return;
+                              }
+                              if (selectable) {
+                                pickDocFromKbPanel(doc);
+                              }
+                            }}
+                            aria-expanded={expandable ? !isCollapsed : undefined}
                           >
-                            {doc.title}
+                            {expandable ? (
+                              <span className={`dev-kb-toggle${isCollapsed ? " dev-kb-toggle--collapsed" : ""}`} aria-hidden>
+                                ▾
+                              </span>
+                            ) : (
+                              <span className="dev-kb-toggle dev-kb-toggle--spacer" aria-hidden />
+                            )}
+                            <span className={`dev-kb-node-label${isTitle ? " dev-kb-node-label--title" : ""}`}>
+                              {doc.title}
+                            </span>
                           </button>
                         );
                       })}
@@ -1398,6 +2052,7 @@ function App() {
                               className="session-main"
                               onClick={() => {
                                 setOpenSessionMenuId(null);
+                              setHistorySessionPicked(true);
                                 setActiveSession(session.id);
                               }}
                             >
@@ -1518,14 +2173,42 @@ function App() {
               </>
             )}
           </aside>
+          ) : null}
 
           <div className="app-main chat-shell">
             <header className="chat-subbar">
-              <span className="chat-subbar-title">{activeSession?.title ?? "会话"}</span>
-              <button type="button" className="chat-subbar-new" onClick={createSession}>
-                新对话 <span className="chat-subbar-kbd">{newChatShortcutLabel}</span>
-              </button>
+              <div className="chat-subbar-title-wrap">
+                <div className="chat-subbar-brand">
+                  <span className="chat-subbar-brand-logo" aria-hidden>
+                    AI
+                  </span>
+                  <div className="chat-subbar-brand-meta">
+                    <span className="chat-subbar-brand-en">YOUWEI AI CONSULTANT</span>
+                    <span className="chat-subbar-title">有为 AI 方案顾问</span>
+                  </div>
+                </div>
+                <span className="chat-subbar-status">在线沟通</span>
+              </div>
+              <div className="chat-subbar-actions">
+                <button
+                  type="button"
+                  className={`chat-subbar-btn${sessionCopied ? " chat-subbar-btn--copied" : ""}`}
+                  onClick={() => void copySessionTranscript()}
+                  disabled={!sessionTranscript || isStreaming}
+                  title="复制当前会话全部对话"
+                  aria-label="复制当前会话全部对话"
+                >
+                  {sessionCopied ? "已复制" : "复制会话"}
+                </button>
+                <button type="button" className="chat-subbar-new" onClick={createSession}>
+                  新对话 <span className="chat-subbar-kbd">{newChatShortcutLabel}</span>
+                </button>
+              </div>
             </header>
+            <div className="chat-consulting-direction" aria-label="当前咨询方向">
+              <span className="chat-consulting-direction-label">当前咨询方向</span>
+              <span className="chat-consulting-direction-tag">综合咨询</span>
+            </div>
             <div className="chat-main">
               <div className={`chat-content-inner chat-body-inner${showWelcomeHero ? "" : " chat-body-inner--scroll"}`}>
                 {showWelcomeHero ? (
@@ -1534,7 +2217,7 @@ function App() {
                       ✨
                     </div>
                     <h1 className="welcome-title">有为人工智能教育平台</h1>
-                    <p className="welcome-sub">销售顾问将基于语雀知识库为您解答，并可在需要时为您转接产品顾问</p>
+                    <p className="welcome-sub">{VISITOR_WELCOME_TEXT}</p>
                     <div className="welcome-cards">
                       <button
                         type="button"
@@ -1583,12 +2266,63 @@ function App() {
                           ) : null}
                           <div className="bubble">
                             {item.text.trim() ? (
-                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                {normalizeMarkdownAutolinks(item.text)}
-                              </ReactMarkdown>
+                              isStreaming && item.role === "assistant" && item.id === streamingAssistantId ? (
+                                <div className="bubble-stream-text">{item.text}</div>
+                              ) : (
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                  {normalizeMarkdownAutolinks(item.text)}
+                                </ReactMarkdown>
+                              )
+                            ) : null}
+                            {item.role === "assistant" && item.media && (item.media.videos.length > 0 || item.media.images.length > 0) ? (
+                              <div className="msg-media">
+                                {item.media.videos.length > 0 ? (
+                                  <div className="msg-media-block">
+                                    <div className="msg-media-title">相关视频</div>
+                                    {item.media.videos.map((video, idx) => (
+                                      <div key={`${video.url}-${idx}`} className="msg-video-card">
+                                        <video className="msg-video-player" controls playsInline preload="metadata" src={video.url} />
+                                        <a href={video.url} target="_blank" rel="noreferrer" className="msg-video-link">
+                                          {video.title || video.doc_title || "查看视频链接"}
+                                        </a>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : null}
+                                {item.media.images.length > 0 ? (
+                                  <div className="msg-media-block">
+                                    <div className="msg-media-title">相关图片</div>
+                                    <div className="msg-image-grid">
+                                      {item.media.images.map((image, idx) => (
+                                        <a
+                                          key={`${image.url}-${idx}`}
+                                          className="msg-image-card"
+                                          href={image.url}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                        >
+                                          <img src={image.url} alt={image.title || image.doc_title || "相关图片"} loading="lazy" />
+                                          <span>{image.title || image.doc_title || "查看原图"}</span>
+                                        </a>
+                                      ))}
+                                    </div>
+                                  </div>
+                                ) : null}
+                              </div>
                             ) : null}
                           </div>
                           <div className="msg-footer">
+                            {item.role === "assistant" &&
+                            item.trialApplyAvailable &&
+                            !item.trialCredentialsShown ? (
+                              <button
+                                type="button"
+                                className="trial-apply-button"
+                                onClick={() => void requestTrialCredentials(item.id)}
+                              >
+                                申请测试账号
+                              </button>
+                            ) : null}
                             <button
                               type="button"
                               className={`copy-button ${copiedMessageId === item.id ? "copied" : ""}`}
@@ -1607,97 +2341,106 @@ function App() {
                   </div>
                 )}
               </div>
-            </div>
-
-            <footer className="composer-simple">
-              <div className="composer-simple-inner">
-                {composerDocGateHint ? (
-                  <div className="composer-doc-gate-hint" role="alert">
-                    {composerDocGateHint}
-                  </div>
-                ) : null}
-                {selectedYuqueDocs.length > 0 ? (
-                  <div className="selected-docs selected-docs--compact">
-                    <div className="selected-docs-label">已选语雀文档（将随本次发送锚定）</div>
-                    <div className="selected-docs-chips">
-                      {selectedYuqueDocs.map((d) => (
-                        <span className="doc-chip" key={`${d.docId}-${d.title}`}>
-                          {d.title}
-                          <button
-                            type="button"
-                            className="doc-chip-x"
-                            onClick={() => removeSelectedYuqueDoc(d.docId, d.title)}
-                            aria-label={`移除 ${d.title}`}
-                          >
-                            ×
-                          </button>
-                        </span>
-                      ))}
+              <footer className="composer-simple">
+                <div className="composer-simple-inner">
+                  {composerDocGateHint ? (
+                    <div className="composer-doc-gate-hint" role="alert">
+                      {composerDocGateHint}
                     </div>
-                  </div>
-                ) : null}
-                <div className="composer-simple-row">
-                  <div ref={composerInputWrapRef} className="composer-simple-field doc-suggest-wrap">
-                    <textarea
-                      ref={composerTextareaRef}
-                      className="composer-simple-textarea"
-                      rows={1}
-                      placeholder="输入您想了解的内容；Enter 发送，Shift+Enter 换行。输入 @ 可联想语雀文档。"
-                      value={question}
-                      onChange={handleQuestionChange}
-                      onKeyDown={(event) => {
-                        if (docSuggestOpen && docSuggestDocs.length > 0) {
-                          const idxs = selectableDocIndices(docSuggestDocs);
-                          if (event.key === "ArrowDown" && idxs.length) {
-                            event.preventDefault();
-                            const cur = docSuggestActiveIndex;
-                            const pos = idxs.indexOf(cur);
-                            const nextPos = pos < 0 ? 0 : Math.min(pos + 1, idxs.length - 1);
-                            setDocSuggestActiveIndex(idxs[nextPos]!);
-                            return;
-                          }
-                          if (event.key === "ArrowUp" && idxs.length) {
-                            event.preventDefault();
-                            const cur = docSuggestActiveIndex;
-                            const pos = idxs.indexOf(cur);
-                            const nextPos = pos <= 0 ? 0 : pos - 1;
-                            setDocSuggestActiveIndex(idxs[nextPos]!);
-                            return;
-                          }
-                          if (event.key === "Enter" && !event.shiftKey) {
-                            const doc = docSuggestDocs[docSuggestActiveIndex];
-                            if (doc && docMetaSelectable(doc)) {
+                  ) : null}
+                  {selectedYuqueDocs.length > 0 ? (
+                    <div className="selected-docs selected-docs--compact">
+                      <div className="selected-docs-label">已选语雀文档（将随本次发送锚定）</div>
+                      <div className="selected-docs-chips">
+                        {selectedYuqueDocs.map((d) => (
+                          <span className="doc-chip" key={`${d.docId}-${d.title}`}>
+                            {d.title}
+                            <button
+                              type="button"
+                              className="doc-chip-x"
+                              onClick={() => removeSelectedYuqueDoc(d.docId, d.title)}
+                              aria-label={`移除 ${d.title}`}
+                            >
+                              ×
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  <div className="composer-simple-row">
+                    {!IS_VISITOR_ROUTE ? (
+                      <button
+                        type="button"
+                        className="composer-simple-upload"
+                        aria-label="上传附件"
+                        title="上传附件（待接入）"
+                      >
+                        📎
+                      </button>
+                    ) : null}
+                    <div ref={composerInputWrapRef} className="composer-simple-field doc-suggest-wrap">
+                      <textarea
+                        ref={composerTextareaRef}
+                        className="composer-simple-textarea"
+                        rows={1}
+                        placeholder="输入您想了解的内容；Enter 发送，Shift+Enter 换行。输入 @ 可联想语雀文档。"
+                        value={question}
+                        onChange={handleQuestionChange}
+                        onKeyDown={(event) => {
+                          if (docSuggestOpen && docSuggestDocs.length > 0) {
+                            const idxs = selectableDocIndices(docSuggestDocs);
+                            if (event.key === "ArrowDown" && idxs.length) {
                               event.preventDefault();
-                              applyDocSuggestPick(doc);
+                              const cur = docSuggestActiveIndex;
+                              const pos = idxs.indexOf(cur);
+                              const nextPos = pos < 0 ? 0 : Math.min(pos + 1, idxs.length - 1);
+                              setDocSuggestActiveIndex(idxs[nextPos]!);
                               return;
                             }
+                            if (event.key === "ArrowUp" && idxs.length) {
+                              event.preventDefault();
+                              const cur = docSuggestActiveIndex;
+                              const pos = idxs.indexOf(cur);
+                              const nextPos = pos <= 0 ? 0 : pos - 1;
+                              setDocSuggestActiveIndex(idxs[nextPos]!);
+                              return;
+                            }
+                            if (event.key === "Enter" && !event.shiftKey) {
+                              const doc = docSuggestDocs[docSuggestActiveIndex];
+                              if (doc && docMetaSelectable(doc)) {
+                                event.preventDefault();
+                                applyDocSuggestPick(doc);
+                                return;
+                              }
+                            }
                           }
-                        }
-                        if (event.key === "Enter" && !event.shiftKey) {
-                          event.preventDefault();
-                          void askQuestion();
-                        }
-                        if (event.key === "Escape") {
-                          closeDocSuggest();
-                        }
+                          if (event.key === "Enter" && !event.shiftKey) {
+                            event.preventDefault();
+                            void askQuestion();
+                          }
+                          if (event.key === "Escape") {
+                            closeDocSuggest();
+                          }
+                        }}
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      className={`composer-simple-send${isStreaming ? " composer-simple-send--stop" : ""}`}
+                      onClick={() => {
+                        if (isStreaming) stopStreaming();
+                        else void askQuestion();
                       }}
-                    />
+                      disabled={!isStreaming && !question.trim()}
+                      title={isStreaming ? "停止生成" : "提交"}
+                    >
+                      {isStreaming ? "停止" : "↑"}
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    className={`composer-simple-send${isStreaming ? " composer-simple-send--stop" : ""}`}
-                    onClick={() => {
-                      if (isStreaming) stopStreaming();
-                      else void askQuestion();
-                    }}
-                    disabled={!isStreaming && !question.trim()}
-                    title={isStreaming ? "停止生成" : "发送"}
-                  >
-                    {isStreaming ? "停止" : "发送"}
-                  </button>
                 </div>
-              </div>
-            </footer>
+              </footer>
+            </div>
           </div>
         </div>
       </div>

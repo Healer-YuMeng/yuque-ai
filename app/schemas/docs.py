@@ -20,6 +20,7 @@ class DocMeta(BaseModel):
     updated_at: Optional[str] = None
     # 语雀目录 toc：层级与节点类型（@ 联想展示目录树）
     toc_uuid: Optional[str] = None
+    toc_parent_uuid: Optional[str] = None
     toc_level: Optional[int] = None
     toc_kind: Optional[str] = None  # "doc" | "title"
     toc_selectable: Optional[bool] = None
