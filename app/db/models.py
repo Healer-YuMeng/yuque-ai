@@ -74,3 +74,16 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created
 ON chat_messages(session_id, created_at);
 """
 
+CHAT_SESSION_PROFILES_DDL = """
+CREATE TABLE IF NOT EXISTS chat_session_profiles (
+    session_id TEXT PRIMARY KEY,
+    display_name TEXT,
+    visitor_type TEXT,
+    org_name TEXT,
+    interests_json TEXT NOT NULL DEFAULT '{}',
+    focused_doc_ids_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+"""
+

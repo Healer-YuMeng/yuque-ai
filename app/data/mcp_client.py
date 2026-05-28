@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from app.core.logger import get_logger
 
@@ -119,11 +120,8 @@ class YuqueMCPClient:
             return items
         scoped: List[MCPSearchResult] = []
         for item in items:
-            url = (item.url or "").strip("/")
-            # 语雀文档 URL 常见形态：/group/repo/slug
-            parts = url.split("/")
-            if len(parts) >= 2:
-                repo = f"{parts[0]}/{parts[1]}"
+            repo = self._extract_repo_from_url(item.url or "")
+            if repo:
                 if repo == self._repo_id:
                     scoped.append(item)
             elif not item.url:
@@ -309,4 +307,25 @@ class YuqueMCPClient:
                 )
             )
         return out
+
+    @staticmethod
+    def _extract_repo_from_url(raw_url: str) -> str:
+        """
+        从语雀 URL 中提取 owner/repo，兼容：
+        - https://www.yuque.com/owner/repo/slug
+        - /owner/repo/slug
+        - owner/repo/slug
+        """
+        u = (raw_url or "").strip()
+        if not u:
+            return ""
+        if "://" in u:
+            parsed = urlparse(u)
+            path = (parsed.path or "").strip("/")
+        else:
+            path = u.strip("/")
+        parts = [p for p in path.split("/") if p]
+        if len(parts) < 2:
+            return ""
+        return f"{parts[0]}/{parts[1]}"
 

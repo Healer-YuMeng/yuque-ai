@@ -9,6 +9,7 @@ from app.data.splitter import TextChunk
 from app.db.models import (
     CHAT_MESSAGES_DDL,
     CHAT_MESSAGES_SESSION_CREATED_INDEX,
+    CHAT_SESSION_PROFILES_DDL,
     CHAT_SESSIONS_DDL,
     CHUNKS_DDL,
     DOCUMENTS_DDL,
@@ -35,6 +36,7 @@ class DocumentRepository:
             await conn.execute(CHAT_SESSIONS_DDL)
             await conn.execute(CHAT_MESSAGES_DDL)
             await conn.execute(CHAT_MESSAGES_SESSION_CREATED_INDEX)
+            await conn.execute(CHAT_SESSION_PROFILES_DDL)
             await conn.commit()
         finally:
             await conn.close()
@@ -102,6 +104,21 @@ class LeadCaptureRepository:
             row = await cur2.fetchone()
             n = int(row[0]) if row and row[0] is not None else 0
             return n > 0
+        finally:
+            await conn.close()
+
+    async def has_lead_for_session(self, *, session_id: str) -> bool:
+        sid = (session_id or "").strip()
+        if not sid:
+            return False
+        conn = await self._session_factory.connect()
+        try:
+            cur = await conn.execute(
+                "SELECT 1 FROM lead_captures WHERE session_id=? LIMIT 1",
+                (sid,),
+            )
+            row = await cur.fetchone()
+            return row is not None
         finally:
             await conn.close()
 

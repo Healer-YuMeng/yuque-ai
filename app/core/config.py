@@ -127,6 +127,26 @@ class Settings:
     vision_base_url: str = _env("VISION_BASE_URL", _env("OPENAI_BASE_URL"))
     vision_api_key: str = _env("VISION_API_KEY", _env("OPENAI_API_KEY"))
 
+    # V1.5 多媒体优先链路（默认关闭，避免影响旧链路）
+    chat_v15_enabled: bool = _env_bool("CHAT_V15_ENABLED", False)
+    chat_v15_max_images: int = _env_int("CHAT_V15_MAX_IMAGES", 3)
+    chat_v15_max_videos: int = _env_int("CHAT_V15_MAX_VIDEOS", 1)
+    chat_v15_max_docs: int = _env_int("CHAT_V15_MAX_DOCS", 10)
+    chat_v15_image_rerank_mode: str = _env("CHAT_V15_IMAGE_RERANK_MODE", "text_rerank")
+    chat_v15_lead_nudge_rounds: int = _env_int("CHAT_V15_LEAD_NUDGE_ROUNDS", 8)
+    chat_v15_lead_nudge_stay_s: int = _env_int("CHAT_V15_LEAD_NUDGE_STAY_S", 120)
+    chat_v15_guide_refresh_s: int = _env_int("CHAT_V15_GUIDE_REFRESH_S", 300)
+
+    # V3：会话画像 + 兴趣驱动引导（默认关闭，旁路接入）
+    chat_v3_enabled: bool = _env_bool("CHAT_V3_ENABLED", False)
+
+    # V4：目录状态机 + 目录内关联检索（默认关闭，旁路接入）
+    chat_v4_enabled: bool = _env_bool("CHAT_V4_ENABLED", False)
+    # V4 开发者追踪：SSE done.debug.turn_trace（生产建议 false）
+    expose_turn_trace: bool = _env_bool("EXPOSE_TURN_TRACE", True)
+    # V4 试用账号池 JSON：[{"username":"demo","password":"***","label":"教师端"}]
+    trial_accounts_json: str = _env("TRIAL_ACCOUNTS_JSON", "[]")
+
     def ensure_runtime_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.vector_dir.mkdir(parents=True, exist_ok=True)
