@@ -46,10 +46,11 @@ class Retriever:
         self._top_k = top_k
         self._score_threshold = score_threshold
         self._intent_client: Optional[AsyncOpenAI] = None
-        if settings.intent_llm_enabled and settings.llm_api_key:
+        intent_key, intent_base = settings.resolve_model_endpoint(settings.intent_llm_model)
+        if settings.intent_llm_enabled and intent_key:
             self._intent_client = AsyncOpenAI(
-                api_key=settings.llm_api_key,
-                base_url=settings.llm_base_url or None,
+                api_key=intent_key,
+                base_url=intent_base or None,
             )
 
     @property
@@ -1283,5 +1284,4 @@ class Retriever:
         if "content" in raw:
             return "content"
         return None
-
 

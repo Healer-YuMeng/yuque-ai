@@ -14,7 +14,11 @@ from app.service.sales_dialog_orchestrator_v4 import SalesDialogOrchestratorV4
 
 
 class _FakeMCP:
+    def __init__(self) -> None:
+        self.search_calls = 0
+
     async def search(self, query: str) -> List[MCPSearchResult]:
+        self.search_calls += 1
         return [MCPSearchResult(doc_id="99", title="跨学科项目式学习", url="", snippet="snippet")]
 
     async def get_doc(self, doc_id: str) -> str:
@@ -62,8 +66,9 @@ class _FakeLead:
 
 @pytest.mark.asyncio
 async def test_v4_retrieve_records_turn_trace() -> None:
+    fake_mcp = _FakeMCP()
     orch = SalesDialogOrchestratorV4(
-        mcp_client=_FakeMCP(),
+        mcp_client=fake_mcp,
         generator=_FakeGenerator(),
         profile_repo=_FakeProfileRepo(),
         toc_nodes=[
@@ -94,3 +99,57 @@ async def test_v4_retrieve_records_turn_trace() -> None:
     assert any(c.tool == "yuque_search" for c in built.mcp_calls)
     assert any(c.tool == "yuque_get_doc" for c in built.mcp_calls)
     assert built.documents
+
+
+@pytest.mark.asyncio
+async def test_v4_retrieve_prefers_cached_payload_for_follow_up() -> None:
+    fake_mcp = _FakeMCP()
+    orch = SalesDialogOrchestratorV4(
+        mcp_client=fake_mcp,
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        toc_nodes=[
+            {
+                "title": "跨学科项目式学习",
+                "doc_id": 88,
+                "uuid": "u1",
+                "level": 2,
+                "parent_uuid": "",
+                "node_type": "DOC",
+            }
+        ],
+        lead_outreach=_FakeLead(),
+    )
+    node = CatalogNode(
+        uuid="u1",
+        title="跨学科项目式学习",
+        level=2,
+        parent_uuid="",
+        node_type="DOC",
+        url=None,
+        doc_id=88,
+        path_titles=["案例与社区", "跨学科项目式学习"],
+    )
+    await orch._retrieve_for_nodes(
+        [node],
+        catalog_path=node.path_titles,
+        trace=None,
+        primary_title=node.title,
+        session_id="s1",
+        cache_scope=node.uuid,
+        prefer_cached=False,
+    )
+    first_search_calls = fake_mcp.search_calls
+    doc_ctx, sources, debug = await orch._retrieve_for_nodes(
+        [node],
+        catalog_path=node.path_titles,
+        trace=None,
+        primary_title=node.title,
+        session_id="s1",
+        cache_scope=node.uuid,
+        prefer_cached=True,
+    )
+    assert doc_ctx
+    assert sources
+    assert debug["retrieval_cache_hit"] is True
+    assert fake_mcp.search_calls == first_search_calls

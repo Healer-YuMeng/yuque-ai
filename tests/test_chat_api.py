@@ -212,17 +212,6 @@ def test_chat_v2_endpoint_enabled() -> None:
     finally:
         object.__setattr__(chat_api_module.settings, "chat_v15_enabled", old)
 
-
-def test_chat_history_endpoint() -> None:
-    client = TestClient(build_test_app())
-
-    r = client.get("/chat/history", params={"session_id": "s1", "limit": 20})
-    assert r.status_code == 200
-    payload = r.json()
-    assert payload["session_id"] == "s1"
-    assert [m["role"] for m in payload["messages"]] == ["user", "assistant"]
-
-
 def test_runtime_mode_endpoint() -> None:
     client = TestClient(build_test_app())
 
@@ -351,4 +340,3 @@ def test_chat_v2_guide_titles_endpoint() -> None:
     assert payload["max_level"] == 3
     assert payload["titles"][0] == "平台介绍"
     assert payload["nodes"][0]["children"][0]["title"] == "课程产品矩阵"
-

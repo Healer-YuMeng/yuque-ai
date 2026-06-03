@@ -71,18 +71,23 @@ class Settings:
     # openai key 仍保持严格：gpt-* 模型必须配置 OPENAI_API_KEY
     openai_api_key: str = _env("OPENAI_API_KEY")
     deepseek_api_key: str = _env("DEEPSEEK_API_KEY") or _env("LLM_API_KEY")
+    dashscope_api_key: str = _env("DASHSCOPE_API_KEY")
+    dashscope_base_url: str = _env("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
-    llm_provider: str = _env("LLM_PROVIDER", "deepseek")
-    llm_model: str = _env("LLM_MODEL", "deepseek-chat")
+    llm_provider: str = _env("LLM_PROVIDER", "openai")
+    llm_model: str = _env("LLM_MODEL", "qwen3.6-flash")
     openai_base_url: str = _env("OPENAI_BASE_URL")
     deepseek_base_url: str = _env("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
     llm_base_url: str = _env(
         "LLM_BASE_URL",
-        _env("DEEPSEEK_BASE_URL", _env("OPENAI_BASE_URL", "https://api.deepseek.com")),
+        _env(
+            "DASHSCOPE_BASE_URL",
+            _env("DEEPSEEK_BASE_URL", _env("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")),
+        ),
     )
     llm_api_key: str = _env(
         "LLM_API_KEY",
-        _env("DEEPSEEK_API_KEY", _env("OPENAI_API_KEY")),
+        _env("DASHSCOPE_API_KEY", _env("DEEPSEEK_API_KEY", _env("OPENAI_API_KEY"))),
     )
 
     top_k: int = _env_int("TOP_K", 4)
@@ -99,14 +104,14 @@ class Settings:
     force_mcp_fallback: bool = _env_bool("FORCE_MCP_FALLBACK", False)
     auto_mcp_tool_router: bool = _env_bool("AUTO_MCP_TOOL_ROUTER", False)
     intent_llm_enabled: bool = _env_bool("INTENT_LLM_ENABLED", False)
-    intent_llm_model: str = _env("INTENT_LLM_MODEL", _env("LLM_MODEL", "deepseek-chat"))
+    intent_llm_model: str = _env("INTENT_LLM_MODEL", _env("LLM_MODEL", "qwen3.6-flash"))
 
     # 元问题：正则未命中时，可用一次 LLM 判断是否「只问助手自身」，减少无限扩写关键词（见 README / doc）
     assistant_meta_llm_router: bool = _env_bool("ASSISTANT_META_LLM_ROUTER", False)
     assistant_meta_router_max_chars: int = _env_int("ASSISTANT_META_ROUTER_MAX_CHARS", 120)
     assistant_meta_router_model: str = _env(
         "ASSISTANT_META_ROUTER_MODEL",
-        _env("INTENT_LLM_MODEL", _env("LLM_MODEL", "deepseek-chat")),
+        _env("INTENT_LLM_MODEL", _env("LLM_MODEL", "qwen3.6-flash")),
     )
 
     web_dir: Path = BASE_DIR / "web"
@@ -119,13 +124,15 @@ class Settings:
     # 为 true 时：对每篇命中再拉全文抽图（易带入「整篇所有插图」）；默认 false，仅从检索片段 contexts 抽图
     doc_images_full_document_fallback: bool = _env_bool("DOC_IMAGES_FULL_DOCUMENT_FALLBACK", False)
 
-    # 语雀插图：独立多模态识图（OpenAI 兼容）+ 主模型 DeepSeek 写回答；需 OPENAI_API_KEY
+    # 语雀多媒体：独立多模态识读（OpenAI 兼容）+ 主模型写回答；可接阿里百炼视觉模型
     vision_enabled: bool = _env_bool("VISION_ENABLED", False)
-    vision_model: str = _env("VISION_MODEL", "gpt-4o-mini")
+    vision_model: str = _env("VISION_MODEL", "qwen3.6-flash")
     vision_max_images: int = _env_int("VISION_MAX_IMAGES", 4)
+    vision_max_videos: int = _env_int("VISION_MAX_VIDEOS", 1)
+    vision_video_fps: int = _env_int("VISION_VIDEO_FPS", 2)
     vision_max_bytes: int = _env_int("VISION_MAX_BYTES", 4_000_000)
-    vision_base_url: str = _env("VISION_BASE_URL", _env("OPENAI_BASE_URL"))
-    vision_api_key: str = _env("VISION_API_KEY", _env("OPENAI_API_KEY"))
+    vision_base_url: str = _env("VISION_BASE_URL", _env("DASHSCOPE_BASE_URL", _env("OPENAI_BASE_URL")))
+    vision_api_key: str = _env("VISION_API_KEY", _env("DASHSCOPE_API_KEY", _env("OPENAI_API_KEY")))
 
     # V1.5 多媒体优先链路（默认关闭，避免影响旧链路）
     chat_v15_enabled: bool = _env_bool("CHAT_V15_ENABLED", False)
@@ -147,6 +154,38 @@ class Settings:
     # V4 试用账号池 JSON：[{"username":"demo","password":"***","label":"教师端"}]
     trial_accounts_json: str = _env("TRIAL_ACCOUNTS_JSON", "[]")
 
+    @staticmethod
+    def _normalized_model_name(model: str) -> str:
+        return (model or "").strip().lower()
+
+    @classmethod
+    def is_openai_model(cls, model: str) -> bool:
+        return cls._normalized_model_name(model).startswith("gpt-")
+
+    @classmethod
+    def is_deepseek_model(cls, model: str) -> bool:
+        return cls._normalized_model_name(model).startswith("deepseek")
+
+    @classmethod
+    def is_dashscope_model(cls, model: str) -> bool:
+        lower = cls._normalized_model_name(model)
+        return lower.startswith("qwen") or lower.startswith("qwq")
+
+    def resolve_model_endpoint(self, model: str) -> tuple[str, str]:
+        normalized = (model or "").strip()
+        if not normalized:
+            return "", ""
+        if self.is_openai_model(normalized):
+            return self.openai_api_key, self.openai_base_url
+        if self.is_deepseek_model(normalized):
+            return self.deepseek_api_key, self.deepseek_base_url
+        if self.is_dashscope_model(normalized):
+            return (
+                self.dashscope_api_key or self.llm_api_key,
+                self.dashscope_base_url or self.llm_base_url,
+            )
+        return self.llm_api_key, self.llm_base_url
+
     def ensure_runtime_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.vector_dir.mkdir(parents=True, exist_ok=True)
@@ -154,4 +193,3 @@ class Settings:
 
 settings = Settings()
 settings.ensure_runtime_dirs()
-

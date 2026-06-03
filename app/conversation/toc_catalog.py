@@ -21,6 +21,14 @@ class CatalogNode:
 
 
 _RESET_PHRASES = ("回到首页", "重新开始", "从头开始", "返回首页", "重置对话")
+_SCENE_SWITCH_PHRASES = (
+    "我想要咨询",
+    "我想咨询",
+    "请帮我解答",
+    "我想了解",
+    "我想看看",
+    "我要看看",
+)
 
 
 class TocCatalogIndex:
@@ -37,6 +45,13 @@ class TocCatalogIndex:
 
     def get(self, uuid: str) -> Optional[CatalogNode]:
         return self._by_uuid.get((uuid or "").strip())
+
+    def find_by_doc_id(self, doc_id: int) -> Optional[CatalogNode]:
+        target = int(doc_id)
+        for node in self._by_uuid.values():
+            if node.doc_id is not None and int(node.doc_id) == target:
+                return node
+        return None
 
     def dialog_level(self, node: Optional[CatalogNode]) -> int:
         """0=根 1=一级模块 2=二级 3=深度内容（路径≥3）。"""
@@ -90,10 +105,52 @@ class TocCatalogIndex:
             return True
         return False
 
+    def is_explicit_scene_switch(
+        self,
+        question: str,
+        *,
+        current: Optional[CatalogNode],
+        target: Optional[CatalogNode],
+    ) -> bool:
+        if not current or not target:
+            return False
+        current_root = current.path_titles[0] if current.path_titles else ""
+        target_root = target.path_titles[0] if target.path_titles else ""
+        if not current_root or not target_root or current_root == target_root:
+            return False
+        q = (question or "").strip()
+        if not q:
+            return False
+        return any(p in q for p in _SCENE_SWITCH_PHRASES) or (target.title in q and "内容" in q)
+
     def children_of(self, node: Optional[CatalogNode]) -> List[CatalogNode]:
         if not node:
             return list(self._roots)
         return list(node.children)
+
+    def descendants_of(self, node: Optional[CatalogNode], *, include_self: bool = False) -> List[CatalogNode]:
+        if not node:
+            return []
+        out: List[CatalogNode] = [node] if include_self else []
+        queue: List[CatalogNode] = list(node.children)
+        while queue:
+            cur = queue.pop(0)
+            out.append(cur)
+            if cur.children:
+                queue.extend(cur.children)
+        return out
+
+    def siblings_of(self, node: Optional[CatalogNode], *, include_self: bool = False) -> List[CatalogNode]:
+        if not node:
+            return []
+        if not node.parent_uuid:
+            pool = list(self._roots)
+        else:
+            parent = self.get(node.parent_uuid)
+            pool = list(parent.children) if parent else []
+        if include_self:
+            return pool
+        return [x for x in pool if x.uuid != node.uuid]
 
     def related_in_catalog(self, node: CatalogNode, *, limit: int = 3) -> List[CatalogNode]:
         """同级 / 父级其它子节点；不跳到根目录其它一级模块（除非同级）。"""

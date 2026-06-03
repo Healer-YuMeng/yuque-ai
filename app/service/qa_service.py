@@ -15,6 +15,7 @@ from app.core.yuque_credentials import (
 from app.data.mcp_client import YuqueMCPClient
 from app.data.splitter import RecursiveTextSplitter, TextChunk
 from app.data.yuque_loader import YuqueDocument, YuqueLoader, YuqueLoaderError
+from app.conversation.chat_display import display_name_for_chat, normalize_display_name
 from app.conversation.contact_extractor import extract_contact
 from app.conversation.lead_nudge_policy import LeadNudgePolicy
 from app.conversation.trial_account_pool import allocate_trial_account, load_trial_accounts
@@ -28,7 +29,15 @@ from app.rag.generator import DeepSeekGenerator, Generator, GeneratorConfigError
 from app.rag.skill_router import route_skill
 from app.rag.pipeline import RAGPipeline
 from app.rag.retriever import Retriever
-from app.schemas.chat import ChatMediaBundle, ChatResponse, ChatV2Response, SelectedYuqueDocRef, TrialCredentialsResponse
+from app.schemas.chat import (
+    ChatMediaBundle,
+    ChatResponse,
+    ChatV2Response,
+    ChatV4Response,
+    SelectedYuqueDocRef,
+    TrialCredentialsResponse,
+    VisitorProfileResponse,
+)
 from app.service.media_answer_orchestrator import MediaAnswerOrchestrator
 from app.service.sales_dialog_orchestrator_v3 import SalesDialogOrchestratorV3
 from app.service.sales_dialog_orchestrator_v4 import SalesDialogOrchestratorV4, _strip_media_urls_from_text
@@ -82,6 +91,70 @@ def _vision_stage_detail(debug: Optional[Dict[str, Any]]) -> str:
     if isinstance(n, int) and n > 0:
         return f"已完成 {n} 张文档插图的识读，正在生成回答…"
     return "已完成文档插图识读，正在生成回答…"
+
+
+def _is_v4_memory_only_question(question: str) -> bool:
+    q = (question or "").strip()
+    if not q:
+        return False
+    memory_hits = (
+        "你知道我的电话",
+        "你知道我电话",
+        "你记得我的电话",
+        "你知道我的联系方式",
+        "你记得我的联系方式",
+        "我的联系方式已经给你",
+        "联系方式已经给你",
+        "电话已经给你",
+        "我已经给过",
+        "我刚才给过",
+        "你知道我的姓名",
+        "你知道我姓名",
+        "你知道我的名字",
+        "你记得我的名字",
+        "你知道我的单位",
+        "你记得我的单位",
+    )
+    return any(hit in q for hit in memory_hits)
+
+
+def _visitor_profile_parts(profile: Any) -> dict[str, str]:
+    if not profile:
+        return {"name": "", "org_name": "", "contact": "", "interested_product": "", "concern": "", "module_scope": ""}
+    interests = profile.interests if isinstance(profile.interests, dict) else {}
+    lead = interests.get("_lead") if isinstance(interests.get("_lead"), dict) else {}
+    session_meta = interests.get("_session") if isinstance(interests.get("_session"), dict) else {}
+    org_name = str(lead.get("org_name") or profile.org_name or "")
+    fallback_name = normalize_display_name(str(lead.get("name") or ""), org=org_name)
+    return {
+        "name": display_name_for_chat(profile) or fallback_name,
+        "org_name": org_name,
+        "contact": str(lead.get("contact_value") or ""),
+        "interested_product": str(lead.get("interested_product") or ""),
+        "concern": str(lead.get("concern") or ""),
+        "module_scope": str(session_meta.get("module_scope") or ""),
+    }
+
+
+def _build_v4_memory_answer(profile: Any) -> str:
+    parts = _visitor_profile_parts(profile)
+    name = parts["name"]
+    contact = parts["contact"]
+    org = parts["org_name"]
+    product = parts["interested_product"]
+    prefix = f"{name}，" if name else ""
+    known: List[str] = []
+    if name:
+        known.append(f"姓名/称呼是{name}")
+    if contact:
+        known.append(f"联系方式是{contact}")
+    if org:
+        known.append(f"单位是{org}")
+    if product:
+        known.append(f"关注方向是{product}")
+    if not known:
+        return "我这边还没有记录到您的姓名、单位或联系方式。您可以先告诉我其中一项，我会继续记住后面的沟通。"
+    return f"{prefix}我记得，您之前提供的信息包括：" + "，".join(known) + "。后续我会结合这些信息继续沟通，不会重复向您索要已提供的内容。"
 
 
 def _is_visitor_sales(chat_mode: Optional[str]) -> bool:
@@ -546,15 +619,34 @@ class QAService:
         token_profile: Optional[str] = None,
         chat_mode: Optional[str] = None,
         session_id: Optional[str] = None,
+        selected_yuque_docs: Optional[List[SelectedYuqueDocRef]] = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """V4：目录状态机 + 目录内关联讲解（SSE）。"""
-        await self._refresh_guide_doc_titles_if_stale()
         sid = (session_id or "").strip()
         if sid:
             await self._chat_session_repository.ensure_session(
                 session_id=sid, chat_mode=(chat_mode or "visitor_sales"), advisor_role="sales"
             )
             await self._chat_session_repository.append_message(session_id=sid, role="user", content=question)
+            if _is_v4_memory_only_question(question):
+                profile = await self._chat_session_profile_repository.get_profile(session_id=sid)
+                answer = _build_v4_memory_answer(profile)
+                yield _sse_stage("memory", "正在根据本会话已收集的信息回答…", retrieval_skipped=True)
+                for token in answer:
+                    yield {"event": "token", "data": {"token": token}}
+                data = ChatV4Response(
+                    answer=answer,
+                    sources=[],
+                    fallback_used=False,
+                    debug={"pipeline": "v4_memory", "retrieval_skipped": True},
+                    lead_nudge_triggered=False,
+                    trial_apply_available=False,
+                ).model_dump()
+                await self._chat_session_repository.append_message(session_id=sid, role="assistant", content=answer)
+                yield {"event": "done", "data": data}
+                return
+
+        await self._refresh_guide_doc_titles_if_stale()
 
         scope = self._compute_yuque_scope(owner, token_profile)
         generator = self._build_generator_by_selected_model(model or settings.llm_model)
@@ -573,7 +665,13 @@ class QAService:
 
         history = await self._chat_session_repository.list_recent_messages(session_id=sid, limit=20) if sid else []
         answer_parts: List[str] = []
-        async for event in orch.answer_stream(question=question, session_id=sid, history=history):
+        selected_doc_ids = [int(x.doc_id) for x in (selected_yuque_docs or []) if int(x.doc_id) >= 1]
+        async for event in orch.answer_stream(
+            question=question,
+            session_id=sid,
+            history=history,
+            selected_doc_ids=selected_doc_ids,
+        ):
             if event.get("event") == "token":
                 try:
                     tok = str((event.get("data") or {}).get("token") or "")
@@ -631,12 +729,116 @@ class QAService:
         picked = allocate_trial_account(sid, accounts)
         if not picked:
             return TrialCredentialsResponse(ok=False, message="试用账号分配失败，请稍后重试。")
+        if profile and isinstance(profile.interests, dict):
+            interests = dict(profile.interests)
+            session_meta = dict(interests.get("_session") or {})
+            session_meta["module_scope"] = "使用指南"
+            session_meta["trial_account_issued"] = True
+            interests["_session"] = session_meta
+            await self._chat_session_profile_repository.upsert_profile(session_id=sid, interests=interests)
         return TrialCredentialsResponse(
             ok=True,
             username=picked.username,
             password=picked.password,
             label=picked.label,
             message="以下为您的试用账号，请妥善保管。",
+        )
+
+    async def apply_visitor_trial_account(
+        self,
+        *,
+        session_id: str,
+        name: str,
+        org_name: str,
+        contact: str,
+        interested_product: str = "",
+        concern: str = "",
+    ) -> TrialCredentialsResponse:
+        sid = (session_id or "").strip()
+        display_name = (name or "").strip()
+        org = (org_name or "").strip()
+        contact_text = (contact or "").strip()
+        product = (interested_product or "").strip()
+        concern_text = (concern or "").strip()
+        if not sid:
+            return TrialCredentialsResponse(ok=False, message="缺少会话标识，请刷新后重试。")
+        if not (display_name and org and contact_text):
+            return TrialCredentialsResponse(ok=False, message="请完整填写姓名、单位、联系方式。")
+        contact_hit = extract_contact(contact_text)
+        if not contact_hit:
+            return TrialCredentialsResponse(ok=False, message="联系方式校验失败，请填写手机号或微信号。")
+
+        await self._lead_capture_repository.try_insert_lead(
+            session_id=sid,
+            contact_type=contact_hit.contact_type,
+            contact_value=contact_hit.value,
+            visitor_type=None,
+        )
+        profile = await self._chat_session_profile_repository.get_profile(session_id=sid)
+        interests = dict(profile.interests) if profile and isinstance(profile.interests, dict) else {}
+        if not product:
+            lead_existing = interests.get("_lead") if isinstance(interests.get("_lead"), dict) else {}
+            session_existing = interests.get("_session") if isinstance(interests.get("_session"), dict) else {}
+            product = str(
+                lead_existing.get("interested_product")
+                or session_existing.get("module_scope")
+                or ""
+            ).strip()
+        lead = dict(interests.get("_lead") or {})
+        lead.update(
+            {
+                "wants_trial": True,
+                "name": display_name,
+                "org_name": org,
+                "contact_type": contact_hit.contact_type,
+                "contact_value": contact_hit.value,
+                "interested_product": product,
+                "concern": concern_text,
+            }
+        )
+        interests["_lead"] = lead
+        session_meta = dict(interests.get("_session") or {})
+        session_meta["module_scope"] = "使用指南"
+        session_meta["trial_account_issued"] = True
+        interests["_session"] = session_meta
+        await self._chat_session_profile_repository.upsert_profile(
+            session_id=sid,
+            display_name=display_name,
+            org_name=org,
+            interests=interests,
+        )
+
+        accounts = load_trial_accounts()
+        if not accounts:
+            return TrialCredentialsResponse(ok=False, message="暂未配置试用账号，请联系顾问。")
+        picked = allocate_trial_account(sid, accounts)
+        if not picked:
+            return TrialCredentialsResponse(ok=False, message="试用账号分配失败，请稍后重试。")
+        return TrialCredentialsResponse(
+            ok=True,
+            username=picked.username,
+            password=picked.password,
+            label=picked.label,
+            message="信息校验通过，已为您分配测试账号。",
+        )
+
+    async def visitor_profile_summary(self, *, session_id: str) -> VisitorProfileResponse:
+        sid = (session_id or "").strip()
+        if not sid:
+            return VisitorProfileResponse(ok=False)
+        profile = await self._chat_session_profile_repository.get_profile(session_id=sid)
+        parts = _visitor_profile_parts(profile)
+        interests = profile.interests if profile and isinstance(profile.interests, dict) else {}
+        session_meta = interests.get("_session") if isinstance(interests.get("_session"), dict) else {}
+        return VisitorProfileResponse(
+            ok=True,
+            name=parts["name"],
+            org_name=parts["org_name"],
+            contact=parts["contact"],
+            interested_product=parts["interested_product"],
+            concern=parts.get("concern", ""),
+            module_scope=parts["module_scope"],
+            trial_account_issued=bool(session_meta.get("trial_account_issued")),
         )
 
     @staticmethod
@@ -842,13 +1044,6 @@ class QAService:
             if not completed:
                 logger.info("chat_stream(dyn) ended_before_done owner=%r scope=%r", owner, scope)
             await yuque_loader.close()
-
-    async def list_session_messages(self, *, session_id: str, limit: int) -> List[ChatMessageRow]:
-        sid = (session_id or "").strip()
-        if not sid:
-            return []
-        safe_limit = max(1, min(int(limit), 200))
-        return await self._chat_session_repository.list_recent_messages(session_id=sid, limit=safe_limit)
 
     async def reset_session(self, *, session_id: str, chat_mode: str = "visitor_sales") -> None:
         sid = (session_id or "").strip()
@@ -1115,20 +1310,19 @@ class QAService:
         if not normalized:
             raise GeneratorConfigError("模型不能为空。")
 
-        # 前端目前只会传入 deepseek-* 与 gpt-*；用前缀判断应走哪个供应商 key。
-        is_openai = normalized.lower().startswith("gpt-")
-        if is_openai:
-            if not settings.openai_api_key:
+        api_key, base_url = settings.resolve_model_endpoint(normalized)
+        if not api_key:
+            if settings.is_openai_model(normalized):
                 raise GeneratorConfigError(f"缺少 OPENAI_API_KEY，无法使用模型 {normalized}。")
-            return OpenAIGenerator(model=normalized, api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+            if settings.is_deepseek_model(normalized):
+                raise GeneratorConfigError(f"缺少 DEEPSEEK_API_KEY，无法使用模型 {normalized}。")
+            if settings.is_dashscope_model(normalized):
+                raise GeneratorConfigError(f"缺少 DASHSCOPE_API_KEY，无法使用模型 {normalized}。")
+            raise GeneratorConfigError(f"缺少 LLM_API_KEY，无法使用模型 {normalized}。")
 
-        if not settings.deepseek_api_key:
-            raise GeneratorConfigError(f"缺少 DEEPSEEK_API_KEY，无法使用模型 {normalized}。")
-        return DeepSeekGenerator(
-            model=normalized,
-            api_key=settings.deepseek_api_key,
-            base_url=settings.deepseek_base_url,
-        )
+        if settings.is_deepseek_model(normalized):
+            return DeepSeekGenerator(model=normalized, api_key=api_key, base_url=base_url)
+        return OpenAIGenerator(model=normalized, api_key=api_key, base_url=base_url)
 
     def mcp_capabilities(self) -> dict[str, Any]:
         """与 YuqueMCPClient.read_tools / call_raw 白名单对齐：只读工具为 integrated，写操作未接入为 available。"""
@@ -1255,17 +1449,17 @@ class QAService:
         )
 
     def _build_generator(self) -> Generator | None:
-        if not settings.llm_api_key:
+        api_key, base_url = settings.resolve_model_endpoint(settings.llm_model)
+        if not api_key:
             return None
-        if settings.llm_provider.lower() == "openai":
-            return OpenAIGenerator(
+        if settings.is_deepseek_model(settings.llm_model):
+            return DeepSeekGenerator(
                 model=settings.llm_model,
-                api_key=settings.llm_api_key,
-                base_url=settings.llm_base_url,
+                api_key=api_key,
+                base_url=base_url,
             )
-        return DeepSeekGenerator(
+        return OpenAIGenerator(
             model=settings.llm_model,
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
+            api_key=api_key,
+            base_url=base_url,
         )
-

@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional, Sequence, Tuple
 
+from app.conversation.chat_display import display_name_for_chat
 from app.conversation.interest_guide_selector import InterestGuideSelector
 from app.conversation.profile_extractor import ProfileExtractor
 from app.core.config import settings
@@ -383,7 +384,10 @@ def _build_sales_prompt(
     name = _display_name_for_chat(profile)
     vt = (profile.visitor_type if profile else "") or ""
     org = (profile.org_name if profile else "") or ""
-    persona = "你是「有为人工智能教育平台」的在线销售咨询顾问。请用自然、像真人的中文沟通。"
+    persona = (
+        "你是「有为人工智能教育平台」的在线销售咨询顾问，名字叫「小为顾问」。"
+        "请用自然、亲切、专业的中文沟通，像真人顾问，而不是在朗读资料。"
+    )
     memory = []
     if name:
         memory.append(f"称呼：{name}")
@@ -392,14 +396,18 @@ def _build_sales_prompt(
     if org:
         memory.append(f"单位（仅内部参考，勿在回复中写出学校/机构名）：{org}")
     mem_block = ("\n".join(memory) + "\n") if memory else ""
-    media_hint = "正文尽量精炼（约80-120字）；配图会在界面展示，文字点到为止即可。" if has_media else "正文尽量精炼（约80-120字）。"
+    media_hint = (
+        "正文尽量精炼（约90-150字）；若有配图，先用1句引导语承接，再结合图片简短说明，不要只丢素材。"
+        if has_media
+        else "正文尽量精炼（约90-150字）。"
+    )
     return (
         f"{persona}\n"
         "请优先回答用户问题本身，像真人销售讲解产品，避免模板化开场。\n"
         "禁止在回复中出现：语雀、知识库、资料库、目录结构、文档标题列表等字样；"
         "不要复述用户的单位/学校名称；若已知称呼，可在开头自然称呼一次。\n"
         f"{media_hint}\n"
-        "输出结构：1-2句结论 + 3-4条要点 + 1句自然追问。\n"
+        "输出结构固定为：先1-2句承接用户，再1句总领，再用3-4条 `- **关键词**：说明` 讲重点，最后1句自然追问。\n"
         "如果上下文不足，只问1个最关键的问题。\n"
         f"{mem_block}\n"
         f"用户问题：{question}\n"
@@ -501,16 +509,7 @@ def _title_match_score(query: str, title: str) -> int:
 
 
 def _display_name_for_chat(profile: Optional[ChatSessionProfile]) -> str:
-    raw = (profile.display_name if profile else "") or ""
-    n = raw.strip()
-    if not n:
-        return ""
-    if n.endswith(("老师", "校长", "家长", "同学")):
-        return n
-    vt = (profile.visitor_type if profile else "") or ""
-    if vt == "teacher":
-        return f"{n}老师" if len(n) <= 4 else n
-    return n
+    return display_name_for_chat(profile)
 
 
 def _greet_line(*, name: str, visitor_type: str) -> str:
@@ -619,4 +618,3 @@ def _build_toc_tree(raw_nodes: Sequence[Dict[str, Any]]) -> List[GuideDocTitleNo
         else:
             roots.append(node)
     return roots
-

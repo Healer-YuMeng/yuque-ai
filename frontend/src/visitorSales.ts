@@ -1,11 +1,11 @@
 /** 与 PRD 一致，品牌为「有为」 */
 export const VISITOR_WELCOME_TEXT =
-  "您好，欢迎了解有为人工智能教育平台。\n我可以帮您介绍平台功能、适用场景、使用方式和案例。为了更准确地给您推荐内容，我想先了解一下：您是学校或机构负责人、老师、学生，还是家长呢？";
+  "您好，欢迎了解有为人工智能教育平台。\n我可以帮您介绍平台功能、适用场景、使用方式和案例。请您先在左侧选择您最关注的场景进行咨询。";
 
 export const INACTIVITY_REMINDER_TEXT =
   "如果您现在暂时不方便继续了解，也可以先留下电话或微信。我们可以安排产品顾问把平台介绍、使用案例和试用方式发给您，后续您有时间再详细沟通。";
 
-export const INACTIVITY_MS = 90_000;
+export const INACTIVITY_MS = 120_000;
 
 export const VISITOR_QUICK_QUESTIONS: { label: string; text: string }[] = [
   { label: "平台是做什么的？", text: "你们平台是做什么的？" },
@@ -17,7 +17,8 @@ export const VISITOR_QUICK_QUESTIONS: { label: string; text: string }[] = [
 ];
 
 export function visitorWelcomeMessages(welcomeId: string): { id: string; role: "assistant"; text: string }[] {
-  return [{ id: welcomeId, role: "assistant", text: VISITOR_WELCOME_TEXT }];
+  void welcomeId;
+  return [];
 }
 
 const DECLINE_PATTERNS =

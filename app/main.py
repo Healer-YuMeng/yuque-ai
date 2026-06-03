@@ -6,7 +6,6 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
-from fastapi.staticfiles import StaticFiles
 
 from app.api.chat_api import router as chat_router
 from app.core.config import settings
@@ -53,15 +52,33 @@ app.add_middleware(
 )
 app.include_router(chat_router)
 
-ui_dir = settings.frontend_dist_dir if settings.frontend_dist_dir.exists() else settings.web_dir
-assets_dir = ui_dir / "assets"
-if assets_dir.exists():
-    app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+def current_ui_dir() -> Path:
+    return settings.frontend_dist_dir if settings.frontend_dist_dir.exists() else settings.web_dir
+
+
+def serve_spa_index() -> FileResponse:
+    return FileResponse(
+        current_ui_dir() / "index.html",
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
+
+
+@app.get("/assets/{asset_path:path}")
+async def serve_frontend_asset(asset_path: str) -> FileResponse:
+    assets_dir = (current_ui_dir() / "assets").resolve()
+    target = (assets_dir / asset_path).resolve()
+    if assets_dir not in target.parents or not target.is_file():
+        raise HTTPException(status_code=404, detail="asset not found")
+    return FileResponse(
+        target,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @app.get("/")
 async def serve_index() -> FileResponse:
-    return FileResponse(Path(ui_dir) / "index.html")
+    return serve_spa_index()
 
 
 @app.get("/visitor")
@@ -72,7 +89,7 @@ async def serve_visitor() -> FileResponse:
     前端会根据 window.location.pathname 判断是否为 /visitor，
     并按需隐藏开发者面板等仅面向内部使用的功能入口。
     """
-    return FileResponse(Path(ui_dir) / "index.html")
+    return serve_spa_index()
 
 
 @app.get("/youwei-logo.png")
@@ -175,4 +192,3 @@ async def serve_dev_links() -> HTMLResponse:
 </html>
         """.strip()
     )
-

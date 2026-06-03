@@ -56,11 +56,12 @@ async def assistant_only_by_llm(question: str) -> Tuple[bool, str]:
         return False, "skipped_long"
     if _likely_knowledge_question(q):
         return False, "skipped_doc_hint"
-    key = (settings.llm_api_key or settings.deepseek_api_key or "").strip()
+    model = (settings.assistant_meta_router_model or settings.intent_llm_model or settings.llm_model).strip()
+    key, base = settings.resolve_model_endpoint(model)
+    key = (key or "").strip()
     if not key:
         return False, "no_key"
-    model = (settings.assistant_meta_router_model or settings.intent_llm_model or settings.llm_model).strip()
-    base = (settings.llm_base_url or settings.deepseek_base_url or "").strip()
+    base = (base or "").strip()
     if not base:
         return False, "no_base_url"
     client = AsyncOpenAI(api_key=key, base_url=base or None)

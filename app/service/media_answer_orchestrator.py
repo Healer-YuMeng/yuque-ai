@@ -23,6 +23,7 @@ _URL_RE = re.compile(r"https?://[^\s)\"'<>]+", re.I)
 _MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\((https?://[^)\s]+)\)", re.I)
 _HTML_IMAGE_RE = re.compile(r"<img[^>]*src=[\"'](https?://[^\"']+)[\"'][^>]*>", re.I)
 _HTML_VIDEO_RE = re.compile(r"<(?:video|source|iframe)[^>]*(?:src|data-src)=[\"'](https?://[^\"']+)[\"'][^>]*>", re.I)
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", re.I)
 _QUERY_STOPWORDS = {
     "请",
     "介绍",
@@ -689,6 +690,22 @@ class MediaAnswerOrchestrator:
                         context=MediaAnswerOrchestrator._around_context(text, m.start(), m.end()),
                     )
                 )
+        for m in _MARKDOWN_LINK_RE.finditer(text or ""):
+            title = (m.group(1) or "").strip()
+            u = (m.group(2) or "").strip()
+            title_lower = title.lower()
+            if (
+                _VIDEO_EXT.search(u)
+                or any(k in u.lower() for k in ("youku", "bilibili", "youtube", "v.qq.com"))
+                or any(k in title_lower for k in ("视频", "演示", "demo", "讲解", "录屏", "课程介绍"))
+            ):
+                out.append(
+                    _MediaMatch(
+                        title=title,
+                        url=u,
+                        context=MediaAnswerOrchestrator._around_context(text, m.start(), m.end()),
+                    )
+                )
         return out
 
     def _media_score(
@@ -884,10 +901,10 @@ class MediaAnswerOrchestrator:
                 continue
             contexts.append(f"文档标题：{doc.title}\n{body[:2800]}")
         if media.videos:
-            lines = [f"- {x.title or x.doc_title or '视频'}：{x.url}" for x in media.videos]
+            lines = [f"- 参考视频{i + 1}（{x.title or x.doc_title or '视频'}）：{x.url}" for i, x in enumerate(media.videos)]
             contexts.append("已检索到相关视频：\n" + "\n".join(lines))
         if media.images:
-            lines = [f"- {x.title or x.doc_title or '图片'}：{x.url}" for x in media.images]
+            lines = [f"- 参考图{i + 1}（{x.title or x.doc_title or '图片'}）：{x.url}" for i, x in enumerate(media.images)]
             contexts.append("已检索到相关图片：\n" + "\n".join(lines))
         return contexts or ["未检索到可靠上下文，请给出简洁且诚实的说明。"]
 
@@ -914,7 +931,8 @@ class MediaAnswerOrchestrator:
             else:
                 media_hint = (
                     f"当前可用图片数量={len(media.images)}，视频数量={len(media.videos)}。"
-                    "结合文本与媒体给出简洁回答。"
+                    "结合文本与媒体给出简洁回答。若素材有帮助，请在文字里自然引用“参考图1/参考图2/参考视频1”，"
+                    "说明这些素材分别展示了什么，不要只丢图片不解释。"
                 )
         else:
             media_hint = (
@@ -925,6 +943,8 @@ class MediaAnswerOrchestrator:
         skill_hint = f"\n补充策略：{skill_instruction}" if skill_instruction else ""
         return (
             "请以销售顾问口吻回答，控制在约100-150字，避免长篇。"
+            "结构固定为：先1句自然承接；再1句总领；再用2-4条 `- **关键词**：说明` 讲重点；最后1句自然互动提问。"
+            "如果展示图片/视频，先写1句引导语，再简短说明参考图或参考视频展示了什么。"
             "如果上下文不足，需明确说明。"
             "禁止编造目录中不存在的模块、功能、案例或指标；"
             "回答必须可在给定上下文中找到依据。"
@@ -998,7 +1018,7 @@ def collect_media_from_doc_contexts(
 
 
 def apply_yuque_proxy_to_media(media: ChatMediaBundle) -> ChatMediaBundle:
-    """语雀原图 URL 需走同源代理，否则浏览器 img 无法加载（鉴权/CORS）。"""
+    """语雀媒体 URL 统一走同源代理，否则浏览器图片/视频常因鉴权或 CORS 无法直接访问。"""
     out_images: List[MediaItem] = []
     for item in media.images:
         u = (item.url or "").strip()
@@ -1013,6 +1033,24 @@ def apply_yuque_proxy_to_media(media: ChatMediaBundle) -> ChatMediaBundle:
                 title=item.title,
                 doc_title=item.doc_title,
                 doc_id=item.doc_id,
+                summary=item.summary,
             )
         )
-    return ChatMediaBundle(images=out_images, videos=list(media.videos))
+    out_videos: List[MediaItem] = []
+    for item in media.videos:
+        u = (item.url or "").strip()
+        if u.startswith("/yuque/asset"):
+            out_videos.append(item)
+            continue
+        if is_allowed_yuque_image_url(u):
+            u = f"/yuque/asset?t={encode_image_proxy_token(u)}"
+        out_videos.append(
+            MediaItem(
+                url=u,
+                title=item.title,
+                doc_title=item.doc_title,
+                doc_id=item.doc_id,
+                summary=item.summary,
+            )
+        )
+    return ChatMediaBundle(images=out_images, videos=out_videos)

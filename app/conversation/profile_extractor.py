@@ -23,15 +23,17 @@ class ProfileUpdate:
 
 _NAME_PATTERNS: Sequence[re.Pattern[str]] = (
     re.compile(r"(?:我叫|名字是|称呼我|叫我)\s*([^\s，,。；;]{1,12})"),
+    re.compile(r"(?:我是|我时)\s*[^\s，,。；;]{2,40}?(?:学校|中学|小学|幼儿园|教育集团|机构|公司)的\s*([^\s，,。；;]{1,16}(?:老师|教师|校长|先生|女士|同学|家长|主任|院长|园长))"),
     # 整段称呼含老师/教师，避免只抽到姓氏「赵」
-    re.compile(r"我是\s*([^\s，,。；;]{1,10}(?:老师|教师))"),
-    re.compile(r"我是\s*([^\s，,。；;]{2,6}(?:先生|女士))"),
-    re.compile(r"我是\s*([^\s，,。；;]{1,12})\s*(?:老师|教师|校长|家长|学生)\b"),
+    re.compile(r"我是\s*([^\s，,。；;]{1,16}(?:老师|教师))"),
+    re.compile(r"我是\s*([^\s，,。；;]{1,16}(?:先生|女士))"),
+    re.compile(r"我是\s*([^\s，,。；;]{1,16})\s*(?:老师|教师|校长|家长|学生|同学)\b"),
     # 容错：口语/错别字「我时张老师」
-    re.compile(r"我[是时]\s*([^\s，,。；;]{2,8}(?:老师|教师|校长|家长|同学)?)"),
+    re.compile(r"我[是时]\s*([^\s，,。；;]{1,16}(?:老师|教师|校长|家长|同学|先生|女士|主任|院长|园长))"),
 )
 _ORG_PATTERNS: Sequence[re.Pattern[str]] = (
     re.compile(r"(?:来自|在)\s*([^\s，,。；;]{2,30}?(?:学校|中学|小学|幼儿园|教育集团|机构|公司))"),
+    re.compile(r"(?:我是|我时)\s*([^\s，,。；;]{2,30}?(?:学校|中学|小学|幼儿园|教育集团|机构|公司))的"),
     re.compile(r"(?:单位|学校)\s*[:：]?\s*([^\s，,。；;]{2,30})"),
 )
 
@@ -56,12 +58,22 @@ _INTEREST_STOPWORDS = {
     "机构",
 }
 
+_INVALID_DISPLAY_NAME_PATTERNS: Sequence[re.Pattern[str]] = (
+    re.compile(r"^(?:低年级|中年级|高年级|低中年级|中高年级)$"),
+    re.compile(r"^(?:小学|初中|高中|大学)(?:阶段|年级)?$"),
+    re.compile(r"^[一二三四五六七八九十]+年级$"),
+    re.compile(r"^[0-9]+年级$"),
+    re.compile(r"^(?:软件项目|软件编程|硬件搭建|信息课|社团)$"),
+    re.compile(r"^(?:给|带|做|看)(?:小学|初中|高中|低年级|中年级|高年级|低中年级|中高年级|软件项目|软件编程|硬件搭建|社团).*$"),
+)
+
 
 class ProfileExtractor:
     def __init__(self) -> None:
         self._client: Optional[AsyncOpenAI] = None
-        if settings.deepseek_api_key:
-            self._client = AsyncOpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url or None)
+        api_key, base_url = settings.resolve_model_endpoint(settings.llm_model)
+        if api_key:
+            self._client = AsyncOpenAI(api_key=api_key, base_url=base_url or None)
 
     async def extract_update(
         self,
@@ -74,7 +86,7 @@ class ProfileExtractor:
         # 规则已抽到核心字段，直接返回
         if rule.display_name or rule.visitor_type or rule.org_name or (rule.interests and len(rule.interests) > 0):
             return rule
-        # LLM 兜底（可选）：只在已配置 DeepSeek key 时执行
+        # LLM 兜底（可选）：只在已配置通用兼容 OpenAI 的 LLM key 时执行
         if not self._client:
             return rule
         llm = await self._extract_by_llm(question=question, history=history)
@@ -101,12 +113,11 @@ class ProfileExtractor:
         visitor_type: Optional[VisitorType] = vt if vt not in ("unknown", "other") else None
 
         name = _pick_first_group(q, _NAME_PATTERNS)
-        if name:
-            name = _sanitize_name(name)
-
         org = _pick_first_group(q, _ORG_PATTERNS)
         if org:
             org = org.strip().strip("，,。；;")
+        if name:
+            name = _sanitize_name(name, org=org)
 
         interests = _extract_interests(q, base=current_profile.interests if current_profile else None)
 
@@ -131,7 +142,7 @@ class ProfileExtractor:
                     visitor_type = vt_corrected
                 name_corrected = _pick_first_group(q, _NAME_PATTERNS)
                 if name_corrected:
-                    name = _sanitize_name(name_corrected)
+                    name = _sanitize_name(name_corrected, org=org)
                 break
 
         # 历史兜底：用户曾经说过“我是老师/我叫X/来自XX”但本轮没提
@@ -149,11 +160,13 @@ class ProfileExtractor:
                 if not name:
                     n2 = _pick_first_group(t, _NAME_PATTERNS)
                     if n2:
-                        name = _sanitize_name(n2)
+                        name = _sanitize_name(n2, org=org)
                 if not org:
                     o2 = _pick_first_group(t, _ORG_PATTERNS)
                     if o2:
                         org = o2.strip().strip("，,。；;")
+                        if name:
+                            name = _sanitize_name(name, org=org)
                 if visitor_type and name and org:
                     break
 
@@ -183,7 +196,8 @@ class ProfileExtractor:
             "你是信息抽取器。只输出 JSON，不要输出解释文字。\n"
             "从用户话语中抽取：display_name(可选)、visitor_type(枚举：institution_decision_maker/teacher/parent/student/unknown)、"
             "org_name(可选)、interests(可选，字符串数组，最多5个)。\n"
-            "规则：不要编造；抽不到就给空串或 unknown；姓名不要超过6个字；org_name不要超过20个字。"
+            "规则：不要编造；抽不到就给空串或 unknown；优先保留用户完整自称（如赵老师、赵先生），不要只截取姓氏；"
+            "单位与称呼要分开抽取，不要把单位和姓名混在一起；不要随意裁剪文字。"
         )
         prompt = (
             f"历史用户消息（可能为空）：\n{hist or '（无）'}\n\n"
@@ -193,7 +207,7 @@ class ProfileExtractor:
         )
         try:
             resp = await self._client.chat.completions.create(  # type: ignore[union-attr]
-                model=settings.llm_model or "deepseek-chat",
+                model=settings.llm_model or "qwen3.6-plus",
                 temperature=0,
                 messages=[
                     {"role": "system", "content": system},
@@ -204,8 +218,8 @@ class ProfileExtractor:
             return ProfileUpdate()
         text = (resp.choices[0].message.content or "").strip()
         data = _safe_json_dict(text)
-        display_name = _sanitize_name(str(data.get("display_name") or "")) if data else ""
         org_name = str(data.get("org_name") or "").strip()
+        display_name = _sanitize_name(str(data.get("display_name") or ""), org=org_name) if data else ""
         vt = str(data.get("visitor_type") or "unknown").strip()
         interests_raw = data.get("interests") if isinstance(data, dict) else []
         interests_list: List[str] = []
@@ -219,7 +233,7 @@ class ProfileExtractor:
         return ProfileUpdate(
             display_name=display_name or None,
             visitor_type=visitor_type,
-            org_name=(org_name[:20] if org_name else None),
+            org_name=(org_name or None),
             interests=interests,
         )
 
@@ -232,15 +246,36 @@ def _pick_first_group(text: str, patterns: Sequence[re.Pattern[str]]) -> str:
     return ""
 
 
-def _sanitize_name(name: str) -> str:
+def _sanitize_name(name: str, *, org: str = "") -> str:
     n = (name or "").strip()
     n = re.sub(r"[\"'<>《》【】（）()]", "", n).strip()
     if not n:
         return ""
+    org_clean = (org or "").strip().strip("，,。；;")
+    if org_clean:
+        for prefix in (
+            f"{org_clean}的",
+            org_clean,
+            f"来自{org_clean}的",
+            f"在{org_clean}的",
+            f"我是{org_clean}的",
+            f"我时{org_clean}的",
+        ):
+            if n.startswith(prefix):
+                n = n[len(prefix) :].strip()
+                break
+    if "的" in n and n.endswith(("老师", "教师", "校长", "先生", "女士", "同学", "家长", "主任", "院长", "园长")):
+        tail = n.split("的")[-1].strip()
+        if tail:
+            n = tail
+    n = re.sub(r"^(我是|我时|我叫|名字是|称呼我|叫我)", "", n).strip()
+    n = n.strip("，,。；;：: ")
     # 避免把“老师/家长”等当成名字
-    if n in ("老师", "家长", "学生", "校长"):
+    if n in ("老师", "教师", "家长", "学生", "同学", "校长", "先生", "女士"):
         return ""
-    return n[:6]
+    if any(pat.fullmatch(n) for pat in _INVALID_DISPLAY_NAME_PATTERNS):
+        return ""
+    return n[:24]
 
 
 def _extract_interests(text: str, *, base: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -285,4 +320,3 @@ def _safe_json_dict(text: str) -> Dict[str, Any]:
         return v if isinstance(v, dict) else {}
     except Exception:
         return {}
-

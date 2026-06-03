@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
 from app.conversation.contact_extractor import extract_contact
 from app.conversation.lead_nudge_policy import LeadNudgeDecision, LeadNudgePolicy
@@ -27,6 +27,7 @@ class V4LeadEndResult:
     nudge: LeadNudgeDecision
     trial_apply_available: bool
     append_text: str = ""
+    asked_field: str = ""
 
 
 class V4LeadOutreach:
@@ -104,22 +105,33 @@ class V4LeadOutreach:
         sid = (session_id or "").strip()
         has_lead = await self._lead_repo.has_lead_for_session(session_id=sid) if sid else False
         lead_meta = _lead_meta(profile)
+        session_meta = _session_meta(profile)
         has_contact = has_lead or bool(lead_meta.get("contact_value"))
+        user_rounds = sum(1 for row in history if row.role == "user")
 
         nudge = LeadNudgeDecision(triggered=False)
         # 功能讲解中（深度内容）才在收尾轻引导；纯目录引导轮次不弹留资
-        if not is_guide_only and dialog_level >= 2:
+        if not is_guide_only and dialog_level >= 2 and user_rounds >= 4:
             nudge = self._lead_policy.decide(
                 question=question,
                 history=history,
                 has_existing_lead=has_contact and _lead_complete(lead_meta, profile),
             )
             if nudge.triggered:
-                nudge = LeadNudgeDecision(
-                    triggered=True,
-                    reason=nudge.reason,
-                    text=_build_v4_nudge_text(profile=profile, lead_meta=lead_meta),
+                nudge_text, asked_field = _build_v4_nudge_text(
+                    profile=profile,
+                    lead_meta=lead_meta,
+                    session_meta=session_meta,
                 )
+                nudge = LeadNudgeDecision(
+                    triggered=bool(nudge_text),
+                    reason=nudge.reason,
+                    text=nudge_text,
+                )
+            else:
+                asked_field = ""
+        else:
+            asked_field = ""
 
         wants_trial = bool(lead_meta.get("wants_trial")) or _mentions_trial(question)
         trial_apply_available = wants_trial and not is_guide_only
@@ -132,6 +144,7 @@ class V4LeadOutreach:
             nudge=nudge,
             trial_apply_available=trial_apply_available,
             append_text=append,
+            asked_field=asked_field,
         )
 
 
@@ -142,36 +155,45 @@ def _lead_meta(profile: Optional[ChatSessionProfile]) -> Dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def _session_meta(profile: Optional[ChatSessionProfile]) -> Dict[str, Any]:
+    if not profile or not isinstance(profile.interests, dict):
+        return {}
+    raw = profile.interests.get("_session")
+    return raw if isinstance(raw, dict) else {}
+
+
 def _lead_complete(lead_meta: Dict[str, Any], profile: Optional[ChatSessionProfile]) -> bool:
     has_name = bool(display_name_for_chat(profile))
     has_contact = bool(lead_meta.get("contact_value"))
     has_org = bool(lead_meta.get("org_name") or (profile.org_name if profile else ""))
-    has_product = bool(lead_meta.get("interested_product"))
-    return has_name and has_contact and has_org and has_product
+    return has_name and has_contact and has_org
 
 
-def _build_v4_nudge_text(*, profile: Optional[ChatSessionProfile], lead_meta: Dict[str, Any]) -> str:
+def _build_v4_nudge_text(
+    *,
+    profile: Optional[ChatSessionProfile],
+    lead_meta: Dict[str, Any],
+    session_meta: Dict[str, Any],
+) -> tuple[str, str]:
     name = display_name_for_chat(profile)
     prefix = f"{name}，" if name else ""
-    missing: List[str] = []
-    if not name:
-        missing.append("姓名")
-    if not (lead_meta.get("org_name") or (profile.org_name if profile else "")):
-        missing.append("单位")
-    if not lead_meta.get("contact_value"):
-        missing.append("联系方式")
-    if not lead_meta.get("interested_product"):
-        missing.append("感兴趣的内容")
-    if missing:
-        ask = "、".join(missing)
-        return (
-            f"{prefix}如果您方便，可以留一下{ask}；"
-            "若想先体验平台，也可以直接申请测试，我这边可以为您开通试用账号。"
-        )
-    return (
-        f"{prefix}如果您想继续体验，可以申请测试账号；"
-        "需要的话我也可以安排顾问结合您的场景做进一步说明。"
-    )
+    asked_fields = {str(x) for x in (session_meta.get("asked_fields") or []) if str(x).strip()}
+    suppressed_fields = {str(x) for x in (session_meta.get("suppressed_fields") or []) if str(x).strip()}
+    blocked = asked_fields | suppressed_fields
+
+    checks = [
+        ("name", not name, "为了后续沟通更顺一点，方便告诉我该怎么称呼您吗？"),
+        ("org_name", not (lead_meta.get("org_name") or (profile.org_name if profile else "")), "为了后续给您更贴合的方案，方便补充一下您的单位或学校吗？"),
+        (
+            "contact",
+            not lead_meta.get("contact_value"),
+            "我这里有一份完整案例资料，可以发给您参考。方便留一个联系方式吗？我安排顾问发给您。",
+        ),
+    ]
+    for field, missing, text in checks:
+        if missing and field not in blocked:
+            return (f"{prefix}{text}" if prefix else text, field)
+    return ("", "")
 
 
 def _mentions_trial(q: str) -> bool:

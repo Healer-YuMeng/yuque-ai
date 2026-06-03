@@ -17,6 +17,7 @@ class _FakeQAServiceV4:
         token_profile=None,
         chat_mode=None,
         session_id=None,
+        selected_yuque_docs=None,
     ):
         yield {"event": "token", "data": {"token": "你好"}}
         yield {

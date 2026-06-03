@@ -71,8 +71,13 @@ class CatalogStateMachine:
 
         current = self._catalog.get(state.node_uuid) if state.node_uuid else None
         matched = self._catalog.match_node(question, current=current, prefer_subtree=True)
+        explicit_cross_scene_switch = bool(
+            matched
+            and current
+            and self._catalog.is_explicit_scene_switch(question, current=current, target=matched)
+        )
 
-        if matched and self._catalog.can_advance(current, matched):
+        if matched and (explicit_cross_scene_switch or self._catalog.can_advance(current, matched)):
             level = self._catalog.dialog_level(matched)
             new_state = CatalogDialogState(
                 node_uuid=matched.uuid,

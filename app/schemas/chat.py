@@ -57,6 +57,7 @@ class MediaItem(BaseModel):
     title: str = ""
     doc_title: str = ""
     doc_id: Optional[str] = None
+    summary: str = ""
 
 
 class ChatMediaBundle(BaseModel):
@@ -110,6 +111,26 @@ class TrialCredentialsResponse(BaseModel):
     message: str = ""
 
 
+class VisitorTrialApplyRequest(BaseModel):
+    session_id: str = Field(..., min_length=1, max_length=120)
+    name: str = Field(..., min_length=1, max_length=80)
+    org_name: str = Field(..., min_length=1, max_length=160)
+    contact: str = Field(..., min_length=1, max_length=120)
+    interested_product: str = Field(default="", max_length=160)
+    concern: str = Field(default="", max_length=500)
+
+
+class VisitorProfileResponse(BaseModel):
+    ok: bool = True
+    name: str = ""
+    org_name: str = ""
+    contact: str = ""
+    interested_product: str = ""
+    concern: str = ""
+    module_scope: str = ""
+    trial_account_issued: bool = False
+
+
 class ChatV4CapabilitiesResponse(BaseModel):
     enabled: bool
     toc_loaded: bool = False
@@ -139,17 +160,6 @@ class GuideDocTitlesResponse(BaseModel):
     refreshed_seconds_ago: Optional[float] = None
 
 
-class ChatMessageItem(BaseModel):
-    role: Literal["user", "assistant"]
-    text: str
-    created_at: str
-
-
-class ChatHistoryResponse(BaseModel):
-    session_id: str
-    messages: List[ChatMessageItem]
-
-
 class ResetSessionRequest(BaseModel):
     session_id: str = Field(..., min_length=1, max_length=120)
     chat_mode: Literal["visitor_sales", "rag"] = "visitor_sales"
@@ -167,6 +177,7 @@ class HealthResponse(BaseModel):
 class RuntimeModeResponse(BaseModel):
     mode: Literal["rag", "direct_yuque"]
     label: str
+    llm_model: str = ""
 
 
 class MCPToolItem(BaseModel):
@@ -188,4 +199,3 @@ class MCPCapabilitiesResponse(BaseModel):
     # True：.env 已单独填写非空 YUQUE_SCOPE_SECONDARY；False：repo_scope_secondary 由主库回退
     yuque_scope_secondary_explicit: bool = False
     tools: List[MCPToolItem]
-

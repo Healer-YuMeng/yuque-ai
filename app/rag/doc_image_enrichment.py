@@ -199,6 +199,42 @@ async def _vision_caption(image_bytes: bytes, mime: str, *, user_hint: str) -> s
         return ""
 
 
+async def _vision_video_caption(video_url: str, *, user_hint: str) -> str:
+    key = (settings.vision_api_key or "").strip()
+    if not key:
+        return ""
+    vb = (settings.vision_base_url or "").strip()
+    client = AsyncOpenAI(api_key=key, base_url=vb or None)
+    prompt = (
+        "你是文档视频识读助手。请用中文简洁概括视频里可见的核心内容、步骤或演示重点，"
+        "不超过 280 字。不要编造视频中没有的内容。"
+        f"\n用户问题供对齐重点：{user_hint[:400]}"
+    )
+    try:
+        resp = await client.chat.completions.create(
+            model=settings.vision_model,
+            temperature=0.1,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "video_url",
+                            "video_url": {"url": video_url},
+                            "fps": max(1, int(settings.vision_video_fps)),
+                        },
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ],
+            max_tokens=400,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as exc:  # pragma: no cover - network
+        logger.warning("vision_video_caption_failed err=%s", exc)
+        return ""
+
+
 def _bodies_from_context_chunks(
     retrieval: RetrievalResult,
     *,

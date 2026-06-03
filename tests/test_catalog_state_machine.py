@@ -56,6 +56,23 @@ def test_fsm_blocks_shallow_jump_without_reset() -> None:
     assert state2.node_uuid == state.node_uuid
 
 
+def test_fsm_allows_explicit_cross_scene_switch() -> None:
+    catalog = TocCatalogIndex(_sample_raw())
+    fsm = CatalogStateMachine(catalog)
+    deep = catalog.match_node("作业管理", current=None, prefer_subtree=False)
+    assert deep
+    state = CatalogDialogState(
+        node_uuid=deep.uuid,
+        path_titles=list(deep.path_titles),
+        dialog_level=3,
+        root_guide_shown=True,
+    )
+    state2, node, action = fsm.apply_user_turn(question="我想要咨询平台介绍的内容，请帮我解答。", state=state)
+    assert action == "anchor"
+    assert node and node.title == "平台介绍"
+    assert state2.node_uuid == node.uuid
+
+
 def test_level3_no_root_guide_candidates() -> None:
     catalog = TocCatalogIndex(_sample_raw())
     fsm = CatalogStateMachine(catalog)

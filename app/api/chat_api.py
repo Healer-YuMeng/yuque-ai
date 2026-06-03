@@ -33,9 +33,9 @@ from app.schemas.chat import (
     ChatV4CapabilitiesResponse,
     TrialCredentialsRequest,
     TrialCredentialsResponse,
+    VisitorTrialApplyRequest,
+    VisitorProfileResponse,
     GuideDocTitlesResponse,
-    ChatHistoryResponse,
-    ChatMessageItem,
     ResetSessionRequest,
     HealthResponse,
     MCPCapabilitiesResponse,
@@ -60,10 +60,10 @@ def _ensure_yuque_token_for_profile(token_profile: str | None) -> str:
 
 @router.get("/yuque/asset")
 async def yuque_asset_proxy(
-    t: str = Query(..., min_length=1, description="base64url 编码的原始图片 URL"),
+    t: str = Query(..., min_length=1, description="base64url 编码的原始语雀媒体 URL"),
     token_profile: str | None = Query(default=None, max_length=24),
 ) -> Response:
-    """同源代理语雀 CDN 图片，供回答中 Markdown 插图展示（带主机白名单）。"""
+    """同源代理语雀 CDN 图片/视频，供前端展示（带主机白名单）。"""
     try:
         raw_url = decode_image_proxy_token(t)
     except (ValueError, UnicodeDecodeError) as exc:
@@ -75,7 +75,7 @@ async def yuque_asset_proxy(
         "X-Auth-Token": token,
         "User-Agent": "enterprise-rag-mvp/0.1",
         "Referer": "https://www.yuque.com/",
-        "Accept": "image/*,*/*;q=0.8",
+        "Accept": "*/*",
     }
     try:
         async with httpx.AsyncClient(
@@ -133,22 +133,6 @@ def get_qa_service() -> QAService:
     return app.state.qa_service
 
 
-@router.get("/chat/history", response_model=ChatHistoryResponse)
-async def chat_history(
-    session_id: str = Query(..., min_length=1, max_length=120),
-    limit: int = Query(default=20, ge=1, le=200),
-    qa_service: QAService = Depends(get_qa_service),
-) -> ChatHistoryResponse:
-    """拉取服务端持久化的会话消息，用于前端刷新/换标签页恢复上下文。"""
-    rows = await qa_service.list_session_messages(session_id=session_id, limit=limit)
-    items = [
-        ChatMessageItem(role=("user" if r.role == "user" else "assistant"), text=r.content, created_at=r.created_at)
-        for r in rows
-        if (r.role in ("user", "assistant") and (r.content or "").strip())
-    ]
-    return ChatHistoryResponse(session_id=session_id, messages=items)
-
-
 @router.post("/chat/session/reset")
 async def reset_chat_session(
     request: ResetSessionRequest,
@@ -167,7 +151,7 @@ async def health() -> HealthResponse:
 @router.get("/runtime-mode", response_model=RuntimeModeResponse)
 async def runtime_mode(qa_service: QAService = Depends(get_qa_service)) -> RuntimeModeResponse:
     mode, label = qa_service.runtime_mode()
-    return RuntimeModeResponse(mode=mode, label=label)
+    return RuntimeModeResponse(mode=mode, label=label, llm_model=settings.llm_model)
 
 
 @router.get("/mcp/capabilities", response_model=MCPCapabilitiesResponse)
@@ -387,6 +371,7 @@ async def chat_v4(request: ChatV4Request, qa_service: QAService = Depends(get_qa
             token_profile=request.token_profile,
             chat_mode=request.chat_mode,
             session_id=request.session_id,
+            selected_yuque_docs=request.selected_yuque_docs,
         ):
             if item.get("event") == "token":
                 answer += str((item.get("data") or {}).get("token") or "")
@@ -416,6 +401,7 @@ async def chat_v4_stream(request: ChatV4Request, qa_service: QAService = Depends
                 token_profile=request.token_profile,
                 chat_mode=request.chat_mode,
                 session_id=request.session_id,
+                selected_yuque_docs=request.selected_yuque_docs,
             ):
                 yield (
                     f"event: {item['event']}\n"
@@ -444,6 +430,29 @@ async def chat_v4_trial_credentials(
     if not settings.chat_v4_enabled:
         raise HTTPException(status_code=503, detail="V4 链路未开启。")
     return await qa_service.issue_v4_trial_credentials(session_id=request.session_id)
+
+
+@router.post("/visitor/trial/apply", response_model=TrialCredentialsResponse)
+async def visitor_trial_apply(
+    request: VisitorTrialApplyRequest,
+    qa_service: QAService = Depends(get_qa_service),
+) -> TrialCredentialsResponse:
+    return await qa_service.apply_visitor_trial_account(
+        session_id=request.session_id,
+        name=request.name,
+        org_name=request.org_name,
+        contact=request.contact,
+        interested_product=request.interested_product,
+        concern=request.concern,
+    )
+
+
+@router.get("/visitor/profile", response_model=VisitorProfileResponse)
+async def visitor_profile(
+    session_id: str = Query(..., min_length=1, max_length=120),
+    qa_service: QAService = Depends(get_qa_service),
+) -> VisitorProfileResponse:
+    return await qa_service.visitor_profile_summary(session_id=session_id)
 
 
 @router.post("/index/rebuild", response_model=RebuildIndexResponse)
@@ -628,4 +637,3 @@ async def docs_suggest(request: DocSuggestRequest) -> DocSuggestResponse:
 
     docs_out = _list_docs_fallback_metas(docs, q, empty_limit=10, match_limit=10)
     return DocSuggestResponse(docs=docs_out)
-

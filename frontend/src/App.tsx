@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import youweiLogo from "./assets/youwei-logo.png";
 import { normalizeMarkdownAutolinks } from "./markdownAutolink";
 import {
   INACTIVITY_MS,
   INACTIVITY_REMINDER_TEXT,
-  VISITOR_WELCOME_TEXT,
   VISITOR_QUICK_QUESTIONS,
   looksLikeContactInUserMessage,
   looksLikeDeclineFollowup,
@@ -19,7 +18,8 @@ const STREAM_READ_IDLE_MS = 120_000;
 /** 从发起请求到收到响应头的最长等待 */
 const STREAM_CONNECT_MS = 45_000;
 /** 超过该秒数后显示「可能较慢」说明 */
-const STREAM_SLOW_HINT_SEC = 20;
+const STREAM_COMFORT_INITIAL_SEC = 5;
+const STREAM_COMFORT_FOLLOWUP_SEC = 12;
 const CHAT_V2_ENV_ENABLED = String(import.meta.env.VITE_CHAT_V2_ENABLED ?? "false").toLowerCase() === "true";
 const CHAT_V3_ENV_ENABLED = String(import.meta.env.VITE_CHAT_V3_ENABLED ?? "false").toLowerCase() === "true";
 const CHAT_V4_ENV_ENABLED = String(import.meta.env.VITE_CHAT_V4_ENABLED ?? "false").toLowerCase() === "true";
@@ -33,6 +33,10 @@ const FOCUS_SCENE_ITEMS = ["人工智能通识教育", "智能招生", "跨学�
 const SHOW_DEV_PANEL =
   !IS_VISITOR_ROUTE &&
   String(import.meta.env.VITE_SHOW_DEV_PANEL ?? "true").toLowerCase() === "true";
+const MODEL_STORAGE_KEY = "visitor_selected_model_v1";
+const SUPPORTED_MODEL_OPTIONS = ["qwen3.6-flash", "qwen3.6-plus", "deepseek-chat", "gpt-4o-mini"] as const;
+const WELCOME_HERO_TITLE = "我是专属于您的AI顾问-小为，欢迎向我咨询！";
+const WELCOME_HERO_SUBTEXT = "";
 
 type TurnTraceMcpCall = {
   tool: string;
@@ -69,6 +73,30 @@ function parseTurnTrace(debug: Record<string, unknown> | null | undefined): Turn
   const raw = debug?.turn_trace;
   if (!raw || typeof raw !== "object") return null;
   return raw as TurnTracePayload;
+}
+
+function normalizeSelectedModel(value: string): string {
+  const model = (value || "").trim();
+  return (SUPPORTED_MODEL_OPTIONS as readonly string[]).includes(model) ? model : "qwen3.6-flash";
+}
+
+type ComfortPhase = "initial" | "followup";
+
+type PendingComfortMessage = {
+  text: string;
+  phase: ComfortPhase;
+};
+
+function resolveComfortMessage(
+  _scene: string | null,
+  phase: ComfortPhase,
+): PendingComfortMessage {
+  const genericInitial = "我是小为顾问，正在帮您整理更贴合的内容，先别急，我马上给您。";
+  const genericFollowup = "我是小为顾问，这边还在替您认真梳理资料，我想尽量给您一个更清楚的答复，您再稍等我一下。";
+  return {
+    phase,
+    text: phase === "initial" ? genericInitial : genericFollowup,
+  };
 }
 
 async function readStreamChunkWithIdle(
@@ -108,12 +136,16 @@ type ChatItem = {
   id: string;
   role: Role;
   text: string;
+  /** 仅用于发起后端请求，不在对话流中展示 */
+  hidden?: boolean;
   media?: ChatMediaBundle;
   debug?: string;
   /** 流式阶段提示（来自 SSE event: stage），完成或出错后清除 */
   streamStage?: string;
   /** 本轮流式已等待秒数（前端计时，完成或出错后清除） */
   streamElapsedSec?: number;
+  /** 仅前端等待态使用的临时安抚提示，不写入持久化会话 */
+  pendingComfortMessage?: PendingComfortMessage;
   /** V4：是否展示「申请测试账号」按钮 */
   trialApplyAvailable?: boolean;
   trialCredentialsShown?: boolean;
@@ -124,6 +156,7 @@ type ChatMediaItem = {
   title?: string;
   doc_title?: string;
   doc_id?: string | null;
+  summary?: string;
 };
 
 type ChatMediaBundle = {
@@ -144,6 +177,8 @@ type SessionState = {
   declinedContact?: boolean;
   /** 访客销售：本会话已插入无互动留资提醒 */
   inactivityPromptSent?: boolean;
+  /** 本会话已提交过测试账号申请，后续不再展示申请按钮 */
+  trialApplicationSubmitted?: boolean;
 };
 
 type MCPToolItem = {
@@ -177,22 +212,41 @@ type DocMeta = {
 function docMetaSelectable(doc: DocMeta): boolean {
   return doc.toc_selectable !== false;
 }
+function docMetaAnchorable(doc: DocMeta): boolean {
+  return docMetaSelectable(doc) && Number.isInteger(doc.id) && Number(doc.id) >= 1;
+}
 
 function normalizeTocLevel(level: number | null | undefined): number {
   return Math.max(1, Math.min(3, level ?? 1));
 }
 
-function firstSelectableDocIndex(docs: DocMeta[]): number {
-  const i = docs.findIndex(docMetaSelectable);
-  return i >= 0 ? i : 0;
-}
-
-function selectableDocIndices(docs: DocMeta[]): number[] {
-  return docs.map((d, i) => (docMetaSelectable(d) ? i : -1)).filter((i) => i >= 0);
-}
-
 type DocSuggestResponse = {
   docs: DocMeta[];
+};
+
+type TrialApplyResponse = {
+  ok?: boolean;
+  username?: string;
+  password?: string;
+  label?: string;
+  message?: string;
+};
+
+type VisitorProfileResponse = {
+  ok?: boolean;
+  name?: string;
+  org_name?: string;
+  contact?: string;
+  interested_product?: string;
+  concern?: string;
+  module_scope?: string;
+  trial_account_issued?: boolean;
+};
+
+type RuntimeModeResponse = {
+  mode: "rag" | "direct_yuque";
+  label: string;
+  llm_model?: string;
 };
 
 /** 已选语雀文档：含 doc_id 供 POST /chat/stream 锚定；docId 为 0 表示仅有标题（不落 selected_yuque_docs） */
@@ -247,6 +301,7 @@ function parseChatMedia(input: unknown): ChatMediaBundle | undefined {
           title: typeof x.title === "string" ? x.title : "",
           doc_title: typeof x.doc_title === "string" ? x.doc_title : "",
           doc_id: typeof x.doc_id === "string" ? x.doc_id : null,
+          summary: typeof x.summary === "string" ? x.summary : "",
         } as ChatMediaItem;
       })
       .filter((x): x is ChatMediaItem => Boolean(x));
@@ -255,6 +310,102 @@ function parseChatMedia(input: unknown): ChatMediaBundle | undefined {
   const videos = normalize(raw.videos);
   if (images.length === 0 && videos.length === 0) return undefined;
   return { images, videos };
+}
+
+function renderInlineMediaCard(item: ChatMediaItem, kind: "image" | "video", key: string) {
+  const label = (item.title || item.doc_title || (kind === "image" ? "相关图片" : "相关视频")).trim();
+  const summary = (item.summary || "").trim();
+  if (kind === "video") {
+    return (
+      <div key={key} className="msg-video-card">
+        <video className="msg-video-player" controls playsInline preload="metadata" src={item.url} />
+        <a href={item.url} target="_blank" rel="noreferrer" className="msg-video-link">
+          {label}
+        </a>
+        {summary ? <div className="msg-media-summary">{summary}</div> : null}
+      </div>
+    );
+  }
+  return (
+    <a key={key} className="msg-image-card" href={item.url} target="_blank" rel="noreferrer">
+      <img src={item.url} alt={label} loading="lazy" />
+      <span>{label}</span>
+      {summary ? <em className="msg-media-summary">{summary}</em> : null}
+    </a>
+  );
+}
+
+function itemTextWithGuideOffer(answer: string, guideTopicHit: boolean, offerLine: string): string {
+  const base = (answer || "").trim();
+  if (!guideTopicHit) return base;
+  if (base.includes(offerLine)) return base;
+  return base ? `${base}\n\n${offerLine}` : offerLine;
+}
+
+function looksLikeTrialApplyIntent(text: string): boolean {
+  const q = (text || "").trim();
+  return /(申请|开通|领取|获取).*(测试账号|试用账号)|(测试账号|试用账号).*(申请|开通|领取|获取)/.test(q);
+}
+
+function looksLikeAlreadyApplied(text: string): boolean {
+  const q = (text || "").trim();
+  return /(已经|已).*(申请过|提交过)|申请过了|提交过了|我已经申请/.test(q);
+}
+
+const INVALID_TRIAL_APPLY_NAME_PATTERNS = [
+  /^(?:低年级|中年级|高年级|低中年级|中高年级)$/,
+  /^(?:小学|初中|高中|大学)(?:阶段|年级)?$/,
+  /^[一二三四五六七八九十]+年级$/,
+  /^[0-9]+年级$/,
+  /^(?:软件项目|软件编程|硬件搭建|信息课|社团)$/,
+  /^(?:给|带|做|看)(?:小学|初中|高中|低年级|中年级|高年级|低中年级|中高年级|软件项目|软件编程|硬件搭建|社团).*$/,
+];
+
+function sanitizeTrialApplyNameCandidate(raw: string): string {
+  let name = (raw || "").trim().replace(/^[“"'《【（(<]+|[”"'》】）)>]+$/g, "");
+  name = name.replace(/^(?:我是|我时|我叫|姓名是|名字是)/, "").trim();
+  name = name.replace(/^[，,。；;：:\s]+|[，,。；;：:\s]+$/g, "");
+  if (!name) return "";
+  if (["老师", "教师", "家长", "学生", "同学", "校长", "先生", "女士"].includes(name)) return "";
+  if (INVALID_TRIAL_APPLY_NAME_PATTERNS.some((pattern) => pattern.test(name))) return "";
+  return name.slice(0, 24);
+}
+
+function extractTrialApplyName(userText: string): string {
+  const candidates = [
+    userText.match(/(?:我叫|姓名是|名字是)\s*([^，,。；;\n]{1,12})/)?.[1] || "",
+    userText.match(/(?:我是|我时)\s*([^，,。；;\n]{1,16}(?:老师|教师|校长|主任|先生|女士|家长|同学))/)?.[1] || "",
+  ];
+  for (const candidate of candidates) {
+    const name = sanitizeTrialApplyNameCandidate(candidate);
+    if (name) return name;
+  }
+  return "";
+}
+
+function extractTrialApplyDraft(session: SessionState | null, fallbackProduct: string): VisitorProfileResponse {
+  const userText = (session?.messages || [])
+    .filter((m) => m.role === "user")
+    .map((m) => m.text || "")
+    .join("\n");
+  const phone = userText.match(/1[3-9]\d{9}/)?.[0] || "";
+  const name = extractTrialApplyName(userText);
+  const org =
+    userText.match(/(?:单位是|学校是|来自|在)\s*([^，,。；;\n]{2,40}(?:学校|学院|机构|中心|公司|集团|教育局)?)/)?.[1] || "";
+  const concern =
+    [...(session?.messages || [])]
+      .reverse()
+      .find((m) => m.role === "user" && !looksLikeContactInUserMessage(m.text) && !looksLikeTrialApplyIntent(m.text))
+      ?.text.trim()
+      .slice(0, 180) || "";
+  return {
+    ok: true,
+    name,
+    org_name: org,
+    contact: phone,
+    interested_product: fallbackProduct,
+    concern,
+  };
 }
 
 /** 访客销售：新会话首条为 AI 欢迎语 */
@@ -283,6 +434,11 @@ function generateSessionId(): string {
   return `s-${uuid}`;
 }
 
+function generateTurnMessageIds(sessionId: string, seq: number): { userId: string; assistantId: string } {
+  const nonce = `${sessionId}-${Date.now()}-${seq}-${Math.random().toString(16).slice(2, 8)}`;
+  return { userId: `u-${nonce}`, assistantId: `a-${nonce}` };
+}
+
 const SESSIONS_STORAGE_KEY = "rag_frontend_sessions_v2";
 const SESSION_TITLE_SEQ_KEY = "rag_frontend_session_title_seq_v1";
 /** localStorage 最多保留会话数，避免长期堆积占满浏览器配额 */
@@ -298,7 +454,41 @@ function sanitizeMessageForStorage(m: ChatItem): ChatItem {
   const copy = { ...m };
   delete copy.streamStage;
   delete copy.streamElapsedSec;
+  delete copy.pendingComfortMessage;
   return copy;
+}
+
+function ensureUniqueMessageIds(messages: ChatItem[], sessionId: string): ChatItem[] {
+  const seen = new Set<string>();
+  return messages.map((message, idx) => {
+    const baseId = String(message.id || `${message.role}-${idx}`);
+    if (!seen.has(baseId)) {
+      seen.add(baseId);
+      return { ...message, id: baseId };
+    }
+    let nextId = `${baseId}-${sessionId}-${idx}`;
+    while (seen.has(nextId)) {
+      nextId = `${nextId}-${seen.size}`;
+    }
+    seen.add(nextId);
+    return { ...message, id: nextId };
+  });
+}
+
+function refreshVisitorWelcomeText(messages: ChatItem[]): ChatItem[] {
+  return messages.flatMap((message) => {
+    if (
+      message.role === "assistant" &&
+      (
+        message.text.includes("我想先了解一下：您是学校或机构负责人、老师、学生，还是家长呢？") ||
+        message.text.includes("您好，欢迎了解有为人工智能教育平台。") ||
+        message.text.includes("我可以帮您介绍平台功能、适用场景、使用方式和案例。")
+      )
+    ) {
+      return [];
+    }
+    return [message];
+  });
 }
 
 function sanitizeSessionsForStorage(
@@ -349,9 +539,10 @@ function normalizeSessionForVisitor(s: SessionState): SessionState {
     contactCollected: s.contactCollected ?? false,
     declinedContact: s.declinedContact ?? false,
     inactivityPromptSent: s.inactivityPromptSent ?? false,
+    trialApplicationSubmitted: s.trialApplicationSubmitted ?? false,
   };
   if (s.messages && s.messages.length > 0) {
-    return { ...s, ...flags };
+    return { ...s, messages: refreshVisitorWelcomeText(ensureUniqueMessageIds(s.messages, s.id)), ...flags };
   }
   const wid = `welcome-${s.id}`;
   return { ...s, messages: emptySessionMessages(wid), ...flags };
@@ -371,12 +562,13 @@ function formatUnknownDebug(v: unknown): string {
 function formatSessionTranscript(session: SessionState): string {
   const title = (session.title || "会话").trim();
   const lines: string[] = [
-    `「${title}」· 有为销售顾问对话记录`,
+    `「${title}」· 小为顾问对话记录`,
     `导出时间：${new Date().toLocaleString("zh-CN", { hour12: false })}`,
     "",
   ];
   let hasContent = false;
   for (const item of session.messages) {
+    if (item.hidden) continue;
     const text = (item.text || "").trim();
     const images = item.media?.images ?? [];
     const videos = item.media?.videos ?? [];
@@ -384,7 +576,7 @@ function formatSessionTranscript(session: SessionState): string {
       continue;
     }
     hasContent = true;
-    const roleLabel = item.role === "user" ? "访客" : "顾问";
+    const roleLabel = item.role === "user" ? "访客" : "小为顾问";
     lines.push(`${roleLabel}：`);
     if (text) {
       lines.push(text);
@@ -420,6 +612,7 @@ function readStoredSessionState(): { sessions: SessionState[]; activeSessionId: 
         updatedAt: Date.now(),
         messages: emptySessionMessages("welcome-default"),
         ...{ contactCollected: false, declinedContact: false, inactivityPromptSent: false },
+        ...{ trialApplicationSubmitted: false },
       },
     ],
     activeSessionId: "default",
@@ -443,9 +636,10 @@ function readStoredSessionState(): { sessions: SessionState[]; activeSessionId: 
       const hasUser = normalized.messages.some((m) => m.role === "user" && (m.text || "").trim());
       if (hasUser) return normalized;
       const oldId = normalized.id;
-      if (oldId === "default") return normalized;
-      const newId = generateSessionId();
-      idMap.set(oldId, newId);
+      const newId = oldId === "default" ? oldId : generateSessionId();
+      if (newId !== oldId) {
+        idMap.set(oldId, newId);
+      }
       return {
         ...normalized,
         id: newId,
@@ -462,6 +656,15 @@ function readStoredSessionState(): { sessions: SessionState[]; activeSessionId: 
   }
 }
 
+let initialStoredSessionState: { sessions: SessionState[]; activeSessionId: string } | null = null;
+
+function getInitialStoredSessionState(): { sessions: SessionState[]; activeSessionId: string } {
+  if (!initialStoredSessionState) {
+    initialStoredSessionState = readStoredSessionState();
+  }
+  return initialStoredSessionState;
+}
+
 function App() {
   const [chatV2Enabled, setChatV2Enabled] = useState(CHAT_V2_ENV_ENABLED);
   const [chatV3Enabled, setChatV3Enabled] = useState(CHAT_V3_ENV_ENABLED);
@@ -469,17 +672,18 @@ function App() {
   const [question, setQuestion] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [historySessionPicked, setHistorySessionPicked] = useState(false);
-  const [selectedModel, setSelectedModel] = useState("deepseek-chat");
+  const [selectedModel, setSelectedModel] = useState(() => {
+    if (typeof window === "undefined") return "qwen3.6-flash";
+    const stored = window.localStorage.getItem(MODEL_STORAGE_KEY) || "";
+    return normalizeSelectedModel(stored);
+  });
   /** 左侧开发者面板收起（仅保留展开条） */
   const [devSidebarCollapsed, setDevSidebarCollapsed] = useState(false);
-  const [activeSessionId, setActiveSessionId] = useState(() => readStoredSessionState().activeSessionId);
-  const [sessions, setSessions] = useState<SessionState[]>(() => readStoredSessionState().sessions);
+  const [activeSessionId, setActiveSessionId] = useState(() => getInitialStoredSessionState().activeSessionId);
+  const [sessions, setSessions] = useState<SessionState[]>(() => getInitialStoredSessionState().sessions);
   /** 历史会话行「⋯」溢出菜单：同时只展开一行 */
   const [openSessionMenuId, setOpenSessionMenuId] = useState<string | null>(null);
   const [mcpData, setMcpData] = useState<MCPCapabilitiesResponse | null>(null);
-  const [docSuggestOpen, setDocSuggestOpen] = useState(false);
-  const [docSuggestDocs, setDocSuggestDocs] = useState<DocMeta[]>([]);
-  const [docSuggestActiveIndex, setDocSuggestActiveIndex] = useState(0);
   const [selectedYuqueDocs, setSelectedYuqueDocs] = useState<SelectedYuqueDocLocal[]>([]);
   const [kbPanelLoading, setKbPanelLoading] = useState(false);
   const [kbPanelError, setKbPanelError] = useState("");
@@ -496,9 +700,19 @@ function App() {
     stream_path: string;
   } | null>(null);
   const [composerDocGateHint, setComposerDocGateHint] = useState("");
-  const [activeFocusScene, setActiveFocusScene] = useState<(typeof FOCUS_SCENE_ITEMS)[number]>(FOCUS_SCENE_ITEMS[0]);
+  const [activeFocusScene, setActiveFocusScene] = useState<((typeof FOCUS_SCENE_ITEMS)[number]) | null>(null);
+  const [hasPickedFocusScene, setHasPickedFocusScene] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [sessionCopied, setSessionCopied] = useState(false);
+  const [guideSectionOpen, setGuideSectionOpen] = useState(false);
+  const [selectedGuideNodeId, setSelectedGuideNodeId] = useState<string | null>(null);
+  const [trialApplyDialogOpen, setTrialApplyDialogOpen] = useState(false);
+  const [trialApplySubmitting, setTrialApplySubmitting] = useState(false);
+  const [trialApplyError, setTrialApplyError] = useState("");
+  const [trialApplyName, setTrialApplyName] = useState("");
+  const [trialApplyOrg, setTrialApplyOrg] = useState("");
+  const [trialApplyContact, setTrialApplyContact] = useState("");
+  const [welcomeHeroTitle, setWelcomeHeroTitle] = useState("");
   const controllerRef = useRef<AbortController | null>(null);
   /** 用户点击「停止」触发的 abort，与超时/空闲 abort 区分 */
   const userStreamStopRef = useRef(false);
@@ -507,20 +721,12 @@ function App() {
   const activeSessionRef = useRef(activeSessionId);
   const questionRef = useRef(question);
   const isStreamingRef = useRef(isStreaming);
-  const historyHydratedRef = useRef<Set<string>>(new Set());
   const resetPendingRef = useRef<Map<string, Promise<void>>>(new Map());
   const sessionTitleSeqRef = useRef<number | null>(null);
   const [inactivityEpoch, setInactivityEpoch] = useState(0);
-  const suggestDebounceTimerRef = useRef<number | null>(null);
-  const latestSuggestReqIdRef = useRef(0);
-  const docTokenRangeRef = useRef<{ start: number; end: number } | null>(null);
   const messageIdSeqRef = useRef(0);
   const floatingInitDoneRef = useRef(false);
-  const composerInputWrapRef = useRef<HTMLDivElement | null>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const docFloatRootRef = useRef<HTMLDivElement | null>(null);
-  type DocFloatRect = { bottom: number; left: number; width: number; maxHeight: number };
-  const [docFloatRect, setDocFloatRect] = useState<DocFloatRect | null>(null);
 
   const copyTextToClipboard = async (text: string) => {
     const safeText = text ?? "";
@@ -549,6 +755,22 @@ function App() {
     window.setTimeout(() => setCopiedMessageId((prev) => (prev === messageId ? null : prev)), 1200);
   };
 
+  const appendAssistantMessageToActiveSession = useCallback((text: string) => {
+    const sid = activeSessionRef.current;
+    if (!sid || !(text || "").trim()) return;
+    const messageId = `assistant-note-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+    setSessions((prev) =>
+      prev.map((session) =>
+        session.id === sid
+          ? {
+              ...touchSession(session),
+              messages: [...session.messages, { id: messageId, role: "assistant", text }],
+            }
+          : session
+      )
+    );
+  }, []);
+
   useEffect(() => {
     activeSessionRef.current = activeSessionId;
   }, [activeSessionId]);
@@ -559,9 +781,14 @@ function App() {
     // 前端兜底：切换到“未开始聊天”的会话时，强制只显示欢迎语，避免 UI 残留造成“看起来复制了其它会话历史”。
     setSessions((prev) =>
       prev.map((s) => {
-        if (s.id !== sid) return s;
+        const sanitizedMessages = s.messages.some((m) => m.pendingComfortMessage)
+          ? s.messages.map((m) => (m.pendingComfortMessage ? { ...m, pendingComfortMessage: undefined } : m))
+          : s.messages;
+        if (s.id !== sid) return sanitizedMessages === s.messages ? s : { ...s, messages: sanitizedMessages };
         const hasUser = s.messages.some((m) => m.role === "user" && (m.text || "").trim());
-        if (hasUser) return s;
+        if (hasUser) {
+          return sanitizedMessages === s.messages ? s : { ...s, messages: sanitizedMessages };
+        }
         return { ...touchSession(s), messages: emptySessionMessages(`welcome-${sid}`) };
       }),
     );
@@ -572,8 +799,62 @@ function App() {
   }, [question]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(MODEL_STORAGE_KEY, selectedModel);
+  }, [selectedModel]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== MODEL_STORAGE_KEY) return;
+      const next = normalizeSelectedModel(event.newValue || "");
+      if (next && next !== selectedModel) {
+        setSelectedModel(next);
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [selectedModel]);
+
+  useEffect(() => {
     isStreamingRef.current = isStreaming;
   }, [isStreaming]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = (window.localStorage.getItem(MODEL_STORAGE_KEY) || "").trim();
+    if (stored) return;
+    let cancelled = false;
+    const loadRuntimeModel = async () => {
+      try {
+        const resp = await fetch("/runtime-mode");
+        if (!resp.ok) return;
+        const data = (await resp.json()) as RuntimeModeResponse;
+        const runtimeModel = normalizeSelectedModel(data.llm_model || "");
+        if (!cancelled && runtimeModel) {
+          setSelectedModel(runtimeModel);
+        }
+      } catch {
+        // ignore
+      }
+    };
+    void loadRuntimeModel();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const s = sessions.find((x) => x.id === activeSessionId);
+    if (!s) return;
+    const hasUserTurns = s.messages.some((m) => m.role === "user" && (m.text || "").trim());
+    if (hasUserTurns) {
+      setHasPickedFocusScene(true);
+    }
+    if (!s.contactCollected && s.messages.some((m) => m.role === "user" && looksLikeContactInUserMessage(m.text))) {
+      setSessions((prev) => prev.map((item) => (item.id === activeSessionId ? { ...item, contactCollected: true } : item)));
+    }
+  }, [activeSessionId, sessions]);
 
   useEffect(() => {
     const sid = activeSessionId;
@@ -611,44 +892,6 @@ function App() {
     }, STORAGE_DEBOUNCE_MS);
     return () => window.clearTimeout(tid);
   }, [sessions, activeSessionId, isStreaming]);
-
-  useEffect(() => {
-    const sid = activeSessionId;
-    if (!sid) return;
-    if (isStreamingRef.current) return;
-    if (historyHydratedRef.current.has(sid)) return;
-    const session = sessions.find((s) => s.id === sid);
-    if (!session) return;
-    const hasUser = session.messages.some((m) => m.role === "user");
-    if (hasUser) {
-      historyHydratedRef.current.add(sid);
-      return;
-    }
-
-    const run = async () => {
-      try {
-        const resp = await fetch(`/chat/history?session_id=${encodeURIComponent(sid)}&limit=40`);
-        if (!resp.ok) return;
-        const json = (await resp.json()) as {
-          session_id?: string;
-          messages?: { role: "user" | "assistant"; text: string; created_at: string }[];
-        };
-        const msgs = Array.isArray(json?.messages) ? json.messages : [];
-        if (!msgs.length) return;
-        const restored: ChatItem[] = msgs.map((m, idx) => ({
-          id: `srv-${m.created_at || "t"}-${idx}`,
-          role: m.role,
-          text: m.text || "",
-        }));
-        setSessions((prev) => prev.map((s) => (s.id === sid ? { ...touchSession(s), messages: restored } : s)));
-      } catch {
-        // ignore
-      } finally {
-        historyHydratedRef.current.add(sid);
-      }
-    };
-    void run();
-  }, [activeSessionId, sessions]);
 
   useEffect(() => {
     const loadMcpCapabilities = async () => {
@@ -764,71 +1007,72 @@ function App() {
     window.setTimeout(() => setSessionCopied(false), 1500);
   }, [sessionTranscript]);
 
-  const requestTrialCredentials = useCallback(async (assistantId: string) => {
-    const sid = activeSessionRef.current;
-    if (!sid) return;
-    try {
-      const resp = await fetch("/chat/v4/trial-credentials", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: sid }),
-      });
-      const data = (await resp.json()) as {
-        ok?: boolean;
-        username?: string;
-        password?: string;
-        label?: string;
-        message?: string;
-      };
-      const block = data.ok
-        ? `\n\n【试用账号】\n账号：${data.username || ""}\n密码：${data.password || ""}${
-            data.label ? `\n说明：${data.label}` : ""
-          }`
-        : `\n\n${data.message || "暂时无法获取试用账号，请稍后再试。"}`;
-      setSessions((prev) =>
-        prev.map((session) =>
-          session.id === sid
-            ? {
-                ...touchSession(session),
-                messages: session.messages.map((item) =>
-                  item.id === assistantId
-                    ? {
-                        ...item,
-                        text: (item.text || "") + block,
-                        trialApplyAvailable: false,
-                        trialCredentialsShown: true,
-                      }
-                    : item
-                ),
-              }
-            : session
-        )
-      );
-    } catch {
-      setSessions((prev) =>
-        prev.map((session) =>
-          session.id === sid
-            ? {
-                ...touchSession(session),
-                messages: session.messages.map((item) =>
-                  item.id === assistantId
-                    ? {
-                        ...item,
-                        text: `${item.text || ""}\n\n获取试用账号失败，请稍后重试。`,
-                      }
-                    : item
-                ),
-              }
-            : session
-        )
-      );
-    }
-  }, []);
   /** 默认优先展示“新对话欢迎屏”；只有选择历史会话后，才按历史消息渲染 */
   const showWelcomeHero = useMemo(() => {
     if (historySessionPicked) return false;
-    return !chatItems.some((item) => item.role === "user" && (item.text || "").trim());
+    return !chatItems.some(
+      (item) =>
+        !item.hidden &&
+        (
+          (item.text || "").trim().length > 0 ||
+          Boolean(item.streamStage) ||
+          Boolean(item.pendingComfortMessage) ||
+          Boolean(item.media && (item.media.images.length > 0 || item.media.videos.length > 0))
+        ),
+    );
   }, [chatItems, historySessionPicked]);
+  const visitorChatVisible = useMemo(() => {
+    if (!IS_VISITOR_ROUTE) return true;
+    if (historySessionPicked || isStreaming) return true;
+    return chatItems.some(
+      (item) =>
+        !item.hidden &&
+        (
+          (item.text || "").trim().length > 0 ||
+          Boolean(item.streamStage) ||
+          Boolean(item.pendingComfortMessage) ||
+          Boolean(item.media && (item.media.images.length > 0 || item.media.videos.length > 0))
+        ),
+    );
+  }, [chatItems, historySessionPicked, isStreaming]);
+  const chatHasThreadContent = useMemo(() => {
+    if (showWelcomeHero) return false;
+    if (isStreaming) return true;
+    return chatItems.some(
+      (item) =>
+        !item.hidden &&
+        (
+          (item.text || "").trim().length > 0 ||
+          Boolean(item.streamStage) ||
+          Boolean(item.pendingComfortMessage)
+        ),
+    );
+  }, [chatItems, isStreaming, showWelcomeHero]);
+  const assistantHasRenderedOutput = useMemo(() => {
+    return chatItems.some(
+      (item) =>
+        item.role === "assistant" &&
+        ((((item.text || "").trim().length > 0) ||
+          Boolean(item.media && (item.media.images.length || item.media.videos.length))))
+    );
+  }, [chatItems]);
+
+  useEffect(() => {
+    if (!showWelcomeHero) {
+      setWelcomeHeroTitle(WELCOME_HERO_TITLE);
+      return;
+    }
+    setWelcomeHeroTitle("");
+    let index = 0;
+    const timer = window.setInterval(() => {
+      index += 1;
+      setWelcomeHeroTitle(WELCOME_HERO_TITLE.slice(0, index));
+      if (index >= WELCOME_HERO_TITLE.length) {
+        window.clearInterval(timer);
+      }
+    }, 55);
+    return () => window.clearInterval(timer);
+  }, [showWelcomeHero]);
 
   const newChatShortcutLabel = useMemo(
     () =>
@@ -907,60 +1151,6 @@ function App() {
     return () => window.clearTimeout(tid);
   }, [yuqueOwnerForApi, loadKbToc]);
 
-  const closeDocSuggest = useCallback(() => {
-    setDocSuggestOpen(false);
-    setDocSuggestDocs([]);
-    docTokenRangeRef.current = null;
-    setDocSuggestActiveIndex(0);
-  }, []);
-
-  const updateDocFloatRect = useCallback(() => {
-    const showSuggest = docSuggestOpen && docSuggestDocs.length > 0;
-    if (!showSuggest) {
-      setDocFloatRect(null);
-      return;
-    }
-    const anchorEl = composerInputWrapRef.current;
-    if (!anchorEl) {
-      setDocFloatRect(null);
-      return;
-    }
-    const r = anchorEl.getBoundingClientRect();
-    const margin = 8;
-    const w = Math.max(r.width, 280);
-    let left = r.left;
-    if (left + w > window.innerWidth - margin) left = Math.max(margin, window.innerWidth - margin - w);
-    if (left < margin) left = margin;
-    /** 悬浮层贴在锚点上方：用 fixed + bottom，使列表底部与输入区顶边留出 margin */
-    const bottom = window.innerHeight - r.top + margin;
-    const maxHeight = Math.min(360, Math.max(120, Math.floor(r.top - margin - 8)));
-    setDocFloatRect({ bottom, left, width: w, maxHeight });
-  }, [docSuggestOpen, docSuggestDocs.length]);
-
-  /* Floating 层位置依赖 DOM 测量；此处同步 setState 为既有交互模式 */
-  /* eslint-disable react-hooks/set-state-in-effect */
-  useLayoutEffect(() => {
-    const open = docSuggestOpen && docSuggestDocs.length > 0;
-    if (!open) {
-      const tid = window.setTimeout(() => setDocFloatRect(null), 0);
-      return () => window.clearTimeout(tid);
-    }
-    updateDocFloatRect();
-    const ro = new ResizeObserver(() => {
-      updateDocFloatRect();
-    });
-    const watch = [composerInputWrapRef.current].filter(Boolean);
-    watch.forEach((el) => ro.observe(el!));
-    window.addEventListener("resize", updateDocFloatRect);
-    window.addEventListener("scroll", updateDocFloatRect, true);
-    return () => {
-      ro.disconnect();
-      window.removeEventListener("resize", updateDocFloatRect);
-      window.removeEventListener("scroll", updateDocFloatRect, true);
-    };
-  }, [docSuggestOpen, docSuggestDocs.length, updateDocFloatRect]);
-  /* eslint-enable react-hooks/set-state-in-effect */
-
   /** 输入框自适应高度：默认 44px（与发送按钮同高），随内容自动撑高至 max-height（CSS），超出后内部滚动 */
   useLayoutEffect(() => {
     const el = composerTextareaRef.current;
@@ -969,45 +1159,6 @@ function App() {
     const next = Math.max(44, el.scrollHeight);
     el.style.height = `${next}px`;
   }, [question]);
-
-  useEffect(() => {
-    const open = docSuggestOpen && docSuggestDocs.length > 0;
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      const t = e.target as Node | null;
-      if (!t) return;
-      if (docFloatRootRef.current?.contains(t)) return;
-      if (composerInputWrapRef.current?.contains(t)) return;
-      closeDocSuggest();
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [docSuggestOpen, docSuggestDocs.length, closeDocSuggest]);
-
-  useEffect(() => {
-    const open = docSuggestOpen && docSuggestDocs.length > 0;
-    if (!open) return;
-    const onEsc = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      closeDocSuggest();
-    };
-    document.addEventListener("keydown", onEsc);
-    return () => document.removeEventListener("keydown", onEsc);
-  }, [docSuggestOpen, docSuggestDocs.length, closeDocSuggest]);
-
-  const applyDocSuggestPick = (doc: DocMeta) => {
-    if (!docMetaSelectable(doc)) return;
-    const range = docTokenRangeRef.current;
-    if (!range) return;
-    const insert = doc.title;
-    const after = question.slice(range.end);
-    const needsSpace = after && !/^\s/.test(after);
-    const next = question.slice(0, range.start) + insert + (needsSpace ? " " : "") + after;
-    setQuestion(next);
-    setSelectedYuqueDocs((prev) => upsertSelectedYuqueDoc(prev, doc));
-    setComposerDocGateHint("");
-    closeDocSuggest();
-  };
 
   const removeSelectedYuqueDoc = (docId: number, title: string) => {
     setSelectedYuqueDocs((prev) => prev.filter((p) => !(p.docId === docId && p.title === title)));
@@ -1019,80 +1170,101 @@ function App() {
     setComposerDocGateHint("");
   };
 
-  const extractAtToken = (text: string, cursorPos: number) => {
-    const before = text.slice(0, cursorPos);
-    // 匹配 1) 光标末尾仅为 '@'
-    const m1 = before.match(/(^|\s)@$/);
-    if (m1) {
-      const wholeIndex = m1.index ?? 0;
-      const leading = m1[1]; // '' 或 一个空白字符
-      const atPos = leading ? wholeIndex + leading.length : wholeIndex;
-      return { start: atPos, end: cursorPos, term: "" };
+  const handleGuideEntryClick = useCallback(() => {
+    setGuideSectionOpen((open) => !open);
+    if (kbPanelDocs.length === 0) {
+      void loadKbToc();
     }
+  }, [kbPanelDocs.length, loadKbToc]);
 
-    // 匹配 2) 光标末尾为 “行首/空白 + @ + 非空白字符” 的 @ 前缀
-    const m2 = before.match(/(^|\s)@([^\s@]{1,80})$/);
-    if (!m2) return null;
-    const wholeIndex = m2.index ?? 0;
-    const leading = m2[1]; // '' 或 一个空白字符
-    const atPos = leading ? wholeIndex + leading.length : wholeIndex;
-    const term = m2[2];
-    return { start: atPos, end: cursorPos, term };
-  };
+  const handleTrialApplyEntryClick = useCallback(async () => {
+    const sid = activeSessionRef.current;
+    const fallback = extractTrialApplyDraft(activeSession, activeFocusScene || "");
+    let profile = fallback;
+    if (sid) {
+      try {
+        const resp = await fetch(`/visitor/profile?session_id=${encodeURIComponent(sid)}`);
+        if (resp.ok) {
+          const data = (await resp.json()) as VisitorProfileResponse;
+          profile = {
+            ...fallback,
+            ...data,
+            interested_product: data.interested_product || fallback.interested_product,
+            concern: data.concern || fallback.concern,
+          };
+        }
+      } catch {
+        profile = fallback;
+      }
+    }
+    const safeName = sanitizeTrialApplyNameCandidate(profile.name || "");
+    setTrialApplyName((prev) => prev || safeName || "");
+    setTrialApplyOrg((prev) => prev || profile.org_name || "");
+    setTrialApplyContact((prev) => prev || profile.contact || "");
+    setTrialApplyError("");
+    setTrialApplyDialogOpen(true);
+  }, [activeSession]);
+
+  const submitTrialApply = useCallback(async () => {
+    const sid = activeSessionRef.current;
+    if (!sid) return;
+    setTrialApplyError("");
+    setTrialApplySubmitting(true);
+    try {
+      const resp = await fetch("/visitor/trial/apply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: sid,
+          name: trialApplyName.trim(),
+          org_name: trialApplyOrg.trim(),
+          contact: trialApplyContact.trim(),
+        }),
+      });
+      const data = (await resp.json()) as TrialApplyResponse;
+      const text = data.ok
+        ? `信息校验通过，已为您分配测试账号。\n\n【测试账号】\n账号：${data.username || ""}\n密码：${data.password || ""}${data.label ? `\n说明：${data.label}` : ""}`
+        : data.message || "信息校验未通过，请补充完整后重试。";
+      if (!resp.ok || !data.ok) {
+        setTrialApplyError(data.message || "信息校验未通过，请检查后重试。");
+        setLastPipelineDebug({ source: "visitor_trial_apply", error: data.message || "信息校验未通过" });
+        return;
+      }
+      appendAssistantMessageToActiveSession(text);
+      setSessions((prev) =>
+        prev.map((session) =>
+          session.id === sid
+            ? {
+                ...touchSession(session),
+                trialApplicationSubmitted: true,
+                messages: session.messages.map((item) =>
+                  item.role === "assistant" ? { ...item, trialApplyAvailable: false } : item
+                ),
+              }
+            : session
+        )
+      );
+      setTrialApplyDialogOpen(false);
+      setTrialApplyName("");
+      setTrialApplyOrg("");
+      setTrialApplyContact("");
+    } catch {
+      const msg = "账号申请请求失败，请稍后重试。";
+      setTrialApplyError(msg);
+      setLastPipelineDebug({ source: "visitor_trial_apply", error: msg });
+    } finally {
+      setTrialApplySubmitting(false);
+    }
+  }, [
+    appendAssistantMessageToActiveSession,
+    trialApplyContact,
+    trialApplyName,
+    trialApplyOrg,
+  ]);
 
   const handleQuestionChange = (event: ChangeEvent<HTMLTextAreaElement>) => {
     setComposerDocGateHint("");
-    const nextValue = event.target.value as string;
-    const cursorPos = event.currentTarget.selectionStart ?? nextValue.length;
-    setQuestion(nextValue);
-
-    const at = extractAtToken(nextValue, cursorPos);
-    if (!at) {
-      closeDocSuggest();
-      return;
-    }
-
-    docTokenRangeRef.current = { start: at.start, end: at.end };
-
-    if (suggestDebounceTimerRef.current) window.clearTimeout(suggestDebounceTimerRef.current);
-    const reqId = ++latestSuggestReqIdRef.current;
-
-    suggestDebounceTimerRef.current = window.setTimeout(async () => {
-      try {
-        const resp = await fetch("/docs/suggest", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: at.term, owner: yuqueOwnerForApi, token_profile: "primary" }),
-        });
-        if (!resp.ok) {
-          let detail = "";
-          try {
-            const j = (await resp.json()) as { detail?: string };
-            if (typeof j?.detail === "string") detail = j.detail;
-          } catch {
-            /* ignore */
-          }
-          if (latestSuggestReqIdRef.current !== reqId) return;
-          setComposerDocGateHint(
-            detail
-              ? `文档联想失败：${detail}`
-              : `文档联想失败（HTTP ${resp.status}）。请检查 Token、YUQUE_SCOPE 与「知识库所有者」是否与语雀一致。`,
-          );
-          closeDocSuggest();
-          return;
-        }
-        const data = (await resp.json()) as DocSuggestResponse;
-        if (latestSuggestReqIdRef.current !== reqId) return;
-        const docs = data?.docs || [];
-        setDocSuggestDocs(docs);
-        setDocSuggestOpen(docs.length > 0);
-        setDocSuggestActiveIndex(firstSelectableDocIndex(docs));
-      } catch {
-        if (latestSuggestReqIdRef.current !== reqId) return;
-        setComposerDocGateHint("文档联想请求异常，请检查网络或稍后重试。");
-        closeDocSuggest();
-      }
-    }, 250);
+    setQuestion(event.target.value as string);
   };
 
   const stopStreaming = () => {
@@ -1123,9 +1295,9 @@ function App() {
 
   const createSession = useCallback(() => {
     setHistorySessionPicked(false);
+    setActiveFocusScene(null);
+    setHasPickedFocusScene(false);
     const id = generateSessionId();
-    // 新建会话必须“从零开始”：禁止用服务端历史覆盖该会话的欢迎语
-    historyHydratedRef.current.add(id);
     setSessions((prev) => {
       const title = nextSessionTitle();
       return [{ id, title, updatedAt: Date.now(), messages: emptySessionMessages(`welcome-${id}`) }, ...prev];
@@ -1240,22 +1412,34 @@ function App() {
     }
   };
 
-  const askQuestion = async (presetQuestion?: string) => {
+  const askQuestion = async (
+    presetQuestion?: string,
+    bypassSceneGate = false,
+    options?: { hideUserMessage?: boolean },
+  ) => {
     const text = (presetQuestion ?? question).trim();
     if (!text || isStreaming) return;
+    if (!bypassSceneGate && !hasPickedFocusScene) return;
+    const guideTopicHit = text.includes("使用指南") || selectedGuideNodeId !== null;
+    const trialApplyIntentHit = looksLikeTrialApplyIntent(text);
+    const alreadyAppliedHit = looksLikeAlreadyApplied(text);
+    if (text.includes("使用指南")) {
+      if (!guideSectionOpen) {
+        setGuideSectionOpen(true);
+      }
+      if (kbPanelDocs.length === 0) {
+        void loadKbToc();
+      }
+    }
     setComposerDocGateHint("");
-    // 允许用户使用 @ 选文档：后端基于文档标题做匹配时不需要这个前缀符号
-    const payloadQuestion = text.replace(/(^|\s)@/g, "$1");
+    const payloadQuestion = text;
     const sessionId = activeSessionRef.current;
-    const mid = ++messageIdSeqRef.current;
-    const userId = `u-${mid}`;
-    const assistantId = `a-${mid}`;
+    const { userId, assistantId } = generateTurnMessageIds(sessionId, ++messageIdSeqRef.current);
     const declineHit = looksLikeDeclineFollowup(text);
     const contactHit = looksLikeContactInUserMessage(text);
     setQuestion("");
     const docsForRequest = selectedYuqueDocs.filter((d) => d.docId >= 1);
     setSelectedYuqueDocs([]);
-    closeDocSuggest();
     const streamPathForMeta = chatV4Enabled
       ? "/chat/v4/stream"
       : chatV3Enabled
@@ -1273,28 +1457,44 @@ function App() {
     userStreamStopRef.current = false;
     setStreamingAssistantId(assistantId);
     setIsStreaming(true);
-    setSessions((prev) =>
-      prev.map((session) =>
-        session.id === sessionId
-          ? {
-              ...touchSession(session),
-              declinedContact: session.declinedContact || declineHit,
-              contactCollected: session.contactCollected || contactHit,
-              messages: [
-                ...session.messages,
-                { id: userId, role: "user", text },
-                {
-                  id: assistantId,
-                  role: "assistant",
-                  text: "",
-                  streamStage: "正在搜索知识库资料…",
-                  streamElapsedSec: 0,
-                },
-              ],
-            }
-          : session
-      )
-    );
+    const nextTurnMessages: ChatItem[] = [
+      { id: userId, role: "user", text, hidden: options?.hideUserMessage },
+      {
+        id: assistantId,
+        role: "assistant",
+        text: "",
+        streamStage: "正在搜索知识库资料…",
+        streamElapsedSec: 0,
+      },
+    ];
+    setSessions((prev) => {
+      let matched = false;
+      const next = prev.map((session) => {
+        if (session.id !== sessionId) return session;
+        matched = true;
+        return {
+          ...touchSession(session),
+          declinedContact: session.declinedContact || declineHit,
+          contactCollected: session.contactCollected || contactHit,
+          trialApplicationSubmitted: session.trialApplicationSubmitted || alreadyAppliedHit,
+          messages: [...session.messages, ...nextTurnMessages],
+        };
+      });
+      if (matched) return next;
+      return [
+        {
+          id: sessionId,
+          title: "默认会话",
+          updatedAt: Date.now(),
+          messages: [...emptySessionMessages(`welcome-${sessionId}`), ...nextTurnMessages],
+          contactCollected: contactHit,
+          declinedContact: declineHit,
+          inactivityPromptSent: false,
+          trialApplicationSubmitted: alreadyAppliedHit,
+        },
+        ...next,
+      ];
+    });
 
     const controller = new AbortController();
     controllerRef.current = controller;
@@ -1306,6 +1506,7 @@ function App() {
     let streamFlushTimer: number | null = null;
     let pendingDonePayload: Record<string, unknown> | null = null;
     let receivedAnyToken = false;
+    const comfortScene = activeFocusScene;
 
     const flushStreamText = () => {
       if (!streamTextBuf) return;
@@ -1347,6 +1548,7 @@ function App() {
                     ? {
                         ...item,
                         text: item.text + token,
+                        pendingComfortMessage: undefined,
                         ...(token.trim() ? { streamStage: undefined } : {}),
                       }
                     : item
@@ -1367,7 +1569,12 @@ function App() {
       const serverContact = Boolean(
         vs && vs.contact_detected === true
       ) || Boolean(dbg && dbg.contact_detected === true);
-      const trialApplyAvailable = payload.trial_apply_available === true;
+      const serverAnswer = typeof payload.answer === "string" ? payload.answer : "";
+      const finalText = itemTextWithGuideOffer(
+        serverAnswer,
+        guideTopicHit,
+        "需要我给您提供这个模块的测试账号吗？",
+      );
       setSessions((prev) =>
         prev.map((session) =>
           session.id === sessionId
@@ -1381,11 +1588,12 @@ function App() {
                         media,
                         streamStage: undefined,
                         streamElapsedSec: undefined,
-                        trialApplyAvailable,
-                        text:
-                          item.text ||
-                          (typeof payload.answer === "string" && payload.answer) ||
-                          "没有返回回答。",
+                        pendingComfortMessage: undefined,
+                        trialApplyAvailable:
+                          !session.trialApplicationSubmitted &&
+                          (trialApplyIntentHit ||
+                            looksLikeTrialApplyIntent(serverAnswer)),
+                        text: item.text || finalText || "没有返回回答。",
                       }
                     : item
                 ),
@@ -1448,13 +1656,28 @@ function App() {
               ? {
                   ...session,
                   messages: session.messages.map((item) =>
-                    item.id === assistantId ? { ...item, streamElapsedSec: elapsedSec } : item
+                    item.id === assistantId
+                      ? {
+                          ...item,
+                          streamElapsedSec: elapsedSec,
+                          pendingComfortMessage:
+                            item.text.trim().length > 0
+                              ? undefined
+                              : elapsedSec >= STREAM_COMFORT_FOLLOWUP_SEC
+                                ? resolveComfortMessage(comfortScene, "followup")
+                                : elapsedSec >= STREAM_COMFORT_INITIAL_SEC
+                                  ? item.pendingComfortMessage?.phase === "followup"
+                                    ? item.pendingComfortMessage
+                                    : resolveComfortMessage(comfortScene, "initial")
+                                  : item.pendingComfortMessage,
+                        }
+                      : item
                   ),
                 }
               : session
           )
         );
-      }, 2000);
+      }, 1000);
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder("utf-8");
@@ -1518,14 +1741,15 @@ function App() {
                   ...touchSession(session),
                   messages: session.messages.map((item) =>
                     item.id === assistantId
-                      ? {
-                          ...item,
-                          streamStage: undefined,
-                          streamElapsedSec: undefined,
-                          text: item.text || "请求失败，请稍后重试。",
-                        }
-                      : item
-                  ),
+                    ? {
+                        ...item,
+                        streamStage: undefined,
+                        streamElapsedSec: undefined,
+                        pendingComfortMessage: undefined,
+                        text: item.text || "请求失败，请稍后重试。",
+                      }
+                    : item
+                ),
                 }
               : session
           )
@@ -1583,6 +1807,7 @@ function App() {
                         ...item,
                         streamStage: undefined,
                         streamElapsedSec: undefined,
+                        pendingComfortMessage: undefined,
                         text: item.text || fallbackText,
                       }
                     : item
@@ -1612,12 +1837,14 @@ function App() {
     }
   };
 
-  const showDocSuggest = docSuggestOpen && docSuggestDocs.length > 0;
-  const docFloatPortalOpen = showDocSuggest;
   const handleFocusSceneShortcut = (scene: (typeof FOCUS_SCENE_ITEMS)[number]) => {
     if (isStreaming) return;
     setActiveFocusScene(scene);
-    void askQuestion(`我想要咨询${scene}的内容，请帮我解答。`);
+    setHasPickedFocusScene(true);
+    setSelectedGuideNodeId(null);
+    setSelectedYuqueDocs([]);
+    if (IS_VISITOR_ROUTE) return;
+    void askQuestion(`我想要咨询${scene}的内容，请帮我解答。`, true);
   };
 
   const turnTrace = parseTurnTrace(lastPipelineDebug);
@@ -1688,6 +1915,45 @@ function App() {
     return rows;
   }, [kbPanelDocs, kbNodeId, collapsedKbNodeIds]);
 
+  const guidePanelDocs = useMemo(() => {
+    if (!kbPanelDocs.length) return [] as DocMeta[];
+    const root = kbPanelDocs.find((doc) => (doc.title || "").trim() === "使用指南");
+    if (!root) return [] as DocMeta[];
+    const rootUuid = (root.toc_uuid || "").trim();
+    if (!rootUuid) return [root];
+    const childMap = new Map<string, DocMeta[]>();
+    kbPanelDocs.forEach((doc) => {
+      const parent = (doc.toc_parent_uuid || "").trim();
+      if (!parent) return;
+      const list = childMap.get(parent);
+      if (list) list.push(doc);
+      else childMap.set(parent, [doc]);
+    });
+    const out: DocMeta[] = [];
+    const stack: DocMeta[] = [root];
+    const seen = new Set<string>();
+    while (stack.length) {
+      const node = stack.shift()!;
+      const id = (node.toc_uuid || "").trim() || `${node.id ?? node.slug ?? node.title}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push(node);
+      const children = childMap.get((node.toc_uuid || "").trim()) || [];
+      children.forEach((child) => stack.push(child));
+    }
+    return out;
+  }, [kbPanelDocs]);
+
+  const guideTreeRows = useMemo(() => {
+    if (!guidePanelDocs.length) return [];
+    const allowed = new Set(
+      guidePanelDocs.map((doc) => (doc.toc_uuid || "").trim() || `${doc.id ?? doc.slug ?? doc.title}`),
+    );
+    return kbTreeRows.filter((row) =>
+      allowed.has((row.doc.toc_uuid || "").trim() || `${row.doc.id ?? row.doc.slug ?? row.doc.title}`),
+    );
+  }, [guidePanelDocs, kbTreeRows]);
+
   useEffect(() => {
     setCollapsedKbNodeIds((prev) => {
       if (!prev.size) return prev;
@@ -1706,11 +1972,13 @@ function App() {
     <>
       <div
         className={`app-shell${
-          !SHOW_DEV_PANEL
-            ? " app-shell--no-dev"
-            : devSidebarCollapsed
-              ? " app-shell--dev-collapsed"
-              : ""
+          IS_VISITOR_ROUTE
+            ? " app-shell--visitor"
+            : !SHOW_DEV_PANEL
+              ? " app-shell--no-dev"
+              : devSidebarCollapsed
+                ? " app-shell--dev-collapsed"
+                : ""
         }`}
       >
         <header className="app-top-nav">
@@ -1719,33 +1987,138 @@ function App() {
               <img className="consult-top-brand-image" src="/youwei-logo.png" alt="有为 Logo" />
             </div>
             <span className="consult-top-page-title">预约方案咨询</span>
-            <button type="button" className="consult-top-ghost-btn" aria-label="咨询工作台">
-              咨询工作台
-            </button>
           </div>
         </header>
 
         <div className="app-body">
-          <aside className="focus-scene-sidebar" aria-label="你最关注的场景">
-            <div className="focus-scene-title">你最关注的场景</div>
-            <div className="focus-scene-list">
-              {FOCUS_SCENE_ITEMS.map((scene) => (
+          {IS_VISITOR_ROUTE ? (
+            <div className="visitor-scene-column" aria-label="你最关注的场景">
+              <div className="focus-scene-title-card focus-scene-title-card--visitor">
+                <div className="focus-scene-title">你最关注的场景</div>
+              </div>
+              <aside className="focus-scene-sidebar focus-scene-sidebar--visitor">
+                <div className="focus-scene-list">
+                  {FOCUS_SCENE_ITEMS.map((scene, idx) => (
+                    <button
+                      key={scene}
+                      type="button"
+                      className={`focus-scene-btn${activeFocusScene === scene ? " focus-scene-btn--active" : ""} focus-scene-btn--visitor-drop`}
+                      onClick={() => handleFocusSceneShortcut(scene)}
+                      disabled={isStreaming}
+                      style={{ animationDelay: `${120 + idx * 90}ms` }}
+                    >
+                      {scene}
+                    </button>
+                  ))}
+                </div>
+                <div className="focus-scene-footer">
+                  <button
+                    type="button"
+                    className="focus-scene-consult-btn"
+                    onClick={() => {
+                      if (!activeFocusScene || isStreaming) return;
+                      void askQuestion(`我想要咨询${activeFocusScene}的内容，请帮我解答。`, true, { hideUserMessage: IS_VISITOR_ROUTE });
+                    }}
+                    disabled={!activeFocusScene || isStreaming}
+                  >
+                    咨询
+                  </button>
+                </div>
+              </aside>
+            </div>
+          ) : (
+            <aside className="focus-scene-sidebar" aria-label="你最关注的场景">
+              <div className="focus-scene-title-card">
+                <div className="focus-scene-title">你最关注的场景</div>
+              </div>
+              <div className="focus-scene-list">
+                {FOCUS_SCENE_ITEMS.map((scene) => (
+                  <button
+                    key={scene}
+                    type="button"
+                    className={`focus-scene-btn${activeFocusScene === scene ? " focus-scene-btn--active" : ""}`}
+                    onClick={() => handleFocusSceneShortcut(scene)}
+                    disabled={isStreaming}
+                  >
+                    {scene}
+                  </button>
+                ))}
+              </div>
+              <div className="focus-extra-block">
                 <button
-                  key={scene}
                   type="button"
-                  className={`focus-scene-btn${activeFocusScene === scene ? " focus-scene-btn--active" : ""}`}
-                  onClick={() => handleFocusSceneShortcut(scene)}
+                  className="focus-extra-toggle"
+                  onClick={handleGuideEntryClick}
+                  disabled={isStreaming}
+                  aria-expanded={guideSectionOpen}
+                >
+                  <span className={`focus-extra-arrow${guideSectionOpen ? "" : " focus-extra-arrow--collapsed"}`} aria-hidden>
+                    ▾
+                  </span>
+                  <span>使用指南</span>
+                </button>
+                {guideSectionOpen ? (
+                  <div className="focus-guide-panel">
+                    {kbPanelLoading ? (
+                      <p className="focus-guide-hint">正在加载指南目录…</p>
+                    ) : kbPanelError ? (
+                      <p className="focus-guide-error">{kbPanelError}</p>
+                    ) : (
+                      <div className="focus-guide-list">
+                        {guideTreeRows.map(({ doc, level, nodeId, hasChildren, isCollapsed }) => {
+                          const selectable = docMetaAnchorable(doc);
+                          const expandable = hasChildren;
+                          return (
+                            <button
+                              key={`focus-guide-${nodeId}`}
+                              type="button"
+                              className={`focus-guide-row${selectable ? " focus-guide-row--doc" : " focus-guide-row--title"}${
+                                selectedGuideNodeId === nodeId ? " focus-guide-row--active" : ""
+                              }`}
+                              style={{ paddingLeft: `${10 + level * 14}px` }}
+                              onClick={() => {
+                                if (expandable) {
+                                  setCollapsedKbNodeIds((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(nodeId)) next.delete(nodeId);
+                                    else next.add(nodeId);
+                                    return next;
+                                  });
+                                  return;
+                                }
+                                if (selectable) {
+                                  setSelectedGuideNodeId(nodeId);
+                                  setSelectedYuqueDocs([{ docId: Number(doc.id), title: doc.title, slug: doc.slug || null }]);
+                                  window.setTimeout(() => setSelectedGuideNodeId((prev) => (prev === nodeId ? null : prev)), 0);
+                                }
+                              }}
+                            >
+                              {expandable ? (
+                                <span className={`focus-guide-arrow${isCollapsed ? " focus-guide-arrow--collapsed" : ""}`} aria-hidden>
+                                  ▾
+                                </span>
+                              ) : (
+                                <span className="focus-guide-arrow focus-guide-arrow--spacer" aria-hidden />
+                              )}
+                              <span>{doc.title}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+                <button
+                  type="button"
+                  className="focus-extra-apply"
+                  onClick={handleTrialApplyEntryClick}
                   disabled={isStreaming}
                 >
-                  {scene}
+                  账号申请
                 </button>
-              ))}
-            </div>
-            <button type="button" className="focus-scene-consult-btn" disabled={isStreaming}>
-              咨询
-            </button>
-            <p className="focus-scene-consult-hint">快速选择下方重点问题，不中断当天进度。</p>
-          </aside>
+              </div>
+            </aside>
+          )}
           {SHOW_DEV_PANEL ? (
           <aside className={`dev-sidebar${devSidebarCollapsed ? " dev-sidebar--collapsed" : ""}`}>
             {devSidebarCollapsed ? (
@@ -1796,8 +2169,9 @@ function App() {
                         onChange={(e) => setSelectedModel(e.target.value)}
                         disabled={isStreaming}
                       >
+                        <option value="qwen3.6-flash">qwen3.6-flash</option>
+                        <option value="qwen3.6-plus">qwen3.6-plus</option>
                         <option value="deepseek-chat">deepseek-chat</option>
-                        <option value="deepseek-reasoner">deepseek-reasoner</option>
                         <option value="gpt-4o-mini">gpt-4o-mini</option>
                       </select>
                     </label>
@@ -2175,77 +2549,179 @@ function App() {
           </aside>
           ) : null}
 
-          <div className="app-main chat-shell">
-            <header className="chat-subbar">
-              <div className="chat-subbar-title-wrap">
-                <div className="chat-subbar-brand">
-                  <span className="chat-subbar-brand-logo" aria-hidden>
-                    AI
-                  </span>
-                  <div className="chat-subbar-brand-meta">
-                    <span className="chat-subbar-brand-en">YOUWEI AI CONSULTANT</span>
-                    <span className="chat-subbar-title">有为 AI 方案顾问</span>
+          <div className={`app-main chat-shell${IS_VISITOR_ROUTE ? " chat-shell--visitor-compact" : ""}`}>
+            {IS_VISITOR_ROUTE ? null : (
+              <>
+                <header className="chat-subbar">
+                  <div className="chat-subbar-title-wrap">
+                    <div className="chat-subbar-brand">
+                      <span className="chat-subbar-brand-logo" aria-hidden>
+                        AI
+                      </span>
+                      <div className="chat-subbar-brand-meta">
+                        <span className="chat-subbar-brand-en">YOUWEI AI CONSULTANT</span>
+                        <span className="chat-subbar-title">小为顾问</span>
+                      </div>
+                    </div>
+                    <span className="chat-subbar-status">在线沟通</span>
+                  </div>
+                  <div className="chat-subbar-actions">
+                    <button
+                      type="button"
+                      className={`chat-subbar-btn${sessionCopied ? " chat-subbar-btn--copied" : ""}`}
+                      onClick={() => void copySessionTranscript()}
+                      disabled={!sessionTranscript || isStreaming}
+                      title="复制当前会话全部对话"
+                      aria-label="复制当前会话全部对话"
+                    >
+                      {sessionCopied ? "已复制" : "复制会话"}
+                    </button>
+                    <button type="button" className="chat-subbar-new" onClick={createSession}>
+                      新对话 <span className="chat-subbar-kbd">{newChatShortcutLabel}</span>
+                    </button>
+                  </div>
+                </header>
+              </>
+            )}
+            <div className={`chat-consulting-direction${IS_VISITOR_ROUTE ? " chat-consulting-direction--visitor" : ""}`} aria-label="当前咨询方向">
+              <span className="chat-consulting-direction-label">当前咨询方向</span>
+              {IS_VISITOR_ROUTE ? (
+                <div className="chat-consulting-direction-actions">
+                  <div className="visitor-top-utility-item">
+                    <button
+                      type="button"
+                      className={`visitor-top-utility-btn${guideSectionOpen ? " visitor-top-utility-btn--active" : ""}`}
+                      onClick={handleGuideEntryClick}
+                      disabled={isStreaming}
+                      aria-expanded={guideSectionOpen}
+                    >
+                      使用指南
+                    </button>
+                    {guideSectionOpen ? (
+                      <div className="visitor-guide-popover">
+                        {kbPanelLoading ? (
+                          <p className="focus-guide-hint">正在加载指南目录…</p>
+                        ) : kbPanelError ? (
+                          <p className="focus-guide-error">{kbPanelError}</p>
+                        ) : (
+                          <div className="focus-guide-list">
+                            {guideTreeRows.map(({ doc, level, nodeId, hasChildren, isCollapsed }) => {
+                              const selectable = docMetaAnchorable(doc);
+                              const expandable = hasChildren;
+                              return (
+                                <button
+                                  key={`visitor-guide-${nodeId}`}
+                                  type="button"
+                                  className={`focus-guide-row${selectable ? " focus-guide-row--doc" : " focus-guide-row--title"}${
+                                    selectedGuideNodeId === nodeId ? " focus-guide-row--active" : ""
+                                  }`}
+                                  style={{ paddingLeft: `${10 + level * 14}px` }}
+                                  onClick={() => {
+                                    if (expandable) {
+                                      setCollapsedKbNodeIds((prev) => {
+                                        const next = new Set(prev);
+                                        if (next.has(nodeId)) next.delete(nodeId);
+                                        else next.add(nodeId);
+                                        return next;
+                                      });
+                                      return;
+                                    }
+                                    if (selectable) {
+                                      setSelectedGuideNodeId(nodeId);
+                                      setSelectedYuqueDocs([{ docId: Number(doc.id), title: doc.title, slug: doc.slug || null }]);
+                                      window.setTimeout(() => setSelectedGuideNodeId((prev) => (prev === nodeId ? null : prev)), 0);
+                                      setGuideSectionOpen(false);
+                                    }
+                                  }}
+                                >
+                                  {expandable ? (
+                                    <span className={`focus-guide-arrow${isCollapsed ? " focus-guide-arrow--collapsed" : ""}`} aria-hidden>
+                                      ▾
+                                    </span>
+                                  ) : (
+                                    <span className="focus-guide-arrow focus-guide-arrow--spacer" aria-hidden />
+                                  )}
+                                  <span>{doc.title}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="visitor-top-utility-item visitor-top-utility-item--disabled" data-tooltip="等待上新">
+                    <button
+                      type="button"
+                      className="visitor-top-utility-btn visitor-top-utility-btn--disabled"
+                      disabled
+                      aria-disabled="true"
+                      title="等待上新"
+                    >
+                      账号申请
+                    </button>
                   </div>
                 </div>
-                <span className="chat-subbar-status">在线沟通</span>
-              </div>
-              <div className="chat-subbar-actions">
-                <button
-                  type="button"
-                  className={`chat-subbar-btn${sessionCopied ? " chat-subbar-btn--copied" : ""}`}
-                  onClick={() => void copySessionTranscript()}
-                  disabled={!sessionTranscript || isStreaming}
-                  title="复制当前会话全部对话"
-                  aria-label="复制当前会话全部对话"
-                >
-                  {sessionCopied ? "已复制" : "复制会话"}
-                </button>
-                <button type="button" className="chat-subbar-new" onClick={createSession}>
-                  新对话 <span className="chat-subbar-kbd">{newChatShortcutLabel}</span>
-                </button>
-              </div>
-            </header>
-            <div className="chat-consulting-direction" aria-label="当前咨询方向">
-              <span className="chat-consulting-direction-label">当前咨询方向</span>
-              <span className="chat-consulting-direction-tag">综合咨询</span>
+              ) : null}
+              <span className="chat-consulting-direction-tag">{activeFocusScene || "待选择场景"}</span>
             </div>
-            <div className="chat-main">
-              <div className={`chat-content-inner chat-body-inner${showWelcomeHero ? "" : " chat-body-inner--scroll"}`}>
+            {visitorChatVisible ? (
+            <div
+              className={`chat-main${IS_VISITOR_ROUTE ? " chat-main--visitor-reveal" : ""}${chatHasThreadContent ? " chat-main--content-fit" : ""}${selectedYuqueDocs.length > 0 ? " chat-main--has-selected-docs" : ""}`}
+            >
+              <div
+                className={`chat-content-inner chat-body-inner${showWelcomeHero ? "" : " chat-body-inner--scroll"}${chatHasThreadContent ? " chat-body-inner--thread-active" : ""}${IS_VISITOR_ROUTE && !assistantHasRenderedOutput ? " chat-body-inner--waiting-assistant" : ""}`}
+              >
                 {showWelcomeHero ? (
-                  <div className="welcome-hero">
-                    <div className="welcome-sparkle" aria-hidden>
-                      ✨
+                  IS_VISITOR_ROUTE ? <div className="welcome-hero welcome-hero--empty" aria-hidden /> : (
+                    <div className="welcome-hero">
+                      <div className="welcome-logo-wrap" aria-hidden>
+                        <img className="welcome-logo" src={youweiLogo} alt="" />
+                      </div>
+                      <h1 className="welcome-title">
+                        {welcomeHeroTitle}
+                        <span className="welcome-title-cursor" aria-hidden>
+                          |
+                        </span>
+                      </h1>
+                      {WELCOME_HERO_SUBTEXT ? <p className="welcome-sub">{WELCOME_HERO_SUBTEXT}</p> : null}
+                      <div className="welcome-cards">
+                        <button
+                          type="button"
+                          className="welcome-card"
+                          onClick={() => setQuestion((q) => (q.trim() ? q : "你们平台是做什么的？"))}
+                        >
+                          <span className="welcome-card-icon welcome-card-icon--book" aria-hidden />
+                          <div className="welcome-card-text">
+                            <div className="welcome-card-name">了解平台</div>
+                            <div className="welcome-card-desc">产品定位与价值</div>
+                          </div>
+                        </button>
+                        <button
+                          type="button"
+                          className="welcome-card"
+                          onClick={() => setQuestion((q) => (q.trim() ? q : "可以申请试用吗？"))}
+                        >
+                          <span className="welcome-card-icon welcome-card-icon--doc" aria-hidden />
+                          <div className="welcome-card-text">
+                            <div className="welcome-card-name">试用与演示</div>
+                            <div className="welcome-card-desc">预约产品顾问</div>
+                          </div>
+                        </button>
+                      </div>
                     </div>
-                    <h1 className="welcome-title">有为人工智能教育平台</h1>
-                    <p className="welcome-sub">{VISITOR_WELCOME_TEXT}</p>
-                    <div className="welcome-cards">
-                      <button
-                        type="button"
-                        className="welcome-card"
-                        onClick={() => setQuestion((q) => (q.trim() ? q : "你们平台是做什么的？"))}
-                      >
-                        <span className="welcome-card-icon welcome-card-icon--book" aria-hidden />
-                        <div className="welcome-card-text">
-                          <div className="welcome-card-name">了解平台</div>
-                          <div className="welcome-card-desc">产品定位与价值</div>
-                        </div>
-                      </button>
-                      <button
-                        type="button"
-                        className="welcome-card"
-                        onClick={() => setQuestion((q) => (q.trim() ? q : "可以申请试用吗？"))}
-                      >
-                        <span className="welcome-card-icon welcome-card-icon--doc" aria-hidden />
-                        <div className="welcome-card-text">
-                          <div className="welcome-card-name">试用与演示</div>
-                          <div className="welcome-card-desc">预约产品顾问</div>
-                        </div>
-                      </button>
-                    </div>
-                  </div>
+                  )
                 ) : (
                   <div className="chat-list chat-list--thread" ref={chatListRef} key={activeSessionId}>
-                    {chatItems.map((item) => (
+                    {chatItems.map((item) => {
+                      const hasInlineMedia = Boolean(
+                        item.role === "assistant" &&
+                          item.media &&
+                          (item.media.videos.length > 0 || item.media.images.length > 0)
+                      );
+                      const hasBubbleContent = item.text.trim().length > 0 || hasInlineMedia;
+                      if (item.hidden) return null;
+                      return (
                       <div className={`msg ${item.role}`} key={item.id}>
                         <div style={{ width: "100%" }}>
                           {item.role === "assistant" && (item.streamStage || (item.streamElapsedSec ?? 0) > 0) ? (
@@ -2256,92 +2732,82 @@ function App() {
                               {(item.streamElapsedSec ?? 0) > 0 ? (
                                 <div className="stream-elapsed">已等待 {item.streamElapsedSec} 秒</div>
                               ) : null}
-                              {(item.streamElapsedSec ?? 0) >= STREAM_SLOW_HINT_SEC ? (
-                                <div className="stream-slow-hint">
-                                  若进度长时间不变，可能是检索、配图识读或 MCP 较慢；超过{" "}
-                                  {Math.floor(STREAM_READ_IDLE_MS / 1000)} 秒无新数据将自动中断本次请求。
+                              {item.pendingComfortMessage ? (
+                                <div className="stream-comfort-card">
+                                  <div className="stream-comfort-label">小为顾问正在整理中</div>
+                                  <div className="stream-comfort-text">{item.pendingComfortMessage.text}</div>
                                 </div>
                               ) : null}
                             </div>
                           ) : null}
-                          <div className="bubble">
-                            {item.text.trim() ? (
-                              isStreaming && item.role === "assistant" && item.id === streamingAssistantId ? (
-                                <div className="bubble-stream-text">{item.text}</div>
-                              ) : (
-                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                  {normalizeMarkdownAutolinks(item.text)}
-                                </ReactMarkdown>
-                              )
-                            ) : null}
-                            {item.role === "assistant" && item.media && (item.media.videos.length > 0 || item.media.images.length > 0) ? (
-                              <div className="msg-media">
-                                {item.media.videos.length > 0 ? (
-                                  <div className="msg-media-block">
-                                    <div className="msg-media-title">相关视频</div>
-                                    {item.media.videos.map((video, idx) => (
-                                      <div key={`${video.url}-${idx}`} className="msg-video-card">
-                                        <video className="msg-video-player" controls playsInline preload="metadata" src={video.url} />
-                                        <a href={video.url} target="_blank" rel="noreferrer" className="msg-video-link">
-                                          {video.title || video.doc_title || "查看视频链接"}
-                                        </a>
-                                      </div>
-                                    ))}
-                                  </div>
-                                ) : null}
-                                {item.media.images.length > 0 ? (
-                                  <div className="msg-media-block">
-                                    <div className="msg-media-title">相关图片</div>
-                                    <div className="msg-image-grid">
-                                      {item.media.images.map((image, idx) => (
-                                        <a
-                                          key={`${image.url}-${idx}`}
-                                          className="msg-image-card"
-                                          href={image.url}
-                                          target="_blank"
-                                          rel="noreferrer"
-                                        >
-                                          <img src={image.url} alt={image.title || image.doc_title || "相关图片"} loading="lazy" />
-                                          <span>{image.title || image.doc_title || "查看原图"}</span>
-                                        </a>
-                                      ))}
+                          {hasBubbleContent ? (
+                            <div className="bubble">
+                              {item.text.trim() ? (
+                                isStreaming && item.role === "assistant" && item.id === streamingAssistantId ? (
+                                  <div className="bubble-stream-text">{item.text}</div>
+                                ) : hasInlineMedia ? (
+                                  <div className="msg-rich-content">
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                      {normalizeMarkdownAutolinks(item.text)}
+                                    </ReactMarkdown>
+                                    <div className="msg-inline-media msg-inline-media--tail">
+                                      {item.media?.images.map((image, idx) => renderInlineMediaCard(image, "image", `${item.id}-img-${idx}`))}
+                                      {item.media?.videos.map((video, idx) => renderInlineMediaCard(video, "video", `${item.id}-video-${idx}`))}
                                     </div>
                                   </div>
-                                ) : null}
-                              </div>
-                            ) : null}
-                          </div>
+                                ) : (
+                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                    {normalizeMarkdownAutolinks(item.text)}
+                                  </ReactMarkdown>
+                                )
+                              ) : hasInlineMedia ? (
+                                <div className="msg-inline-media msg-inline-media--tail">
+                                  {item.media?.images.map((image, idx) => renderInlineMediaCard(image, "image", `${item.id}-img-${idx}`))}
+                                  {item.media?.videos.map((video, idx) => renderInlineMediaCard(video, "video", `${item.id}-video-${idx}`))}
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
                           <div className="msg-footer">
                             {item.role === "assistant" &&
                             item.trialApplyAvailable &&
-                            !item.trialCredentialsShown ? (
+                            !item.trialCredentialsShown &&
+                            !activeSession?.trialApplicationSubmitted ? (
+                              IS_VISITOR_ROUTE ? (
+                                <span className="trial-apply-button trial-apply-button--disabled" title="等待上新" aria-disabled="true">
+                                  申请测试账号
+                                </span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="trial-apply-button"
+                                  onClick={() => void handleTrialApplyEntryClick()}
+                                >
+                                  申请测试账号
+                                </button>
+                              )
+                            ) : null}
+                            {!IS_VISITOR_ROUTE ? (
                               <button
                                 type="button"
-                                className="trial-apply-button"
-                                onClick={() => void requestTrialCredentials(item.id)}
+                                className={`copy-button ${copiedMessageId === item.id ? "copied" : ""}`}
+                                onClick={() => void copyMessage(item.id, item.text)}
+                                aria-label="复制对话内容"
+                                title="复制"
                               >
-                                申请测试账号
+                                <span className="copy-icon" aria-hidden="true">
+                                  ⧉
+                                </span>
                               </button>
                             ) : null}
-                            <button
-                              type="button"
-                              className={`copy-button ${copiedMessageId === item.id ? "copied" : ""}`}
-                              onClick={() => void copyMessage(item.id, item.text)}
-                              aria-label="复制对话内容"
-                              title="复制"
-                            >
-                              <span className="copy-icon" aria-hidden="true">
-                                ⧉
-                              </span>
-                            </button>
                           </div>
                         </div>
                       </div>
-                    ))}
+                    )})}
                   </div>
                 )}
               </div>
-              <footer className="composer-simple">
+              <footer className={`composer-simple${IS_VISITOR_ROUTE ? " composer-simple--visitor" : ""}`}>
                 <div className="composer-simple-inner">
                   {composerDocGateHint ? (
                     <div className="composer-doc-gate-hint" role="alert">
@@ -2379,48 +2845,25 @@ function App() {
                         📎
                       </button>
                     ) : null}
-                    <div ref={composerInputWrapRef} className="composer-simple-field doc-suggest-wrap">
+                    <div className="composer-simple-field">
                       <textarea
                         ref={composerTextareaRef}
                         className="composer-simple-textarea"
                         rows={1}
-                        placeholder="输入您想了解的内容；Enter 发送，Shift+Enter 换行。输入 @ 可联想语雀文档。"
+                        placeholder={
+                          IS_VISITOR_ROUTE
+                            ? "请输入您的问题，我们会尽快与您对接..."
+                            : hasPickedFocusScene
+                              ? "输入您想了解的内容或者可以问问左侧使用指南。"
+                              : "请现在左侧选择你最想关注的场景。"
+                        }
                         value={question}
+                        disabled={!hasPickedFocusScene}
                         onChange={handleQuestionChange}
                         onKeyDown={(event) => {
-                          if (docSuggestOpen && docSuggestDocs.length > 0) {
-                            const idxs = selectableDocIndices(docSuggestDocs);
-                            if (event.key === "ArrowDown" && idxs.length) {
-                              event.preventDefault();
-                              const cur = docSuggestActiveIndex;
-                              const pos = idxs.indexOf(cur);
-                              const nextPos = pos < 0 ? 0 : Math.min(pos + 1, idxs.length - 1);
-                              setDocSuggestActiveIndex(idxs[nextPos]!);
-                              return;
-                            }
-                            if (event.key === "ArrowUp" && idxs.length) {
-                              event.preventDefault();
-                              const cur = docSuggestActiveIndex;
-                              const pos = idxs.indexOf(cur);
-                              const nextPos = pos <= 0 ? 0 : pos - 1;
-                              setDocSuggestActiveIndex(idxs[nextPos]!);
-                              return;
-                            }
-                            if (event.key === "Enter" && !event.shiftKey) {
-                              const doc = docSuggestDocs[docSuggestActiveIndex];
-                              if (doc && docMetaSelectable(doc)) {
-                                event.preventDefault();
-                                applyDocSuggestPick(doc);
-                                return;
-                              }
-                            }
-                          }
                           if (event.key === "Enter" && !event.shiftKey) {
                             event.preventDefault();
                             void askQuestion();
-                          }
-                          if (event.key === "Escape") {
-                            closeDocSuggest();
                           }
                         }}
                       />
@@ -2432,68 +2875,62 @@ function App() {
                         if (isStreaming) stopStreaming();
                         else void askQuestion();
                       }}
-                      disabled={!isStreaming && !question.trim()}
+                      disabled={!isStreaming && (!question.trim() || !hasPickedFocusScene)}
                       title={isStreaming ? "停止生成" : "提交"}
                     >
-                      {isStreaming ? "停止" : "↑"}
+                      {isStreaming ? "停止" : IS_VISITOR_ROUTE ? "发送" : "咨询"}
                     </button>
                   </div>
                 </div>
               </footer>
             </div>
+            ) : null}
           </div>
         </div>
       </div>
-    {docFloatPortalOpen && docFloatRect
-      ? createPortal(
-          <div
-            ref={docFloatRootRef}
-            className="doc-suggest-box doc-suggest-box--portal"
-            style={{
-              bottom: docFloatRect.bottom,
-              left: docFloatRect.left,
-              width: docFloatRect.width,
-              maxHeight: docFloatRect.maxHeight,
-              top: "auto",
-            }}
-            role="listbox"
-            aria-label="@ 文档联想"
-          >
-            {docSuggestDocs.map((doc, idx) => {
-              const depth = Math.max(0, (doc.toc_level ?? 1) - 1);
-              const pad = 10 + depth * 14;
-              const active = idx === docSuggestActiveIndex;
-              const rowClass = `doc-suggest-item ${active ? "active" : ""} ${
-                doc.toc_kind === "title" ? "doc-suggest-item--toc-title" : ""
-              }`.trim();
-              if (!docMetaSelectable(doc)) {
-                return (
-                  <div
-                    key={doc.toc_uuid ?? `h-${doc.title}-${idx}`}
-                    className={rowClass}
-                    style={{ paddingLeft: pad }}
-                    aria-hidden
-                  >
-                    <span className="doc-suggest-toc-title-label">{doc.title}</span>
-                  </div>
-                );
-              }
-              return (
-                <button
-                  key={doc.toc_uuid ?? doc.id ?? doc.slug ?? `${doc.title}-${idx}`}
-                  type="button"
-                  className={rowClass}
-                  style={{ paddingLeft: pad }}
-                  onClick={() => applyDocSuggestPick(doc)}
-                >
-                  {doc.title}
-                </button>
-              );
-            })}
-          </div>,
-          document.body,
-        )
-      : null}
+      {trialApplyDialogOpen ? (
+        <div className="visitor-dialog-mask" role="dialog" aria-modal="true" aria-label="账号申请">
+          <div className="visitor-dialog-card">
+            <div className="visitor-dialog-title">测试账号申请</div>
+            <label className="visitor-dialog-field">
+              <span>姓名</span>
+              <input value={trialApplyName} onChange={(e) => setTrialApplyName(e.target.value)} placeholder="请输入姓名" disabled={trialApplySubmitting} />
+            </label>
+            <label className="visitor-dialog-field">
+              <span>单位</span>
+              <input value={trialApplyOrg} onChange={(e) => setTrialApplyOrg(e.target.value)} placeholder="请输入单位" disabled={trialApplySubmitting} />
+            </label>
+            <label className="visitor-dialog-field">
+              <span>联系方式</span>
+              <input
+                value={trialApplyContact}
+                onChange={(e) => setTrialApplyContact(e.target.value)}
+                placeholder="手机号或微信号"
+                disabled={trialApplySubmitting}
+              />
+            </label>
+            {trialApplyError ? <p className="visitor-dialog-error">{trialApplyError}</p> : null}
+            <div className="visitor-dialog-actions">
+              <button type="button" className="visitor-dialog-btn visitor-dialog-btn--ghost" onClick={() => setTrialApplyDialogOpen(false)}>
+                取消
+              </button>
+              <button
+                type="button"
+                className="visitor-dialog-btn"
+                onClick={() => void submitTrialApply()}
+                disabled={
+                  trialApplySubmitting ||
+                  !trialApplyName.trim() ||
+                  !trialApplyOrg.trim() ||
+                  !trialApplyContact.trim()
+                }
+              >
+                {trialApplySubmitting ? "提交中…" : "提交申请"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </>
   );
 }
