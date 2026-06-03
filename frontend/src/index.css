@@ -4162,11 +4162,11 @@ button:disabled {
 }
 
 .app-shell--visitor .chat-main {
-  border: 1px solid rgba(255, 255, 255, 0.72);
-  border-radius: 28px;
-  background: rgba(255, 255, 255, 0.46);
-  backdrop-filter: blur(10px);
-  box-shadow: 0 18px 40px rgba(148, 163, 184, 0.12);
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  backdrop-filter: none;
+  box-shadow: none;
   overflow: visible;
   min-height: 0;
 }
@@ -4190,7 +4190,7 @@ button:disabled {
   background: transparent;
   border-top: none;
   padding: 0 0 calc(26px + env(safe-area-inset-bottom, 0px));
-  margin-top: 22px;
+  margin-top: 24px;
 }
 
 .app-shell--visitor .composer-simple-row {
@@ -4207,8 +4207,17 @@ button:disabled {
 }
 
 .app-shell--visitor .chat-content-inner {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
   padding: 14px 16px 0;
   min-height: 0;
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.46);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 18px 40px rgba(148, 163, 184, 0.12);
+  overflow: hidden;
 }
 
 .app-shell--visitor .chat-body-inner {
@@ -4230,6 +4239,14 @@ button:disabled {
   padding-bottom: 0;
 }
 
+.app-shell--visitor .chat-content-inner.chat-body-inner {
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.46);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 18px 40px rgba(148, 163, 184, 0.12);
+}
+
 .app-shell--visitor .chat-body-inner--thread-active {
   flex: 1 1 auto;
   max-height: none;
@@ -4240,8 +4257,8 @@ button:disabled {
 }
 
 .app-shell--visitor .selected-docs--compact {
-  margin: 0 0 14px;
-  padding: 0 2px;
+  margin: 0 0 12px;
+  padding: 0 10px;
 }
 
 .app-shell--visitor .selected-docs-label {

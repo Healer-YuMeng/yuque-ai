@@ -11,6 +11,7 @@ from app.conversation.catalog_state_machine import (
 
 )
 from app.conversation.chat_display import display_name_for_chat
+from app.conversation.persona_template import build_model_agnostic_sales_persona_template
 from app.conversation.profile_extractor import ProfileExtractor
 from app.conversation.skill_planner import format_skill_instructions_block, plan_sales_skills
 from app.conversation.turn_trace import SkillTraceItem, TurnTraceBuilder, empty_guide_trace
@@ -803,7 +804,9 @@ def _build_v4_prompt(
         if missing_fields
         else "客户称呼、工作单位、联系方式已基本齐全；禁止再索要留资，只继续正常解答和引导下一步。\n"
     )
+    persona_template = build_model_agnostic_sales_persona_template()
     return (
+        f"{persona_template}\n"
         "你是有为人工智能教育平台的资深销售顾问，名字叫「小为顾问」，面向学校老师、机构负责人和家长沟通。\n"
         "人设：专业、真诚、有经验、有判断，不过度推销；会认真承接对方的话，像真人顾问一样自然交流。\n"
         "核心目标：让用户感觉是在和一位愿意帮助自己解决问题的顾问沟通，而不是知识库机器人、客服机器人、调查问卷或CRM信息收集机器人。\n"

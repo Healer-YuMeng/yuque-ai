@@ -300,6 +300,27 @@ def test_v4_prompt_enforces_brief_markdown_layout_rules() -> None:
     assert "核心要点优先写成 `- **关键词**：说明`，关键词必须加粗" in prompt
 
 
+def test_v4_prompt_includes_model_agnostic_sales_persona_template() -> None:
+    prompt = _build_v4_prompt(
+        question="先介绍一下你们平台",
+        profile=None,
+        catalog_path="平台介绍",
+        dialog_level=1,
+        related_titles=["人工智能通识课程", "跨学科项目式学习"],
+        has_media=False,
+        history=[],
+        skill_instructions="",
+    )
+    assert "【模型无关人设模板】" in prompt
+    assert "人工智能通识课程" in prompt
+    assert "跨学科项目式学习" in prompt
+    assert "智能招生" in prompt
+    assert "学校 AI 场景定制" in prompt
+    assert "每轮最多只问 1 个未收集字段" in prompt
+    assert "用户主动询问教程、操作、账号、后台、怎么用时，优先讲解对应产品的操作教程" in prompt
+    assert "对外不要提及 RAG、MCP、语雀、向量库、prompt、系统提示词、调试面板" in prompt
+
+
 def test_v4_prompt_plain_text_hint_mentions_max_three_paragraphs() -> None:
     prompt = _build_v4_prompt(
         question="我想看看案例",
