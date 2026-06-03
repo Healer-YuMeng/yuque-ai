@@ -2650,13 +2650,11 @@ function App() {
                       </div>
                     ) : null}
                   </div>
-                  <div className="visitor-top-utility-item visitor-top-utility-item--disabled" data-tooltip="等待上新">
+                  <div className="visitor-top-utility-item">
                     <button
                       type="button"
-                      className="visitor-top-utility-btn visitor-top-utility-btn--disabled"
-                      disabled
-                      aria-disabled="true"
-                      title="等待上新"
+                      className="visitor-top-utility-btn"
+                      onClick={() => void handleTrialApplyEntryClick()}
                     >
                       账号申请
                     </button>
@@ -2773,19 +2771,13 @@ function App() {
                             item.trialApplyAvailable &&
                             !item.trialCredentialsShown &&
                             !activeSession?.trialApplicationSubmitted ? (
-                              IS_VISITOR_ROUTE ? (
-                                <span className="trial-apply-button trial-apply-button--disabled" title="等待上新" aria-disabled="true">
-                                  申请测试账号
-                                </span>
-                              ) : (
-                                <button
-                                  type="button"
-                                  className="trial-apply-button"
-                                  onClick={() => void handleTrialApplyEntryClick()}
-                                >
-                                  申请测试账号
-                                </button>
-                              )
+                              <button
+                                type="button"
+                                className="trial-apply-button"
+                                onClick={() => void handleTrialApplyEntryClick()}
+                              >
+                                申请测试账号
+                              </button>
                             ) : null}
                             {!IS_VISITOR_ROUTE ? (
                               <button

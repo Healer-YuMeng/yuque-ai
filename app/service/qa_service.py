@@ -623,10 +623,12 @@ class QAService:
     ) -> AsyncIterator[dict[str, Any]]:
         """V4：目录状态机 + 目录内关联讲解（SSE）。"""
         sid = (session_id or "").strip()
+        history: List[ChatMessageRow] = []
         if sid:
             await self._chat_session_repository.ensure_session(
                 session_id=sid, chat_mode=(chat_mode or "visitor_sales"), advisor_role="sales"
             )
+            history = await self._chat_session_repository.list_recent_messages(session_id=sid, limit=20)
             await self._chat_session_repository.append_message(session_id=sid, role="user", content=question)
             if _is_v4_memory_only_question(question):
                 profile = await self._chat_session_profile_repository.get_profile(session_id=sid)
@@ -663,7 +665,6 @@ class QAService:
             lead_outreach=lead_outreach,
         )
 
-        history = await self._chat_session_repository.list_recent_messages(session_id=sid, limit=20) if sid else []
         answer_parts: List[str] = []
         selected_doc_ids = [int(x.doc_id) for x in (selected_yuque_docs or []) if int(x.doc_id) >= 1]
         async for event in orch.answer_stream(
