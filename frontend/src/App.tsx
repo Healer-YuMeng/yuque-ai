@@ -34,6 +34,7 @@ const SHOW_DEV_PANEL =
   !IS_VISITOR_ROUTE &&
   String(import.meta.env.VITE_SHOW_DEV_PANEL ?? "true").toLowerCase() === "true";
 const MODEL_STORAGE_KEY = "visitor_selected_model_v1";
+const DEFAULT_MODEL = "qwen3.6-plus";
 const SUPPORTED_MODEL_OPTIONS = ["qwen3.6-flash", "qwen3.6-plus", "deepseek-chat", "gpt-4o-mini"] as const;
 const WELCOME_HERO_TITLE = "我是专属于您的AI顾问-小为，欢迎向我咨询！";
 const WELCOME_HERO_SUBTEXT = "";
@@ -77,7 +78,7 @@ function parseTurnTrace(debug: Record<string, unknown> | null | undefined): Turn
 
 function normalizeSelectedModel(value: string): string {
   const model = (value || "").trim();
-  return (SUPPORTED_MODEL_OPTIONS as readonly string[]).includes(model) ? model : "qwen3.6-flash";
+  return (SUPPORTED_MODEL_OPTIONS as readonly string[]).includes(model) ? model : DEFAULT_MODEL;
 }
 
 type ComfortPhase = "initial" | "followup";
@@ -673,7 +674,7 @@ function App() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [historySessionPicked, setHistorySessionPicked] = useState(false);
   const [selectedModel, setSelectedModel] = useState(() => {
-    if (typeof window === "undefined") return "qwen3.6-flash";
+    if (typeof window === "undefined") return DEFAULT_MODEL;
     const stored = window.localStorage.getItem(MODEL_STORAGE_KEY) || "";
     return normalizeSelectedModel(stored);
   });

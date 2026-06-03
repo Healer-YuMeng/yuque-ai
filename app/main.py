@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 
@@ -110,9 +110,13 @@ async def serve_youwei_logo() -> FileResponse:
 
 
 @app.get("/dev-links", response_class=HTMLResponse)
-async def serve_dev_links() -> HTMLResponse:
-    return HTMLResponse(
-        """
+async def serve_dev_links(request: Request) -> HTMLResponse:
+    host = request.headers.get("host") or request.url.netloc or "127.0.0.1"
+    if ":" not in host and settings.frontend_public_port not in (80, 443):
+        host = f"{host}:{settings.frontend_public_port}"
+    display_port = host.rsplit(":", 1)[1] if ":" in host else ("443" if request.url.scheme == "https" else "80")
+    frontend_origin = f"{request.url.scheme}://{host}"
+    html = """
 <!doctype html>
 <html lang="zh-CN">
   <head>
@@ -178,12 +182,12 @@ async def serve_dev_links() -> HTMLResponse:
       <h1>开发快捷入口</h1>
       <p>建议固定开下面两个页面，对照开发与验收效果。</p>
       <section class="links">
-        <a href="http://127.0.0.1:5173/" target="_blank" rel="noreferrer">
-          <div class="title">开发者页面（5173）</div>
-          <div class="desc">有开发者面板，前端热更新最快。</div>
+        <a href="__FRONTEND_ORIGIN__/" target="_blank" rel="noreferrer">
+          <div class="title">开发者页面（__FRONTEND_PORT__）</div>
+          <div class="desc">有开发者面板，用当前部署端口访问。</div>
         </a>
-        <a href="http://127.0.0.1:8000/visitor" target="_blank" rel="noreferrer">
-          <div class="title">访客页面（8000/visitor）</div>
+        <a href="__FRONTEND_ORIGIN__/visitor" target="_blank" rel="noreferrer">
+          <div class="title">访客页面（__FRONTEND_PORT__/visitor）</div>
           <div class="desc">用户视角页面，无开发者面板与上传图标。</div>
         </a>
       </section>
@@ -191,4 +195,9 @@ async def serve_dev_links() -> HTMLResponse:
   </body>
 </html>
         """.strip()
+    return HTMLResponse(
+        html.replace("__FRONTEND_ORIGIN__", frontend_origin).replace(
+            "__FRONTEND_PORT__",
+            display_port,
+        )
     )

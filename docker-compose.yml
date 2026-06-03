@@ -9,6 +9,15 @@ services:
       APP_ENV: production
       HOST: 0.0.0.0
       PORT: 8000
+      FRONTEND_PORT: "${FRONTEND_PORT:-18080}"
+      LLM_PROVIDER: "${LLM_PROVIDER:-openai}"
+      LLM_MODEL: "${LLM_MODEL:-qwen3.6-plus}"
+      LLM_BASE_URL: "${LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
+      DASHSCOPE_BASE_URL: "${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
+      INTENT_LLM_MODEL: "${INTENT_LLM_MODEL:-qwen3.6-plus}"
+      ASSISTANT_META_ROUTER_MODEL: "${ASSISTANT_META_ROUTER_MODEL:-qwen3.6-plus}"
+      VISION_MODEL: "${VISION_MODEL:-qwen3.6-plus}"
+      VISION_BASE_URL: "${VISION_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
     volumes:
       - backend_data:/app/data_runtime
     expose:
@@ -56,7 +65,7 @@ services:
           location ~ ^/(chat|docs|mcp|yuque)(/|$$) {
             proxy_pass http://backend:8000;
             proxy_http_version 1.1;
-            proxy_set_header Host $$host;
+            proxy_set_header Host $$http_host;
             proxy_set_header X-Real-IP $$remote_addr;
             proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $$scheme;
@@ -64,10 +73,10 @@ services:
             proxy_read_timeout 3600s;
           }
 
-          location ~ ^/(health|runtime-mode)(/|$$) {
+          location ~ ^/(health|runtime-mode|dev-links)(/|$$) {
             proxy_pass http://backend:8000;
             proxy_http_version 1.1;
-            proxy_set_header Host $$host;
+            proxy_set_header Host $$http_host;
             proxy_set_header X-Real-IP $$remote_addr;
             proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $$scheme;
@@ -76,7 +85,7 @@ services:
           location ~ ^/visitor/(profile|trial)(/|$$) {
             proxy_pass http://backend:8000;
             proxy_http_version 1.1;
-            proxy_set_header Host $$host;
+            proxy_set_header Host $$http_host;
             proxy_set_header X-Real-IP $$remote_addr;
             proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $$scheme;
