@@ -18,6 +18,8 @@ services:
       ASSISTANT_META_ROUTER_MODEL: "${ASSISTANT_META_ROUTER_MODEL:-qwen3.6-plus}"
       VISION_MODEL: "${VISION_MODEL:-qwen3.6-plus}"
       VISION_BASE_URL: "${VISION_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
+      YUQUE_MCP_COMMAND: npx
+      YUQUE_MCP_ARGS: "${YUQUE_MCP_ARGS:-}"
     volumes:
       - backend_data:/app/data_runtime
     expose:
