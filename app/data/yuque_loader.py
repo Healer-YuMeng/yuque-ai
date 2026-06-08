@@ -10,6 +10,30 @@ class YuqueLoaderError(RuntimeError):
     pass
 
 
+def build_yuque_doc_url(raw: str, *, scope: str = "") -> str:
+    """把语雀返回的链接/slug 规整成可点击的绝对地址。
+
+    语雀 toc/doc 接口经常只返回文档 slug（如 ``wbop09b3zygg9erg``）或 ``/owner/repo/slug``
+    形式的相对路径；仅有 slug 时需要补上知识库作用域 ``owner/repo`` 才能正常打开。
+    """
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    if value.startswith(("http://", "https://")):
+        return value
+    value = value.lstrip("/")
+    if not value:
+        return ""
+    sc = (scope or "").strip().strip("/")
+    # 形如 owner/repo/slug 的相对路径：直接拼域名
+    if "/" in value:
+        return f"https://www.yuque.com/{value}"
+    # 仅有文档 slug：补上 owner/repo 作用域
+    if sc:
+        return f"https://www.yuque.com/{sc}/{value}"
+    return f"https://www.yuque.com/{value}"
+
+
 @dataclass(frozen=True)
 class YuqueDocument:
     doc_id: str
@@ -130,7 +154,7 @@ class YuqueLoader:
         return YuqueDocument(
             doc_id=str(data.get("id") or id_or_slug),
             title=str(data.get("title") or ""),
-            url=self._normalize_url(str(data.get("url") or "")),
+            url=self._normalize_url(str(data.get("url") or data.get("slug") or "")),
             body=str(data.get("body") or ""),
         )
 
@@ -211,19 +235,12 @@ class YuqueLoader:
                     id=int(item.get("id") or 0),
                     slug=str(item.get("slug") or ""),
                     title=str(item.get("title") or ""),
-                    url=self._normalize_url(str(item.get("url") or "")),
+                    url=self._normalize_url(str(item.get("url") or item.get("slug") or "")),
                     updated_at=str(item.get("updated_at") or ""),
                 )
             )
         return docs
 
-    @staticmethod
-    def _normalize_url(url: str) -> str:
-        if not url:
-            return ""
-        if url.startswith("http://") or url.startswith("https://"):
-            return url
-        if url.startswith("/"):
-            return f"https://www.yuque.com{url}"
-        return url
+    def _normalize_url(self, url: str) -> str:
+        return build_yuque_doc_url(url, scope=self._scope)
 

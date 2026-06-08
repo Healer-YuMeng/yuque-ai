@@ -162,7 +162,7 @@ class GuideDocTitlesResponse(BaseModel):
 
 class ResetSessionRequest(BaseModel):
     session_id: str = Field(..., min_length=1, max_length=120)
-    chat_mode: Literal["visitor_sales", "rag"] = "visitor_sales"
+    chat_mode: Literal["visitor_sales", "rag", "friend_v5"] = "visitor_sales"
 
 
 class RebuildIndexResponse(BaseModel):

@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 
 from app.api.chat_api import router as chat_router
+from app.api.chat_v5_api import router as chat_v5_router
 from app.core.config import settings
 from app.core.logger import setup_logging
 from app.data.yuque_loader import YuqueLoader
@@ -51,6 +52,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(chat_router)
+app.include_router(chat_v5_router)
 
 
 def current_ui_dir() -> Path:

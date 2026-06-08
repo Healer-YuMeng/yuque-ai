@@ -925,6 +925,7 @@ class Retriever:
             resp = await self._intent_client.chat.completions.create(
                 model=settings.intent_llm_model,
                 temperature=0,
+                extra_body={"enable_thinking": False},
                 messages=[
                     {"role": "system", "content": "只输出合法 JSON，不要 markdown。"},
                     {"role": "user", "content": prompt},
@@ -1268,6 +1269,7 @@ class Retriever:
             resp = await self._intent_client.chat.completions.create(
                 model=settings.intent_llm_model,
                 temperature=0,
+                extra_body={"enable_thinking": False},
                 messages=[
                     {"role": "system", "content": "只返回 directory/doc_list/content 其中一个。"},
                     {"role": "user", "content": prompt},

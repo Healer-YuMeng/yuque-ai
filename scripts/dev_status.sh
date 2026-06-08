@@ -15,4 +15,3 @@ check_port() {
 }
 
 check_port 8000
-check_port 5173

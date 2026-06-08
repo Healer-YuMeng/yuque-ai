@@ -1435,6 +1435,147 @@ body {
   color: #57534e;
 }
 
+.friend-v5-tags {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.friend-v5-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 100%;
+  border: 1px solid #e5e7eb;
+  background: #fff;
+  color: #374151;
+  border-radius: 12px;
+  padding: 10px 16px;
+  font-size: 14px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.friend-v5-tag-chip::after {
+  content: "→";
+  margin-left: auto;
+  color: #9ca3af;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.friend-v5-tag-chip:hover:not(:disabled) {
+  border-color: #d1d5db;
+  background: #f9fafb;
+  color: #111827;
+}
+
+.friend-v5-tag-chip:hover:not(:disabled)::after {
+  color: #6b7280;
+}
+
+.friend-v5-tag-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.friend-v5-sources {
+  margin-top: 0;
+  margin-bottom: 12px;
+}
+
+.friend-v5-sources-summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: #9ca3af;
+  padding: 0;
+  border: none;
+  background: transparent;
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+  font-weight: 400;
+  line-height: 1.5;
+  white-space: normal;
+}
+
+.friend-v5-sources-summary::-webkit-details-marker {
+  display: none;
+}
+
+.friend-v5-sources-summary:hover {
+  color: #6b7280;
+}
+
+.friend-v5-sources-summary-text {
+  white-space: nowrap;
+}
+
+.friend-v5-sources-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #9ca3af;
+  font-size: 13px;
+  line-height: 1;
+  transition: transform 0.18s ease;
+}
+
+.friend-v5-sources[open] .friend-v5-sources-arrow {
+  transform: rotate(180deg);
+}
+
+.friend-v5-sources-body {
+  margin-top: 10px;
+}
+
+.friend-v5-sources-keywords {
+  color: #9ca3af;
+  font-size: 13px;
+  line-height: 1.6;
+  margin-bottom: 10px;
+  word-break: break-word;
+}
+
+.friend-v5-sources-list {
+  margin: 0;
+  padding-left: 1.8em;
+  color: #2563eb;
+  display: grid;
+  gap: 8px;
+}
+
+.friend-v5-source-item {
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.friend-v5-source-link {
+  color: #0b63ff;
+  text-decoration: none;
+  word-break: break-word;
+}
+
+.friend-v5-source-link:hover {
+  text-decoration: underline;
+}
+
+.friend-v5-source-snippet {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #475569;
+}
+
 .debug {
   margin-top: 8px;
   font-size: 12px;
@@ -3394,16 +3535,16 @@ button:disabled {
 
 /* ------ 预约咨询布局：左侧场景栏 + 中间聊天 + 右侧开发者面板 ------ */
 .app-body {
-  grid-template-columns: 208px 1fr minmax(252px, 300px);
+  grid-template-columns: 280px 1fr minmax(252px, 300px);
   align-items: stretch;
 }
 
 .app-shell--dev-collapsed .app-body {
-  grid-template-columns: 208px 1fr 52px;
+  grid-template-columns: 280px 1fr 52px;
 }
 
 .app-shell--no-dev .app-body {
-  grid-template-columns: 208px 1fr;
+  grid-template-columns: 280px 1fr;
 }
 
 .focus-scene-sidebar {
@@ -3412,12 +3553,12 @@ button:disabled {
   height: 100%;
   box-sizing: border-box;
   min-height: 0;
-  padding: 12px 10px 14px;
+  padding: 14px 14px 18px;
   border-right: 1px solid #e2e8f0;
   background: transparent;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 14px;
   overflow-y: auto;
 }
 
@@ -3430,30 +3571,50 @@ button:disabled {
 .focus-scene-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 14px;
 }
 
 .focus-scene-btn {
-  border: 1px solid #d8e3f7;
-  border-radius: 10px;
-  background: #fff;
-  color: #334155;
-  font-size: 13px;
-  font-weight: 600;
-  text-align: left;
-  padding: 10px 12px;
+  min-height: 48px;
+  border: 1px solid rgba(203, 216, 239, 0.96);
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(248, 251, 255, 0.9) 100%);
+  color: #26364f;
+  font-size: 14px;
+  font-weight: 700;
+  text-align: center;
+  padding: 12px 16px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 10px 22px rgba(71, 85, 105, 0.08);
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    background 0.18s ease,
+    color 0.18s ease,
+    box-shadow 0.18s ease;
 }
 
 .focus-scene-btn:hover:not(:disabled) {
-  border-color: #aac5f2;
-  background: #f4f8ff;
+  border-color: rgba(148, 173, 230, 0.95);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(240, 246, 255, 0.94) 100%);
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.92),
+    0 14px 28px rgba(71, 85, 105, 0.12);
 }
 
 .focus-scene-btn--active {
-  border-color: #8fb5f8;
-  background: #eef4ff;
-  color: #2b4f93;
-  box-shadow: inset 0 0 0 1px rgba(143, 181, 248, 0.35);
+  border-color: rgba(89, 121, 241, 0.98);
+  background:
+    linear-gradient(180deg, rgba(237, 244, 255, 0.98) 0%, rgba(224, 235, 255, 0.96) 100%);
+  color: #2853d6;
+  box-shadow:
+    inset 0 0 0 1px rgba(89, 121, 241, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 14px 30px rgba(99, 102, 241, 0.16);
 }
 
 .focus-extra-block {
@@ -3838,6 +3999,7 @@ button:disabled {
 .consult-top-brand {
   display: inline-flex;
   align-items: center;
+  gap: 14px;
   flex-shrink: 0;
 }
 
@@ -3848,37 +4010,27 @@ button:disabled {
   object-fit: contain;
 }
 
-.consult-top-page-title {
-  flex: 1;
-  margin-left: 10px;
-  font-size: 26px;
-  font-weight: 700;
-  color: #0f172a;
-}
-
-.app-shell--visitor .consult-top-page-title {
-  position: relative;
-  margin-left: 26px;
-}
-
-.app-shell--visitor .consult-top-page-title::before {
-  content: "";
-  position: absolute;
-  left: -16px;
-  top: 50%;
-  width: 2px;
-  height: 38px;
-  transform: translateY(-50%);
-  background: rgba(15, 23, 42, 0.72);
+.consult-top-brand-divider {
+  width: 1px;
+  height: 30px;
   border-radius: 999px;
+  background: rgba(36, 50, 74, 0.28);
+}
+
+.consult-top-brand-title {
+  color: #24324a;
+  font-size: 20px;
+  font-weight: 750;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 /* ------ 访客端预约咨询页专用样式（仅 /visitor） ------ */
 .app-shell--visitor .app-body {
-  grid-template-columns: minmax(320px, 360px) minmax(760px, 1120px);
+  grid-template-columns: minmax(400px, 500px) minmax(760px, 1120px);
   justify-content: center;
   align-items: start;
-  column-gap: 24px;
+  column-gap: 28px;
   padding-top: 12px;
   box-sizing: border-box;
 }
@@ -3890,23 +4042,28 @@ button:disabled {
   flex-direction: column;
   width: 100%;
   margin: 8px 0 0;
-  gap: 22px;
+  gap: 26px;
 }
 
 .app-shell--visitor .focus-scene-sidebar {
   justify-self: stretch;
   align-self: stretch;
   height: auto;
-  min-height: unset;
+  min-height: 560px;
   width: 100%;
   margin: 2px 0 0;
-  padding: 24px 20px 22px;
-  gap: 16px;
+  padding: 36px 30px 30px;
+  gap: 26px;
   border: 1px solid rgba(255, 255, 255, 0.72);
-  border-radius: 28px;
-  background: rgba(255, 255, 255, 0.46);
-  backdrop-filter: blur(10px);
-  box-shadow: 0 18px 40px rgba(148, 163, 184, 0.12);
+  border-radius: 30px;
+  background:
+    radial-gradient(circle at 18% 12%, rgba(255, 199, 224, 0.24) 0, rgba(255, 199, 224, 0) 26%),
+    radial-gradient(circle at 58% 46%, rgba(255, 193, 138, 0.22) 0, rgba(255, 193, 138, 0) 24%),
+    rgba(255, 255, 255, 0.52);
+  backdrop-filter: blur(12px) saturate(145%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.76),
+    0 22px 52px rgba(148, 163, 184, 0.16);
 }
 
 .app-shell--visitor .focus-scene-title-card {
@@ -3938,15 +4095,20 @@ button:disabled {
 }
 
 .app-shell--visitor .focus-scene-btn {
-  border: 1px solid rgba(208, 218, 239, 0.96);
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.92);
-  color: #24324a;
-  font-size: 14px;
-  font-weight: 600;
-  text-align: center;
-  padding: 10px 16px;
-  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.05);
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-height: 82px;
+  border: 1px solid transparent;
+  border-radius: 18px;
+  background: rgba(246, 249, 252, 0.92);
+  color: #64748b;
+  font-size: 17px;
+  font-weight: 760;
+  text-align: left;
+  padding: 16px 42px 16px 28px;
+  box-shadow: none;
   transition:
     transform 0.2s ease,
     border-color 0.2s ease,
@@ -3956,19 +4118,73 @@ button:disabled {
 }
 
 .app-shell--visitor .focus-scene-btn:hover:not(:disabled) {
-  border-color: rgba(216, 222, 232, 0.98);
-  background: rgba(245, 247, 250, 0.98);
-  color: #3b4658;
-  box-shadow: 0 10px 24px rgba(148, 163, 184, 0.12);
+  border-color: rgba(202, 216, 238, 0.98);
+  background: rgba(250, 252, 255, 0.98);
+  color: #334155;
+  box-shadow: 0 10px 22px rgba(148, 163, 184, 0.1);
   transform: translateY(-1px);
 }
 
 .app-shell--visitor .focus-scene-btn--active,
 .app-shell--visitor .focus-scene-btn--active:hover:not(:disabled) {
-  background: linear-gradient(180deg, rgba(235, 242, 255, 0.98) 0%, rgba(226, 236, 255, 0.94) 100%);
-  border-color: rgba(98, 126, 236, 0.92);
-  color: #2f4fbb;
-  box-shadow: 0 12px 28px rgba(99, 102, 241, 0.14);
+  background: rgba(241, 246, 255, 0.98);
+  border-color: #2f6df6;
+  color: #2563eb;
+  box-shadow:
+    inset 0 0 0 1px rgba(47, 109, 246, 0.3),
+    0 12px 26px rgba(37, 99, 235, 0.14);
+}
+
+.app-shell--visitor .focus-scene-btn-icon {
+  flex: 0 0 auto;
+  width: 46px;
+  height: 46px;
+  border-radius: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(239, 244, 250, 0.98);
+  color: #64748b;
+}
+
+.app-shell--visitor .focus-scene-btn-icon svg {
+  width: 25px;
+  height: 25px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.app-shell--visitor .focus-scene-btn--active .focus-scene-btn-icon {
+  background: rgba(219, 232, 255, 0.98);
+  color: #2563eb;
+}
+
+.app-shell--visitor .focus-scene-btn-label {
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.app-shell--visitor .focus-scene-btn-dot {
+  position: absolute;
+  right: 24px;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: #2f6df6;
+  opacity: 0;
+  transform: translateY(-50%) scale(0.7);
+  transition:
+    opacity 0.2s ease,
+    transform 0.2s ease;
+}
+
+.app-shell--visitor .focus-scene-btn--active .focus-scene-btn-dot {
+  opacity: 1;
+  transform: translateY(-50%) scale(1);
 }
 
 .focus-scene-footer {
@@ -3976,7 +4192,7 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 0;
-  padding-top: 24px;
+  padding-top: 32px;
 }
 
 .app-shell--visitor .focus-scene-btn--visitor-drop {
@@ -3987,9 +4203,9 @@ button:disabled {
 
 .focus-scene-consult-btn {
   width: 100%;
-  height: 48px;
+  height: 58px;
   border: none;
-  border-radius: 16px;
+  border-radius: 22px;
   background: linear-gradient(135deg, #5f77f4 0%, #4cc9c0 100%);
   color: #fff;
   font-size: 16px;
@@ -4127,6 +4343,7 @@ button:disabled {
   backdrop-filter: none;
   box-shadow: none;
   overflow: visible;
+  flex: 1 1 auto;
   min-height: 0;
 }
 
@@ -4135,14 +4352,17 @@ button:disabled {
   max-width: 1120px;
   justify-self: start;
   margin-top: 0;
-  display: grid;
-  grid-template-rows: auto 1fr auto;
-  row-gap: 16px;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
 }
 
 .chat-main--visitor-reveal {
   animation: visitor-chat-reveal 420ms ease both;
+}
+
+.app-shell--visitor .chat-main--visitor-reveal {
+  animation: none;
 }
 
 .app-shell--visitor .composer-simple {
@@ -4188,6 +4408,14 @@ button:disabled {
   padding-bottom: 0;
 }
 
+.app-shell--visitor .chat-content-inner.chat-body-inner {
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.46);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 18px 40px rgba(148, 163, 184, 0.12);
+}
+
 .app-shell--visitor .chat-body-inner--waiting-assistant {
   background: transparent;
   backdrop-filter: none;
@@ -4196,14 +4424,6 @@ button:disabled {
 
 .app-shell--visitor .chat-body-inner--waiting-assistant .chat-list {
   padding-bottom: 0;
-}
-
-.app-shell--visitor .chat-content-inner.chat-body-inner {
-  border: 1px solid rgba(255, 255, 255, 0.72);
-  border-radius: 28px;
-  background: rgba(255, 255, 255, 0.46);
-  backdrop-filter: blur(10px);
-  box-shadow: 0 18px 40px rgba(148, 163, 184, 0.12);
 }
 
 .app-shell--visitor .chat-body-inner--thread-active {

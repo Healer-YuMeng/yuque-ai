@@ -80,17 +80,10 @@ uvicorn app.main:app --reload
 ```
 
 启动后：
-- FastAPI: `http://127.0.0.1:8000`
-- Vite: `http://127.0.0.1:5173`
+- 本地开发入口：`http://127.0.0.1:8000`
+- 访客入口：`http://127.0.0.1:8000/visitor`
 
-开发模式（前后端分离）：
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-生产构建（由 FastAPI 托管）：
+前端构建（由 FastAPI 托管）：
 ```bash
 ./scripts/build_frontend.sh
 uvicorn app.main:app --reload
@@ -103,9 +96,9 @@ uvicorn app.main:app --reload
 
 ### 常用 Make 命令
 ```bash
-make dev       # 一键启动 FastAPI + Vite（前后端联调）
-make down      # 一键停止 8000/5173 端口进程
-make status    # 查看 8000/5173 端口监听状态
+make dev       # 构建前端后启动 FastAPI（统一走 8000）
+make down      # 一键停止 8000 端口进程
+make status    # 查看 8000 端口监听状态
 make build-ui  # 构建 React 前端产物到 frontend/dist
 make run       # 仅启动 FastAPI
 make test      # 运行 pytest
@@ -136,4 +129,3 @@ YUQUE_MCP_ARGS=
 说明：
 - 项目代码已预留 `YuqueMCPClient` 接入点。
 - 如果你的运行环境暂时无法安装 MCP SDK，也不影响主链路运行；只是 fallback 不会生效。
-

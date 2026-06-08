@@ -9,14 +9,14 @@ services:
       APP_ENV: production
       HOST: 0.0.0.0
       PORT: 8000
-      FRONTEND_PORT: "${FRONTEND_PORT:-18080}"
+      FRONTEND_PORT: "${FRONTEND_PORT:-8000}"
       LLM_PROVIDER: "${LLM_PROVIDER:-openai}"
-      LLM_MODEL: "${LLM_MODEL:-qwen3.6-plus}"
+      LLM_MODEL: "${LLM_MODEL:-qwen3.7-plus}"
       LLM_BASE_URL: "${LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
       DASHSCOPE_BASE_URL: "${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
-      INTENT_LLM_MODEL: "${INTENT_LLM_MODEL:-qwen3.6-plus}"
-      ASSISTANT_META_ROUTER_MODEL: "${ASSISTANT_META_ROUTER_MODEL:-qwen3.6-plus}"
-      VISION_MODEL: "${VISION_MODEL:-qwen3.6-plus}"
+      INTENT_LLM_MODEL: "${INTENT_LLM_MODEL:-qwen3.7-plus}"
+      ASSISTANT_META_ROUTER_MODEL: "${ASSISTANT_META_ROUTER_MODEL:-qwen3.7-plus}"
+      VISION_MODEL: "${VISION_MODEL:-qwen3.7-plus}"
       VISION_BASE_URL: "${VISION_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
       YUQUE_MCP_COMMAND: npx
       YUQUE_MCP_ARGS: "${YUQUE_MCP_ARGS:-}"
@@ -43,7 +43,7 @@ services:
       backend:
         condition: service_healthy
     ports:
-      - "${FRONTEND_PORT:-18080}:80"
+      - "${FRONTEND_PORT:-8000}:80"
     command:
       - /bin/sh
       - -c

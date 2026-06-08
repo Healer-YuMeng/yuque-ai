@@ -207,8 +207,9 @@ class ProfileExtractor:
         )
         try:
             resp = await self._client.chat.completions.create(  # type: ignore[union-attr]
-                model=settings.llm_model or "qwen3.6-plus",
+                model=settings.llm_model or "qwen3.7-plus",
                 temperature=0,
+                extra_body={"enable_thinking": False},
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": prompt},

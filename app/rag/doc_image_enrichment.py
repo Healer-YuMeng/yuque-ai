@@ -182,6 +182,7 @@ async def _vision_caption(image_bytes: bytes, mime: str, *, user_hint: str) -> s
         resp = await client.chat.completions.create(
             model=settings.vision_model,
             temperature=0.1,
+            extra_body={"enable_thinking": False},
             messages=[
                 {
                     "role": "user",
@@ -214,6 +215,7 @@ async def _vision_video_caption(video_url: str, *, user_hint: str) -> str:
         resp = await client.chat.completions.create(
             model=settings.vision_model,
             temperature=0.1,
+            extra_body={"enable_thinking": False},
             messages=[
                 {
                     "role": "user",
