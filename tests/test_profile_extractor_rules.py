@@ -66,3 +66,19 @@ async def test_profile_extractor_does_not_treat_stage_phrase_as_name() -> None:
     ex = ProfileExtractor()
     upd = await ex.extract_update(question="我是给小学", history=[], current_profile=None)
     assert not upd.display_name
+
+
+@pytest.mark.asyncio
+async def test_profile_extractor_xing_zhao_becomes_teacher() -> None:
+    ex = ProfileExtractor()
+    upd = await ex.extract_update(question="我姓赵", history=[], current_profile=None)
+    assert upd.display_name == "赵老师"
+
+
+@pytest.mark.asyncio
+async def test_profile_extractor_does_not_treat_org_role_phrase_as_name() -> None:
+    ex = ProfileExtractor()
+    upd = await ex.extract_update(question="我是在育才中学做老师", history=[], current_profile=None)
+    assert not upd.display_name
+    assert upd.org_name == "育才中学"
+    assert upd.visitor_type == "teacher"

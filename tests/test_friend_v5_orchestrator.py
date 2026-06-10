@@ -13,6 +13,12 @@ from app.core.config import settings
 from app.db.repositories import ChatMessageRow
 from app.service.qa_service import QAService
 from app.service.friend_dialog_orchestrator_v5 import FriendDialogOrchestratorV5
+from app.service.friend_v5_tags import (
+    case_tag_for_scene,
+    explore_product_tag_for_title,
+    guide_tag_for_scene,
+    trial_tag_for_scene,
+)
 from app.service.friend_v5_yuque_deep_reader import FriendV5YuqueDeepReadResult
 
 
@@ -50,9 +56,10 @@ class _FakeProfileExtractor:
 
 
 class _FakeGenerator:
-    async def stream(self, *, system_prompt: str, user_prompt: str):
+    async def stream(self, *, system_prompt: str, user_prompt: str, enable_search: bool = False):
         self.system_prompt = system_prompt
         self.user_prompt = user_prompt
+        self.enable_search = enable_search
         yield FriendV5StreamEvent.token("我是小为，先帮你把重点拎出来。")
         yield FriendV5StreamEvent.token(
             "[SOURCES]\n"
@@ -63,9 +70,10 @@ class _FakeGenerator:
 
 
 class _FakeGeneratorWithWebSources:
-    async def stream(self, *, system_prompt: str, user_prompt: str):
+    async def stream(self, *, system_prompt: str, user_prompt: str, enable_search: bool = False):
         self.system_prompt = system_prompt
         self.user_prompt = user_prompt
+        self.enable_search = enable_search
         yield FriendV5StreamEvent.web_sources(
             [
                 FriendV5SourceItem(
@@ -236,7 +244,7 @@ _FAKE_CASE_TOC_NODES = [
 
 
 @pytest.mark.asyncio
-async def test_scene_trigger_rewrites_query_and_reads_yuque_doc() -> None:
+async def test_scene_trigger_uses_fixed_toc_mapping_and_reads_yuque_doc() -> None:
     yuque = _FakeYuqueSearch()
     deep_reader = _FakeDeepReader()
     rewriter = _FakeSceneQueryRewriter()
@@ -261,10 +269,10 @@ async def test_scene_trigger_rewrites_query_and_reads_yuque_doc() -> None:
         )
     ]
 
-    assert [item["scene"] for item in rewriter.calls] == ["人工智能通识教育"]
+    assert rewriter.calls == []
     assert deep_reader.calls == []
-    assert deep_reader.node_calls[0]["question"] == "智能招生 招生问答示例 招生流程 AI获客"
-    assert deep_reader.node_calls[0]["node"]["title"] == "人工智能通识教育"
+    assert deep_reader.node_calls[0]["question"] == "人工智能通识课程"
+    assert deep_reader.node_calls[0]["node"]["title"] == "乐高人工智能课程介绍"
     assert yuque.calls == []
     assert not any("CatalogStateMachine" in str(item) or "trial" in str(item) for item in events)
     done = [item for item in events if item["event"] == "done"][0]["data"]
@@ -274,8 +282,12 @@ async def test_scene_trigger_rewrites_query_and_reads_yuque_doc() -> None:
     assert [source["source_type"] for source in done["sources"]] == ["web", "yuque"]
     assert done["sources"][1]["url"] == "https://www.yuque.com/example/lego-ai"
     assert done["debug"]["doc_deep_read_used"] is True
-    assert done["debug"]["scene_query_rewrite"]["rewritten_query"] == "智能招生 招生问答示例 招生流程 AI获客"
-    assert done["debug"]["catalog_focus_node"]["title"] == "人工智能通识教育"
+    assert done["debug"]["scene_query_rewrite"] == {
+        "used": False,
+        "rewritten_query": "人工智能通识课程",
+        "skipped": "fixed_scene_toc_mapping",
+    }
+    assert done["debug"]["catalog_focus_node"]["title"] == "乐高人工智能课程介绍"
 
 
 @pytest.mark.asyncio
@@ -299,18 +311,22 @@ async def test_tags_are_picked_from_yuque_toc_not_llm_random_tags() -> None:
     ]
 
     done = [item for item in events if item["event"] == "done"][0]["data"]
-    assert done["tags"] == ["智能招生", "乐高人工智能课程介绍", "课堂流程与作品展示"]
+    assert done["tags"] == [
+        "想看看人工智能通识课程的产品的使用指南？",
+        "想看看人工智能通识课程的产品的优秀案例库？",
+        "想申请测试账号，试一试人工智能通识课程的产品？",
+    ]
     assert "想看课程例子？" not in done["tags"]
-    assert done["debug"]["catalog_tag_source"] == "yuque_toc"
+    assert done["debug"]["catalog_tag_source"] == "fixed_v5_navigation"
     assert done["debug"]["catalog_focus_node"] == {
-        "uuid": "root-ai",
-        "title": "人工智能通识教育",
-        "path": ["人工智能通识教育"],
+        "uuid": "ai-course",
+        "title": "乐高人工智能课程介绍",
+        "path": ["人工智能通识教育", "乐高人工智能课程介绍"],
     }
 
 
 @pytest.mark.asyncio
-async def test_first_turn_keeps_only_directory_content_tags() -> None:
+async def test_first_turn_keeps_fixed_three_entry_tags() -> None:
     orch = FriendDialogOrchestratorV5(
         generator=_FakeGenerator(),
         profile_repo=_FakeProfileRepo(),
@@ -328,31 +344,28 @@ async def test_first_turn_keeps_only_directory_content_tags() -> None:
     )
 
     done = [item for item in events if item["event"] == "done"][0]["data"]
-    assert "产品价格" not in done["tags"]
-    assert "如何申请内测" not in done["tags"]
-    assert "产品案例" not in done["tags"]
+    assert done["tags"] == [
+        "想看看人工智能通识课程的产品的使用指南？",
+        "想看看人工智能通识课程的产品的优秀案例库？",
+        "想申请测试账号，试一试人工智能通识课程的产品？",
+    ]
     assert done["debug"]["conversion_state"]["turn_index"] == 1
 
 
 @pytest.mark.asyncio
-async def test_second_turn_uses_two_content_tags_plus_product_case() -> None:
-    toc_nodes = [
-        {"uuid": "root-ai", "title": "人工智能通识教育", "level": 1, "parent_uuid": "", "node_type": "title"},
-        {"uuid": "ai-lego", "title": "乐高人工智能课程", "level": 2, "parent_uuid": "root-ai", "node_type": "doc"},
-        {"uuid": "ai-apple", "title": "苹果STEAM课程", "level": 2, "parent_uuid": "root-ai", "node_type": "doc"},
-        {"uuid": "ai-sony", "title": "索尼人工智能课程", "level": 2, "parent_uuid": "root-ai", "node_type": "doc"},
-        {"uuid": "ai-tencent", "title": "腾讯青少年人工智能课程", "level": 2, "parent_uuid": "root-ai", "node_type": "doc"},
-    ]
+async def test_guide_tag_routes_to_usage_guide_and_next_tags_show_price() -> None:
+    deep_reader = _FakeDeepReader()
     orch = FriendDialogOrchestratorV5(
         generator=_FakeGenerator(),
         profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=deep_reader,
         profile_extractor=_FakeProfileExtractor(),
-        toc_nodes=toc_nodes,
+        toc_nodes=_FAKE_CASE_TOC_NODES,
     )
 
     events = await _collect_v5_events(
         orch,
-        question="乐高人工智能课程",
+        question="想看看人工智能通识课程的产品的使用指南？",
         session_id="sess_v5_turn2_tags",
         scene="人工智能通识教育",
         trigger_type="tag",
@@ -360,69 +373,75 @@ async def test_second_turn_uses_two_content_tags_plus_product_case() -> None:
     )
 
     done = [item for item in events if item["event"] == "done"][0]["data"]
-    assert done["tags"] == ["苹果STEAM课程", "索尼人工智能课程", "产品案例"]
-    assert "产品价格" not in done["tags"]
-    assert "如何申请内测" not in done["tags"]
+    assert deep_reader.node_calls[0]["node"]["uuid"] == "guide-ai"
+    assert done["tags"] == [
+        "想要了解一下人工智能通识课程产品的价格？",
+        "想看看人工智能通识课程的产品的优秀案例库？",
+        "想申请测试账号，试一试人工智能通识课程的产品？",
+    ]
+    assert done["debug"]["tag_route"]["kind"] == "guide"
     assert done["debug"]["conversion_state"]["turn_index"] == 2
 
 
 @pytest.mark.asyncio
-async def test_third_turn_price_intent_adds_price_without_removing_all_content_tags() -> None:
+async def test_price_tag_returns_handoff_without_yuque_read() -> None:
+    deep_reader = _FakeDeepReader()
     orch = FriendDialogOrchestratorV5(
         generator=_FakeGenerator(),
         profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=deep_reader,
         profile_extractor=_FakeProfileExtractor(),
         toc_nodes=_FAKE_TOC_NODES,
     )
 
     events = await _collect_v5_events(
         orch,
-        question="乐高人工智能课程大概多少钱？",
+        question="想要了解一下人工智能通识课程产品的价格？",
         session_id="sess_v5_turn3_price",
         scene="人工智能通识教育",
-        trigger_type="manual",
+        trigger_type="tag",
         history=[
             ChatMessageRow(role="user", content="人工智能通识教育", created_at=""),
-            ChatMessageRow(role="assistant", content="可以先看课程方向。", created_at=""),
-            ChatMessageRow(role="user", content="乐高人工智能课程", created_at=""),
+            ChatMessageRow(role="user", content="想看看人工智能通识课程的产品的使用指南？", created_at=""),
         ],
     )
 
     done = [item for item in events if item["event"] == "done"][0]["data"]
-    assert "产品价格" in done["tags"]
-    assert "如何申请内测" not in done["tags"]
-    assert any(tag not in {"产品价格", "如何申请内测", "产品案例"} for tag in done["tags"])
-    assert done["debug"]["conversion_state"]["conversion_intents"] == ["price"]
+    assert "方便留个微信或电话吗" in done["answer"]
+    assert "方便留下您的称呼吗" not in done["answer"]
+    assert deep_reader.calls == []
+    assert deep_reader.node_calls == []
+    assert done["debug"]["tag_route"]["kind"] == "price"
+    assert done["debug"]["mcp_route"]["mode"] == "price_direct"
 
 
 @pytest.mark.asyncio
-async def test_third_turn_trial_and_price_intents_keep_one_content_tag() -> None:
+async def test_followup_confirmation_uses_previous_followup_topic() -> None:
+    deep_reader = _FakeDeepReader()
     orch = FriendDialogOrchestratorV5(
         generator=_FakeGenerator(),
         profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=deep_reader,
         profile_extractor=_FakeProfileExtractor(),
         toc_nodes=_FAKE_TOC_NODES,
     )
 
     events = await _collect_v5_events(
         orch,
-        question="我想了解价格，也想申请内测账号",
+        question="需要",
         session_id="sess_v5_turn3_trial_price",
         scene="人工智能通识教育",
         trigger_type="manual",
         history=[
             ChatMessageRow(role="user", content="人工智能通识教育", created_at=""),
-            ChatMessageRow(role="assistant", content="可以先看课程方向。", created_at=""),
-            ChatMessageRow(role="user", content="乐高人工智能课程", created_at=""),
+            ChatMessageRow(role="assistant", content="需要我和你详细介绍课堂流程与作品展示的内容吗？", created_at=""),
         ],
     )
 
     done = [item for item in events if item["event"] == "done"][0]["data"]
-    conversion_tags = [tag for tag in done["tags"] if tag in {"产品价格", "如何申请内测"}]
-    content_tags = [tag for tag in done["tags"] if tag not in {"产品价格", "如何申请内测", "产品案例"}]
-    assert conversion_tags == ["产品价格", "如何申请内测"]
-    assert len(content_tags) == 1
-    assert done["debug"]["conversion_state"]["conversion_intents"] == ["price", "trial"]
+    assert deep_reader.node_calls[0]["question"] == "课堂流程与作品展示"
+    assert done["debug"]["next_followup_topic"]
+    assert done["debug"]["skill_route"]["skill_id"] == "smart-summary"
 
 
 @pytest.mark.asyncio
@@ -486,7 +505,11 @@ async def test_scene_rewrite_maps_frontend_scene_alias_to_real_toc_node() -> Non
         "title": "人工智能通识课程",
         "path": ["平台介绍", "人工智能通识课程"],
     }
-    assert done["tags"] == ["乐高人工智能课程", "苹果STEAM课程", "索尼人工智能课程"]
+    assert done["tags"] == [
+        "想看看人工智能通识课程的产品的使用指南？",
+        "想看看人工智能通识课程的产品的优秀案例库？",
+        "想申请测试账号，试一试人工智能通识课程的产品？",
+    ]
 
 
 @pytest.mark.asyncio
@@ -524,7 +547,11 @@ async def test_leaf_focus_falls_back_to_three_strong_sibling_tags_without_far_ju
         "title": "苹果STEAM课程",
         "path": ["人工智能通识教育", "苹果STEAM课程"],
     }
-    assert done["tags"] == ["乐高人工智能课程", "索尼人工智能课程", "腾讯青少年人工智能课程"]
+    assert done["tags"] == [
+        "想看看人工智能通识课程的产品的使用指南？",
+        "想看看人工智能通识课程的产品的优秀案例库？",
+        "想申请测试账号，试一试人工智能通识课程的产品？",
+    ]
     assert "智能招生操作说明" not in done["tags"]
 
 
@@ -557,6 +584,56 @@ async def test_tag_trigger_deep_reads_matched_toc_node_when_reader_available() -
     done = [item for item in events if item["event"] == "done"][0]["data"]
     assert done["debug"]["doc_deep_read_used"] is True
     assert done["debug"]["catalog_focus_node"]["title"] == "乐高人工智能课程介绍"
+
+
+@pytest.mark.asyncio
+async def test_case_tag_uses_product_from_tag_text_not_sidebar_scene() -> None:
+    deep_reader = _FakeDeepReader()
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=deep_reader,
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=_FAKE_CASE_TOC_NODES,
+    )
+
+    await _collect_v5_events(
+        orch,
+        question=case_tag_for_scene("跨学科项目化学习"),
+        session_id="sess_v5_case_cross_product",
+        scene="人工智能通识教育",
+        trigger_type="tag",
+        history=[],
+    )
+
+    assert deep_reader.node_calls[0]["node"]["uuid"] == "case-pbl"
+
+
+@pytest.mark.asyncio
+async def test_case_tag_without_toc_node_enables_web_search_fallback() -> None:
+    generator = _FakeGenerator()
+    orch = FriendDialogOrchestratorV5(
+        generator=generator,
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=_FakeDeepReader(),
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=_FAKE_CASE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question=case_tag_for_scene("学校AI场景定制"),
+        session_id="sess_v5_case_miss",
+        scene="人工智能通识教育",
+        trigger_type="tag",
+        history=[],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["debug"]["case_toc_miss"] is True
+    assert done["debug"]["doc_deep_read_used"] is False
+    assert done["debug"]["web_search_fallback_enabled"] is True
+    assert generator.enable_search is True
 
 
 @pytest.mark.asyncio
@@ -761,6 +838,424 @@ async def test_manual_toc_matched_question_deep_reads_toc_node_and_returns_media
     assert done["debug"]["doc_deep_read_used"] is True
     assert done["media"]["images"][0]["url"] == "/yuque/asset?t=abc"
     assert done["media"]["videos"][0]["url"] == "https://example.com/lego-demo.mp4"
+
+
+class _FakeGeneratorWithInlineLink:
+    async def stream(self, *, system_prompt: str, user_prompt: str, enable_search: bool = False):
+        self.user_prompt = user_prompt
+        yield FriendV5StreamEvent.token(
+            "这份指南帮老师快速上手。\n\nwww.yuque.com/suesun-yb1bi/sspenu/sbdx665n47rz9rt5\n"
+        )
+        yield FriendV5StreamEvent.token("[TAGS]想看课程例子？\n想了解适合年级？\n想看看落地方式？[END_TAGS]")
+
+
+@pytest.mark.asyncio
+async def test_tag_click_cross_scene_product_redirects_instead_of_case_library() -> None:
+    deep_reader = _FakeDeepReader()
+    generator = _FakeGenerator()
+    orch = FriendDialogOrchestratorV5(
+        generator=generator,
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=deep_reader,
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=_FAKE_CASE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="跨学科项目式学习",
+        session_id="sess_v5_tag_case_cont",
+        scene="人工智能通识教育",
+        trigger_type="tag",
+        history=[
+            ChatMessageRow(role="user", content="人工智能通识教育", created_at=""),
+            ChatMessageRow(role="user", content="想看看人工智能通识课程的产品的优秀案例库？", created_at=""),
+        ],
+    )
+
+    assert deep_reader.node_calls == []
+    assert not getattr(generator, "user_prompt", None)
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["debug"]["cross_scene_redirect"] is True
+    assert "请先在左侧点击对应场景" in done["answer"]
+    assert "跨学科项目式学习" in done["answer"]
+
+
+@pytest.mark.asyncio
+async def test_manual_cross_scene_product_redirects_instead_of_case_library() -> None:
+    deep_reader = _FakeDeepReader()
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=deep_reader,
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=_FAKE_CASE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="跨学科项目式学习",
+        session_id="sess_v5_manual_case_cont",
+        scene="人工智能通识教育",
+        trigger_type="manual",
+        history=[
+            ChatMessageRow(role="user", content="人工智能通识教育", created_at=""),
+            ChatMessageRow(role="user", content="想看看人工智能通识课程的产品的优秀案例库？", created_at=""),
+        ],
+    )
+
+    assert deep_reader.node_calls == []
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["debug"]["cross_scene_redirect"] is True
+    assert "请先在左侧点击对应场景" in done["answer"]
+
+
+@pytest.mark.asyncio
+async def test_same_scene_product_after_case_history_routes_to_case_library() -> None:
+    deep_reader = _FakeDeepReader()
+    generator = _FakeGenerator()
+    orch = FriendDialogOrchestratorV5(
+        generator=generator,
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=deep_reader,
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=_FAKE_CASE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="人工智能通识课程",
+        session_id="sess_v5_same_scene_case_cont",
+        scene="人工智能通识教育",
+        trigger_type="manual",
+        history=[
+            ChatMessageRow(role="user", content="人工智能通识教育", created_at=""),
+            ChatMessageRow(role="user", content="想看看人工智能通识课程的产品的优秀案例库？", created_at=""),
+        ],
+    )
+
+    assert deep_reader.node_calls[0]["node"]["uuid"] == "case-ai"
+    assert "优秀案例库模式" in generator.user_prompt
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["debug"]["case_product_switch"] is True
+    assert done["debug"]["catalog_focus_node"]["path"] == ["案例与社区", "优秀案例库", "人工智能通识课程"]
+
+
+@pytest.mark.asyncio
+async def test_scene_trigger_after_case_history_routes_to_platform_intro() -> None:
+    toc_nodes = [
+        *_FAKE_CASE_TOC_NODES,
+        {
+            "uuid": "platform-pbl",
+            "title": "跨学科项目式学习",
+            "level": 2,
+            "parent_uuid": "platform",
+            "node_type": "doc",
+        },
+    ]
+    deep_reader = _FakeDeepReader()
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=deep_reader,
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=toc_nodes,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="跨学科项目化学习",
+        session_id="sess_v5_scene_case_cont",
+        scene="跨学科项目化学习",
+        trigger_type="scene",
+        history=[
+            ChatMessageRow(role="user", content="人工智能通识教育", created_at=""),
+            ChatMessageRow(role="user", content="想看看人工智能通识课程的产品的优秀案例库？", created_at=""),
+        ],
+    )
+
+    assert deep_reader.node_calls[0]["node"]["uuid"] == "platform-pbl"
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["debug"]["scene_case_continuation"] is False
+    assert done["debug"]["catalog_focus_node"]["path"] == ["平台介绍", "跨学科项目式学习"]
+    assert done["debug"]["mcp_route"]["mode"] == "scene_toc"
+
+
+@pytest.mark.asyncio
+async def test_scene_trigger_after_guide_history_routes_to_platform_intro() -> None:
+    toc_nodes = [
+        *_FAKE_CASE_TOC_NODES,
+        {
+            "uuid": "platform-pbl",
+            "title": "跨学科项目式学习",
+            "level": 2,
+            "parent_uuid": "platform",
+            "node_type": "doc",
+        },
+    ]
+    deep_reader = _FakeDeepReader()
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=deep_reader,
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=toc_nodes,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="跨学科项目化学习",
+        session_id="sess_v5_scene_guide_cont",
+        scene="跨学科项目化学习",
+        trigger_type="scene",
+        history=[
+            ChatMessageRow(role="user", content="人工智能通识教育", created_at=""),
+            ChatMessageRow(
+                role="user",
+                content=guide_tag_for_scene("人工智能通识教育"),
+                created_at="",
+            ),
+        ],
+    )
+
+    assert deep_reader.node_calls[0]["node"]["uuid"] == "platform-pbl"
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["debug"]["scene_guide_continuation"] is False
+    assert done["debug"]["catalog_focus_node"]["path"] == ["平台介绍", "跨学科项目式学习"]
+    assert "使用指南" not in done["debug"]["catalog_focus_node"]["path"]
+    assert done["debug"]["mcp_route"]["mode"] == "scene_toc"
+
+
+@pytest.mark.asyncio
+async def test_case_history_recommends_other_platform_intro_products() -> None:
+    toc_nodes = [
+        *_FAKE_CASE_TOC_NODES,
+        {
+            "uuid": "platform-pbl",
+            "title": "跨学科项目式学习",
+            "level": 2,
+            "parent_uuid": "platform",
+            "node_type": "doc",
+        },
+        {
+            "uuid": "platform-custom",
+            "title": "学校AI场景定制",
+            "level": 2,
+            "parent_uuid": "platform",
+            "node_type": "doc",
+        },
+    ]
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=_FakeDeepReader(),
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=toc_nodes,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question=case_tag_for_scene("人工智能通识教育"),
+        session_id="sess_v5_case_explore_tags",
+        scene="人工智能通识教育",
+        trigger_type="tag",
+        history=[ChatMessageRow(role="user", content="人工智能通识教育", created_at="")],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["tags"][0] == explore_product_tag_for_title("跨学科项目式学习")
+    assert done["debug"]["conversion_state"]["stage"] == "case_to_explore_products"
+
+
+@pytest.mark.asyncio
+async def test_after_explore_product_tag_restores_normal_rhythm() -> None:
+    toc_nodes = [
+        *_FAKE_CASE_TOC_NODES,
+        {
+            "uuid": "platform-pbl",
+            "title": "跨学科项目式学习",
+            "level": 2,
+            "parent_uuid": "platform",
+            "node_type": "doc",
+        },
+        {
+            "uuid": "platform-custom",
+            "title": "学校AI场景定制",
+            "level": 2,
+            "parent_uuid": "platform",
+            "node_type": "doc",
+        },
+    ]
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=_FakeDeepReader(),
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=toc_nodes,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question=explore_product_tag_for_title("学校AI场景定制"),
+        session_id="sess_v5_after_explore_product",
+        scene="人工智能通识教育",
+        trigger_type="tag",
+        history=[
+            ChatMessageRow(role="user", content=case_tag_for_scene("人工智能通识教育"), created_at=""),
+            ChatMessageRow(role="assistant", content="这里是一个落地案例。", created_at=""),
+            ChatMessageRow(
+                role="user",
+                content=explore_product_tag_for_title("学校AI场景定制"),
+                created_at="",
+            ),
+        ],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["tags"][0] == guide_tag_for_scene("学校AI场景定制")
+    assert done["tags"][1] == case_tag_for_scene("学校AI场景定制")
+    assert done["tags"][2] == trial_tag_for_scene("学校AI场景定制")
+    assert explore_product_tag_for_title("跨学科项目式学习") not in done["tags"]
+    assert done["debug"]["conversion_state"]["stage"] == "fixed_entry"
+
+
+@pytest.mark.asyncio
+async def test_scene_trigger_without_case_history_keeps_platform_intro_route() -> None:
+    deep_reader = _FakeDeepReader()
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=deep_reader,
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=_FAKE_CASE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="人工智能通识教育",
+        session_id="sess_v5_scene_no_case",
+        scene="人工智能通识教育",
+        trigger_type="scene",
+        history=[],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["debug"]["scene_case_continuation"] is False
+    assert done["debug"]["mcp_route"]["mode"] == "scene_toc"
+
+
+@pytest.mark.asyncio
+async def test_web_search_fallback_enabled_only_when_deep_read_missing() -> None:
+    gen_with_deep_read = _FakeGenerator()
+    orch_with = FriendDialogOrchestratorV5(
+        generator=gen_with_deep_read,
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=_FakeDeepReader(),
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=_FAKE_TOC_NODES,
+    )
+    await _collect_v5_events(
+        orch_with,
+        question="人工智能通识教育",
+        session_id="sess_v5_search_off",
+        scene="人工智能通识教育",
+        trigger_type="scene",
+        history=[],
+    )
+    assert gen_with_deep_read.enable_search is False
+
+    gen_without_deep_read = _FakeGenerator()
+    orch_without = FriendDialogOrchestratorV5(
+        generator=gen_without_deep_read,
+        profile_repo=_FakeProfileRepo(),
+        profile_extractor=_FakeProfileExtractor(),
+    )
+    events = await _collect_v5_events(
+        orch_without,
+        question="智能招生怎么做？",
+        session_id="sess_v5_search_on",
+        scene="智能招生",
+        trigger_type="manual",
+        history=[],
+    )
+    assert gen_without_deep_read.enable_search is True
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["debug"]["web_search_fallback_enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_guide_answer_strips_inline_links_and_appends_friendly_hint() -> None:
+    deep_reader = _FakeDeepReader()
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGeneratorWithInlineLink(),
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=deep_reader,
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=_FAKE_CASE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="想看看人工智能通识课程的产品的使用指南？",
+        session_id="sess_v5_guide_hint",
+        scene="人工智能通识教育",
+        trigger_type="tag",
+        history=[ChatMessageRow(role="user", content="人工智能通识教育", created_at="")],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert "www.yuque.com/example/lego-ai" in done["answer"]
+    assert "[人工智能通识课程使用指南](https://www.yuque.com/example/lego-ai)" in done["answer"]
+    assert "www.yuque.com/suesun-yb1bi" not in done["answer"]
+    assert any(source["source_type"] == "yuque" for source in done["sources"])
+
+
+@pytest.mark.asyncio
+async def test_followup_question_skips_discussed_child_and_mentions_sibling() -> None:
+    toc_nodes = [
+        {"uuid": "platform", "title": "平台介绍", "level": 1, "parent_uuid": "", "node_type": "title"},
+        {"uuid": "ai-course", "title": "人工智能通识课程", "level": 2, "parent_uuid": "platform", "node_type": "doc"},
+        {"uuid": "ai-lego", "title": "乐高人工智能课程", "level": 3, "parent_uuid": "ai-course", "node_type": "doc"},
+        {"uuid": "ai-apple", "title": "苹果STEAM课程", "level": 3, "parent_uuid": "ai-course", "node_type": "doc"},
+        {"uuid": "ai-sony", "title": "索尼人工智能课程", "level": 3, "parent_uuid": "ai-course", "node_type": "doc"},
+    ]
+    deep_reader = _FakeDeepReader()
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=deep_reader,
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=toc_nodes,
+    )
+
+    # 已介绍过乐高：追问应换成下一个未介绍的子话题
+    events = await _collect_v5_events(
+        orch,
+        question="人工智能通识教育",
+        session_id="sess_v5_followup_skip",
+        scene="人工智能通识教育",
+        trigger_type="scene",
+        history=[
+            ChatMessageRow(role="user", content="人工智能通识教育", created_at=""),
+            ChatMessageRow(role="assistant", content="需要我和你详细介绍乐高人工智能课程的内容吗？", created_at=""),
+        ],
+    )
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["debug"]["next_followup_topic"] == "苹果STEAM课程"
+
+    # 聚焦叶子节点时：文末追加同级目录横向引导
+    events = await _collect_v5_events(
+        orch,
+        question="乐高人工智能课程",
+        session_id="sess_v5_followup_sibling",
+        scene="人工智能通识教育",
+        trigger_type="tag",
+        history=[],
+    )
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["debug"]["followup_sibling_topic"] == "苹果STEAM课程"
+    assert "如果您对苹果STEAM课程也感兴趣，也可以为您介绍。" in done["answer"]
+    assert "跨学科项目式学习也感兴趣" not in done["answer"]
 
 
 @pytest.mark.asyncio

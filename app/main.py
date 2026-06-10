@@ -94,6 +94,17 @@ async def serve_visitor() -> FileResponse:
     return serve_spa_index()
 
 
+@app.get("/admin")
+async def serve_admin() -> FileResponse:
+    """
+    管理后台入口：与其他前端路由共用同一前端构建产物。
+
+    前端会根据 window.location.pathname 判断是否为 /admin，
+    并切换到内部管理员使用的后台界面。
+    """
+    return serve_spa_index()
+
+
 @app.get("/youwei-logo.png")
 async def serve_youwei_logo() -> FileResponse:
     """
@@ -191,6 +202,10 @@ async def serve_dev_links(request: Request) -> HTMLResponse:
         <a href="__FRONTEND_ORIGIN__/visitor" target="_blank" rel="noreferrer">
           <div class="title">访客页面（__FRONTEND_PORT__/visitor）</div>
           <div class="desc">用户视角页面，无开发者面板与上传图标。</div>
+        </a>
+        <a href="__FRONTEND_ORIGIN__/admin" target="_blank" rel="noreferrer">
+          <div class="title">管理后台（__FRONTEND_PORT__/admin）</div>
+          <div class="desc">管理员使用的工作台与知识库管理页面。</div>
         </a>
       </section>
     </main>

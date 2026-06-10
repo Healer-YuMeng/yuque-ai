@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Literal
 
 TAG_START = "[TAGS]"
 TAG_END = "[END_TAGS]"
@@ -15,18 +15,119 @@ _SOURCE_URL_RE = re.compile(
 _SOURCE_URL_TRAILING_CHARS = ".,;:)]}>，。、；;："
 _PLACEHOLDER_HOSTS = {"example.com", "example.org", "example.net"}
 
-# 兜底标签：目录命中不足时补齐，保证每轮都有可点的下一步入口
-GENERIC_FALLBACK_TAGS = [
-    "想看看使用指南？",
-    "想看看案例与社区？",
-    "想申请测试账号，试一试产品？",
-]
+FriendV5TagKind = Literal["guide", "case", "trial", "price", "unknown"]
 
-# 兜底标签 -> 语雀目录标题映射：点击前两个标签时直接定位对应语雀目录
-TAG_TO_TOC_TITLE: dict[str, str] = {
-    "想看看使用指南？": "使用指南",
-    "想看看案例与社区？": "案例与社区",
+SCENE_TO_TOC_TITLE: dict[str, str] = {
+    "人工智能通识教育": "人工智能通识课程",
+    "跨学科项目化学习": "跨学科项目式学习",
+    "智能招生": "智能招生",
+    "学校AI场景定制": "学校AI场景定制",
 }
+
+
+def toc_title_for_scene(scene: str) -> str:
+    title = SCENE_TO_TOC_TITLE.get((scene or "").strip())
+    return title or (scene or "").strip() or "当前产品"
+
+
+def guide_tag_for_scene(scene: str) -> str:
+    title = toc_title_for_scene(scene)
+    return f"想看看{title}的产品的使用指南？"
+
+
+def case_tag_for_scene(scene: str) -> str:
+    title = toc_title_for_scene(scene)
+    return f"想看看{title}的产品的优秀案例库？"
+
+
+def trial_tag_for_scene(scene: str) -> str:
+    title = toc_title_for_scene(scene)
+    return f"想申请测试账号，试一试{title}的产品？"
+
+
+def price_tag_for_scene(scene: str) -> str:
+    title = toc_title_for_scene(scene)
+    return f"想要了解一下{title}产品的价格？"
+
+
+def explore_product_tag_for_title(title: str) -> str:
+    clean = (title or "").strip()
+    return f"想了解一下{clean}产品？" if clean else ""
+
+
+_EXPLORE_PRODUCT_TAG_RE = re.compile(r"^想了解一下(.+?)产品？$")
+_PRODUCT_FROM_TAG_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^想看看(.+?)的产品的使用指南？$"),
+    re.compile(r"^想看看(.+?)的产品的优秀案例库？$"),
+    re.compile(r"^想申请测试账号，试一试(.+?)的产品？$"),
+    re.compile(r"^想要了解一下(.+?)产品的价格？$"),
+)
+
+
+def try_product_title_from_tag(tag: str) -> str:
+    raw = (tag or "").strip()
+    if not raw:
+        return ""
+    for pattern in _PRODUCT_FROM_TAG_PATTERNS:
+        match = pattern.match(raw)
+        if match:
+            title = (match.group(1) or "").strip()
+            if title:
+                return title
+    return ""
+
+
+def product_title_from_tag(tag: str, *, scene: str) -> str:
+    return try_product_title_from_tag(tag) or toc_title_for_scene(scene)
+
+
+def explore_product_title_from_tag(tag: str) -> str:
+    raw = (tag or "").strip()
+    match = _EXPLORE_PRODUCT_TAG_RE.match(raw)
+    return (match.group(1) or "").strip() if match else ""
+
+
+def scene_for_toc_title(title: str) -> str:
+    raw = (title or "").strip()
+    if not raw:
+        return ""
+    raw_norm = _norm_tag(raw)
+    for scene_key, toc_title in SCENE_TO_TOC_TITLE.items():
+        if raw_norm in {_norm_tag(scene_key), _norm_tag(toc_title)}:
+            return scene_key
+    return raw
+
+
+def fallback_tags_for_scene(scene: str) -> List[str]:
+    return [
+        guide_tag_for_scene(scene),
+        case_tag_for_scene(scene),
+        trial_tag_for_scene(scene),
+    ]
+
+
+def classify_friend_v5_tag(tag: str, *, scene: str) -> FriendV5TagKind:
+    raw = (tag or "").strip()
+    if not raw:
+        return "unknown"
+    exact_map = {
+        guide_tag_for_scene(scene): "guide",
+        case_tag_for_scene(scene): "case",
+        trial_tag_for_scene(scene): "trial",
+        price_tag_for_scene(scene): "price",
+    }
+    if raw in exact_map:
+        return exact_map[raw]  # type: ignore[return-value]
+    norm = _norm_tag(raw)
+    if "申请测试账号" in norm or ("试一试" in norm and "产品" in norm):
+        return "trial"
+    if "价格" in norm or "报价" in norm or "费用" in norm:
+        return "price"
+    if "优秀案例库" in norm or "产品案例" in norm or "案例库" in norm:
+        return "case"
+    if "使用指南" in norm or "操作说明" in norm:
+        return "guide"
+    return "unknown"
 
 
 @dataclass(frozen=True)
@@ -36,9 +137,8 @@ class FriendV5TagParseResult:
     source_urls: List[str] = field(default_factory=list)
 
 
-def fallback_tags_for_scene(scene: str) -> List[str]:
-    # 兜底标签与场景无关，统一返回通用入口
-    return list(GENERIC_FALLBACK_TAGS)
+def _norm_tag(value: str) -> str:
+    return re.sub(r"[\s「」『』《》【】\[\]（）()、，。:：;；?？!！\-_/|]+", "", str(value or "").lower())
 
 
 class FriendV5TagStreamFilter:
@@ -134,7 +234,7 @@ class FriendV5TagStreamFilter:
             self._tag_parts.append(self._buffer[:emit_len])
             self._buffer = self._buffer[emit_len:]
             break
-        return "".join(visible_parts)
+        return _strip_hidden_marker_fragments("".join(visible_parts))
 
     def finish(self) -> FriendV5TagParseResult:
         if self._buffer:
@@ -143,7 +243,9 @@ class FriendV5TagStreamFilter:
             elif self._inside_sources:
                 self._source_parts.append(self._buffer)
             else:
-                self._answer_parts.append(self._buffer)
+                leftover = _strip_trailing_marker_suffix(self._buffer)
+                if leftover:
+                    self._answer_parts.append(leftover)
             self._buffer = ""
         answer = _clean_answer("".join(self._answer_parts))
         tags = _parse_tags("".join(self._tag_parts))
@@ -156,7 +258,44 @@ class FriendV5TagStreamFilter:
         return FriendV5TagParseResult(answer=answer, tags=tags[:3], source_urls=source_urls)
 
 
-_PUNCT_ONLY_LINE_RE = re.compile(r"^[\s:：。.、，,;；!！?？\-—_*·•]+$")
+_PUNCT_ONLY_LINE_RE = re.compile(r"^[\s/:：。.、，,;；!！?？\-—_*·•]+$")
+# 隐藏块标记的完整或残缺片段（如流式截断后的 SOURCES]、[/SOURCES）
+_HIDDEN_MARKER_FRAGMENT_RE = re.compile(
+    r"(?:"
+    r"\[/SOURCES\]|\[SOURCES\]|"
+    r"\[/?SOURCES(?=\]|$)|"
+    r"(?<!\[)(?:\[/SOURCES\]|SOURCES?\]?|OURCES?\]?|URCES?\]?|RCES?\]?|CES?\]?|ES?\]?|S\])|"
+    r"\[/SOURCES(?!\])|"
+    r"\[TAGS\]|\[END_TAGS\]|"
+    r"\[/?(?:TAGS|END_TAGS)(?=\]|$)|"
+    r"(?<!\[)(?:TAGS|END_TAGS)\]"
+    r")"
+)
+_MARKER_SUFFIX_CANDIDATES = (SOURCE_START, SOURCE_END, TAG_START, TAG_END)
+
+
+def _strip_trailing_marker_suffix(text: str) -> str:
+    """去掉末尾因流式截断残留的半段标记（如 ``[S``、``SOURCES]``）。"""
+    out = text or ""
+    while out:
+        stripped = False
+        for marker in _MARKER_SUFFIX_CANDIDATES:
+            max_len = min(len(out), len(marker) - 1)
+            for size in range(max_len, 0, -1):
+                if marker.startswith(out[-size:]):
+                    out = out[:-size]
+                    stripped = True
+                    break
+            if stripped:
+                break
+        if not stripped:
+            break
+    return out
+
+
+def _strip_hidden_marker_fragments(text: str) -> str:
+    out = _HIDDEN_MARKER_FRAGMENT_RE.sub("", text or "")
+    return _strip_trailing_marker_suffix(out)
 
 
 def _clean_answer(answer: str) -> str:
@@ -164,12 +303,15 @@ def _clean_answer(answer: str) -> str:
     # 成对隐藏块
     text = re.sub(r"\[SOURCES\].*?\[/SOURCES\]", "", text, flags=re.S)
     text = re.sub(r"\[TAGS\].*?\[END_TAGS\]", "", text, flags=re.S)
-    # 落单/残留的隐藏块标记（模型偶尔只输出半个标记或回声模板）
-    text = re.sub(r"\[/?SOURCES\]", "", text)
-    text = re.sub(r"\[/?(?:TAGS|END_TAGS)\]", "", text)
+    # 落单/残留的隐藏块标记（含 SOURCES] 等半段）
+    text = _strip_hidden_marker_fragments(text)
     # markdown 链接只保留文字、去掉裸链接
     text = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1", text)
     text = re.sub(r"https?://[^\s)\]}>\"'，。、；;：]+", "", text)
+    text = re.sub(r"(?m)^[ \t]*://[^\s]+[ \t]*$", "", text)
+    text = re.sub(r"https?://\s*$", "", text)
+    text = re.sub(r"://\s*$", "", text)
+    text = re.sub(r"(?m)^[ \t]*(?:://|https?://)[ \t]*$", "", text)
     # 脚注标记（连同前后多余空格一起去掉）
     text = re.sub(r"[ \t]*\[\^\d+\][ \t]*", "", text)
     # 模型回声的提示词占位文案

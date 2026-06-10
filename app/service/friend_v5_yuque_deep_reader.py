@@ -20,6 +20,10 @@ _DEEP_READ_HINT_RE = re.compile(
     r"(语雀|文档|指南|手册|正文|图文|图片|视频|截图|这篇|那篇|某篇|总结|提取|解读|阅读|《[^》]+》)"
 )
 _ALL_DOC_MEDIA_SCAN_LIMIT = 10_000
+_PROMPT_BODY_CHAR_LIMIT = 3000
+_VISION_PREFILTER_IMAGE_LIMIT = 2
+_VISION_PREFILTER_VIDEO_LIMIT = 1
+_VISION_FAST_PATH_MEDIA_THRESHOLD = 20
 
 
 @dataclass(frozen=True)
@@ -189,19 +193,41 @@ class FriendV5YuqueDeepReader:
             primary_doc_title=doc.title,
         )
         candidate_media = _filter_low_value_media(candidate_media)
-        image_limit, video_limit = _display_media_limits(candidate_media, max_images=self._max_images, max_videos=self._max_videos)
-        media, vision_lines, vision_debug = await self._media_enricher(
+        raw_candidate_image_count = len(candidate_media.images)
+        raw_candidate_video_count = len(candidate_media.videos)
+        candidate_media = _prefilter_media_for_vision(
             candidate_media,
             question=question or doc.title,
-            max_images=image_limit,
-            max_videos=video_limit,
+            max_images=min(max(0, self._max_images), _VISION_PREFILTER_IMAGE_LIMIT),
+            max_videos=min(max(0, self._max_videos), _VISION_PREFILTER_VIDEO_LIMIT),
         )
+        image_limit, video_limit = _display_media_limits(candidate_media, max_images=self._max_images, max_videos=self._max_videos)
+        if raw_candidate_image_count + raw_candidate_video_count > _VISION_FAST_PATH_MEDIA_THRESHOLD:
+            media = ChatMediaBundle(
+                images=list(candidate_media.images[:image_limit]),
+                videos=list(candidate_media.videos[:video_limit]),
+            )
+            vision_lines: list[str] = []
+            vision_debug = {
+                "vision_media_skipped": "too_many_media_fast_path",
+                "vision_candidate_images": len(candidate_media.images),
+                "vision_candidate_videos": len(candidate_media.videos),
+                "vision_display_images": len(media.images),
+                "vision_display_videos": len(media.videos),
+            }
+        else:
+            media, vision_lines, vision_debug = await self._media_enricher(
+                candidate_media,
+                question=question or doc.title,
+                max_images=image_limit,
+                max_videos=video_limit,
+            )
         vision_block = "\n".join(line for line in vision_lines if str(line or "").strip()).strip()
         prompt_block = (
             "【语雀文档深读】\n"
             f"标题：{doc.title}\n"
             f"链接：{doc.url or '（无）'}\n"
-            f"正文摘录：\n{plain[:6000] or body_text[:6000]}\n"
+            f"正文摘录：\n{plain[:_PROMPT_BODY_CHAR_LIMIT] or body_text[:_PROMPT_BODY_CHAR_LIMIT]}\n"
             f"{chr(10) + vision_block + chr(10) if vision_block else ''}"
             "请严格基于这篇语雀文档的正文和媒体信息回答；如果正文没有提到，不要编造。"
         )
@@ -222,8 +248,10 @@ class FriendV5YuqueDeepReader:
                 "doc_count": 1,
                 "doc_id": doc.doc_id,
                 "body_chars": len(body_text),
-                "candidate_media_images": len(candidate_media.images),
-                "candidate_media_videos": len(candidate_media.videos),
+                "candidate_media_images": raw_candidate_image_count,
+                "candidate_media_videos": raw_candidate_video_count,
+                "vision_prefilter_images": len(candidate_media.images),
+                "vision_prefilter_videos": len(candidate_media.videos),
                 "media_images": len(media.images),
                 "media_videos": len(media.videos),
                 **vision_debug,
@@ -252,6 +280,70 @@ def _filter_low_value_media(media: ChatMediaBundle) -> ChatMediaBundle:
         images=[item for item in media.images if not _is_low_value_media(item.url, item.title, item.summary)],
         videos=[item for item in media.videos if not _is_low_value_media(item.url, item.title, item.summary)],
     )
+
+
+def _prefilter_media_for_vision(
+    media: ChatMediaBundle,
+    *,
+    question: str,
+    max_images: int,
+    max_videos: int,
+) -> ChatMediaBundle:
+    return ChatMediaBundle(
+        images=_rank_media_for_prefilter(media.images, question=question)[: max(0, int(max_images or 0))],
+        videos=_rank_media_for_prefilter(media.videos, question=question)[: max(0, int(max_videos or 0))],
+    )
+
+
+def _rank_media_for_prefilter(items: list[Any], *, question: str) -> list[Any]:
+    if len(items) <= 1:
+        return list(items)
+    q_tokens = _prefilter_question_tokens(question)
+    scored: list[tuple[int, int, Any]] = []
+    for idx, item in enumerate(items):
+        haystack = " ".join(
+            str(part or "").lower()
+            for part in (
+                getattr(item, "title", ""),
+                getattr(item, "doc_title", ""),
+                getattr(item, "summary", ""),
+                getattr(item, "url", ""),
+            )
+        )
+        score = max(0, 8 - min(idx, 8))
+        for token in q_tokens:
+            token = (token or "").lower()
+            if token and token in haystack:
+                score += 8 if len(token) >= 2 else 3
+        scored.append((score, -idx, item))
+    scored.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    return [item for _, _, item in scored]
+
+
+def _prefilter_question_tokens(question: str) -> set[str]:
+    text = (question or "").strip()
+    tokens = {token for token in MediaAnswerOrchestrator._extract_keywords(text) if token}
+    for term in (
+        "教师支持",
+        "学习软件",
+        "课程目标",
+        "课堂活动",
+        "教学效果",
+        "教师",
+        "老师",
+        "软件",
+        "平台",
+        "课程",
+        "课堂",
+        "作品",
+        "效果",
+        "培训",
+        "硬件",
+        "机器人",
+    ):
+        if term in text:
+            tokens.add(term)
+    return tokens
 
 
 def _is_low_value_media(*parts: str) -> bool:

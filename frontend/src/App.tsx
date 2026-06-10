@@ -49,6 +49,38 @@ const IS_VISITOR_ROUTE =
 const FOCUS_SCENE_ITEMS = ["人工智能通识教育", "智能招生", "跨学科项目化学习", "学校AI场景定制"] as const;
 type FocusScene = (typeof FOCUS_SCENE_ITEMS)[number];
 
+const SCENE_TO_TOC_TITLE: Record<FocusScene, string> = {
+  人工智能通识教育: "人工智能通识课程",
+  跨学科项目化学习: "跨学科项目式学习",
+  智能招生: "智能招生",
+  学校AI场景定制: "学校AI场景定制",
+};
+
+function resolveSceneForFriendV5Tag(tag: string, fallback: FocusScene): FocusScene {
+  const patterns = [
+    /^想看看(.+?)的产品的使用指南？$/,
+    /^想看看(.+?)的产品的优秀案例库？$/,
+    /^想申请测试账号，试一试(.+?)的产品？$/,
+    /^想要了解一下(.+?)产品的价格？$/,
+    /^想了解一下(.+?)产品？$/,
+  ];
+  for (const pattern of patterns) {
+    const match = (tag || "").trim().match(pattern);
+    const product = match?.[1]?.trim();
+    if (!product) continue;
+    for (const scene of FOCUS_SCENE_ITEMS) {
+      const tocTitle = SCENE_TO_TOC_TITLE[scene];
+      if (product === scene || product === tocTitle) return scene;
+    }
+  }
+  return fallback;
+}
+
+function isFriendV5TrialApplyTag(tag: string) {
+  const normalized = tag.replace(/[\s？?，,。！!、：:；;]/g, "");
+  return normalized.includes("申请测试账号") || (normalized.includes("试一试") && normalized.includes("产品"));
+}
+
 function renderFocusSceneIcon(scene: FocusScene) {
   if (scene === "人工智能通识教育") {
     return (
@@ -471,14 +503,53 @@ function countFriendV5SearchKeywords(input: string[] | undefined): number {
 }
 
 // 小为(v5) 正文里偶尔会泄漏 [SOURCES]/[/SOURCES] 标记与裸链接（来源已在下方“参考资料”里以文档标题超链接展示），正文不再直接显示链接
+function stripHiddenMarkerFragments(text: string): string {
+  const markerSuffixes = ["[SOURCES]", "[/SOURCES]", "[TAGS]", "[END_TAGS]"];
+  let out = text || "";
+  out = out.replace(
+    new RegExp(
+      String.raw`(?:\[\/SOURCES\]|\[SOURCES\]|\[\/SOURCES(?!\])|\[\/(?:TAGS|END_TAGS)(?=\]|$)|\[?(?:TAGS|END_TAGS)\]|(?<!\[)(?:\[/SOURCES\]|SOURCES?\]?|OURCES?\]?|URCES?\]?|RCES?\]?|CES?\]?|ES?\]?|S\]))`,
+      "g",
+    ),
+    "",
+  );
+  while (out) {
+    let stripped = false;
+    for (const marker of markerSuffixes) {
+      const maxLen = Math.min(out.length, marker.length - 1);
+      for (let size = maxLen; size > 0; size -= 1) {
+        if (marker.startsWith(out.slice(-size))) {
+          out = out.slice(0, -size);
+          stripped = true;
+          break;
+        }
+      }
+      if (stripped) break;
+    }
+    if (!stripped) break;
+  }
+  return out;
+}
+
 function sanitizeFriendV5AnswerText(text: string): string {
+  const preservedLinks: string[] = [];
   let out = text || "";
   out = out.replace(/\[SOURCES\][\s\S]*?\[\/SOURCES\]/g, "");
   out = out.replace(/\[TAGS\][\s\S]*?\[END_TAGS\]/g, "");
-  out = out.replace(/\[\/?SOURCES\]/g, "");
-  out = out.replace(/\[(?:TAGS|END_TAGS)\]/g, "");
-  out = out.replace(/\[([^\]]+)\]\((?:https?:\/\/|www\.)[^)]+\)/g, "$1");
+  out = stripHiddenMarkerFragments(out);
+  out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, (_match, label: string, url: string) => {
+    const key = `__FRIEND_V5_MD_LINK_${preservedLinks.length}__`;
+    preservedLinks.push(`[${label}](${url})`);
+    return key;
+  });
   out = out.replace(/(?:https?:\/\/|www\.)[^\s)\]}>"'，。、；;：]+/g, "");
+  preservedLinks.forEach((link, index) => {
+    out = out.replace(`__FRIEND_V5_MD_LINK_${index}__`, link);
+  });
+  out = out.replace(/^[ \t]*:\/\/[^\s]+[ \t]*$/gm, "");
+  out = out.replace(/https?:\/\/\s*$/g, "");
+  out = out.replace(/:\/\/\s*$/g, "");
+  out = out.replace(/^[ \t]*(?::\/\/|https?:\/\/)[ \t]*$/gm, "");
   out = out.replace(/[ \t]*\[\^\d+\][ \t]*/g, "");
   out = out.replace(/更多正文\.{2,}/g, "");
   out = out.replace(/^[ \t]*正文\.{2,}[ \t]*/gm, "");
@@ -486,7 +557,7 @@ function sanitizeFriendV5AnswerText(text: string): string {
     .split("\n")
     .filter((line) => {
       const s = line.trim();
-      return !(s && /^[\s:：。.、，,;；!！?？\-—_*·•]+$/.test(s));
+      return !(s && /^[\s/:：。.、，,;；!！?？\-—_*·•]+$/.test(s));
     })
     .join("\n");
   out = out.replace(/[ \t]+([，。、；：！？）])/g, "$1");
@@ -1522,6 +1593,9 @@ function App() {
           profile = {
             ...fallback,
             ...data,
+            name: data.name || fallback.name,
+            org_name: data.org_name || fallback.org_name,
+            contact: data.contact || fallback.contact,
             interested_product: data.interested_product || fallback.interested_product,
             concern: data.concern || fallback.concern,
           };
@@ -3152,7 +3226,14 @@ function App() {
                                   type="button"
                                   className="friend-v5-tag-chip"
                                   onClick={() => {
-                                    const scene = activeFocusScene || FOCUS_SCENE_ITEMS[0];
+                                    if (isFriendV5TrialApplyTag(tag)) {
+                                      void handleTrialApplyEntryClick();
+                                      return;
+                                    }
+                                    const scene = resolveSceneForFriendV5Tag(
+                                      tag,
+                                      activeFocusScene || FOCUS_SCENE_ITEMS[0],
+                                    );
                                     void askQuestion(tag, true, { triggerType: "tag", scene });
                                   }}
                                   disabled={isStreaming}

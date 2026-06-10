@@ -86,6 +86,46 @@ def test_filter_extracts_mixed_source_urls_and_ignores_end_marker() -> None:
     assert result.source_urls == ["https://www.youweiai.com/page1", "https://school.example.edu/news"]
 
 
+def test_filter_strips_bare_sources_marker_fragment() -> None:
+    parser = FriendV5TagStreamFilter(scene="智能招生")
+
+    parser.feed("产品价格这块可以先看三个方向。SOURCES]")
+    result = parser.finish()
+
+    assert result.answer == "产品价格这块可以先看三个方向。"
+    assert "SOURCES" not in result.answer
+
+
+def test_filter_strips_partial_sources_marker_on_finish() -> None:
+    parser = FriendV5TagStreamFilter(scene="智能招生")
+
+    assert parser.feed("先看报价单。[S") == "先看报价单。"
+    result = parser.finish()
+
+    assert result.answer == "先看报价单。"
+    assert "[S" not in result.answer
+
+
+def test_filter_strips_bare_s_bracket_fragment() -> None:
+    parser = FriendV5TagStreamFilter(scene="智能招生")
+
+    assert parser.feed("先看报价单。S]") == "先看报价单。"
+    result = parser.finish()
+
+    assert result.answer == "先看报价单。"
+    assert "S]" not in result.answer
+
+
+def test_filter_strips_broken_protocol_source_line() -> None:
+    parser = FriendV5TagStreamFilter(scene="智能招生")
+
+    parser.feed("先看三个方向。\n\n://www.yuque.com/example/doc\n\n需要继续吗？")
+    result = parser.finish()
+
+    assert result.answer == "先看三个方向。\n\n需要继续吗？"
+    assert "://" not in result.answer
+
+
 def test_filter_drops_placeholder_example_sources() -> None:
     parser = FriendV5TagStreamFilter(scene="智能招生")
 

@@ -61,13 +61,23 @@ class FriendV5Generator:
         self.timeout_s = float(timeout_s)
         self._client = client
 
-    async def stream(self, *, system_prompt: str, user_prompt: str) -> AsyncIterator[FriendV5StreamEvent]:
+    async def stream(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        enable_search: bool = False,
+    ) -> AsyncIterator[FriendV5StreamEvent]:
         if not self.api_key:
             raise GeneratorConfigError(f"缺少 DASHSCOPE_API_KEY，无法使用模型 {self.model}。")
         if not self.generation_url:
             raise GeneratorConfigError("缺少 CHAT_V5_GENERATION_URL。")
 
-        payload = self._build_payload(system_prompt=system_prompt, user_prompt=user_prompt)
+        payload = self._build_payload(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            enable_search=enable_search,
+        )
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -123,7 +133,14 @@ class FriendV5Generator:
             logger.info("V5 OAI SSE 无 search_info，来源由 [SOURCES] 块提供")
 
 
-    def _build_payload(self, *, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+    def _build_payload(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        enable_search: bool = False,
+    ) -> dict[str, Any]:
+        # 深度思考保持关闭；联网搜索仅在语雀检索未命中时作为兜底开启
         return {
             "model": self.model,
             "messages": [
@@ -133,7 +150,7 @@ class FriendV5Generator:
             "stream": True,
             "max_tokens": self.max_tokens,
             "enable_thinking": False,
-            "enable_search": False,
+            "enable_search": bool(enable_search),
             "search_options": {
                 "enable_source": True,
                 "search_strategy": self.search_strategy,
