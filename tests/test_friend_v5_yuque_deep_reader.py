@@ -78,6 +78,20 @@ class _FakeMCPWithFiveUsefulImages:
         )
 
 
+class _FakeMCPWithManyUsefulImages:
+    enabled = True
+
+    async def search(self, query: str):  # noqa: ANN001
+        return []
+
+    async def get_doc(self, doc_id: str) -> str:
+        images = "\n".join(
+            f"![课堂图{i}](https://cdn.nlark.com/yuque/0/2026/png/123456/classroom-{i}.png)"
+            for i in range(25)
+        )
+        return "# 使用指南\n这篇文档包含很多课堂操作截图。\n" + images
+
+
 class _DisabledMCP:
     enabled = False
 
@@ -154,7 +168,7 @@ async def _fake_all_image_vision_enricher(
     max_images: int,
     max_videos: int,
 ):
-    assert len(media.images) == 5
+    assert len(media.images) == 2
     assert max_images == 2
     assert max_videos == 0
     images = [
@@ -176,6 +190,16 @@ async def _fake_all_image_vision_enricher(
         "vision_image_summaries_used": len(images),
         "vision_model": "fake-qwen-vl",
     }
+
+
+async def _should_not_call_vision_enricher(
+    media: ChatMediaBundle,
+    *,
+    question: str,
+    max_images: int,
+    max_videos: int,
+):
+    raise AssertionError("媒体过多时应走快速路径，不应同步调用视觉模型")
 
 
 @pytest.mark.asyncio
@@ -233,7 +257,7 @@ async def test_deep_reader_reads_toc_node_directly_and_enriches_top_three_media(
 
 
 @pytest.mark.asyncio
-async def test_deep_reader_sends_all_doc_images_to_vision_before_display_selection() -> None:
+async def test_deep_reader_prefilters_doc_images_before_vision_selection() -> None:
     reader = FriendV5YuqueDeepReader(
         mcp_client=_FakeMCPWithFiveUsefulImages(),
         yuque_loader=None,
@@ -248,14 +272,42 @@ async def test_deep_reader_sends_all_doc_images_to_vision_before_display_selecti
             "title": "乐高人工智能课程",
             "url": "https://www.yuque.com/example/repo/lego-ai",
         },
-        question="乐高人工智能课程",
+        question="教师支持和学习软件",
     )
 
     assert len(result.media.images) == 2
     assert [item.title for item in result.media.images] == ["教师支持", "学习软件"]
-    assert "Qwen识别：课程目标" in result.prompt_block
-    assert "Qwen识别：教学效果" in result.prompt_block
-    assert result.debug["vision_images_used"] == 5
+    assert "Qwen识别：课程目标" not in result.prompt_block
+    assert "Qwen识别：教学效果" not in result.prompt_block
+    assert result.debug["candidate_media_images"] == 5
+    assert result.debug["vision_prefilter_images"] == 2
+    assert result.debug["vision_images_used"] == 2
+
+
+@pytest.mark.asyncio
+async def test_deep_reader_skips_sync_vision_when_doc_has_too_many_images() -> None:
+    reader = FriendV5YuqueDeepReader(
+        mcp_client=_FakeMCPWithManyUsefulImages(),
+        yuque_loader=None,
+        max_images=4,
+        max_videos=0,
+        media_enricher=_should_not_call_vision_enricher,
+    )
+
+    result = await reader.read_toc_node(
+        node={
+            "doc_id": "guide-doc",
+            "title": "使用指南",
+            "url": "https://www.yuque.com/example/repo/guide",
+        },
+        question="使用指南",
+    )
+
+    assert result.used is True
+    assert result.debug["candidate_media_images"] == 25
+    assert result.debug["vision_prefilter_images"] == 2
+    assert result.debug["vision_media_skipped"] == "too_many_media_fast_path"
+    assert len(result.media.images) == 2
 
 
 @pytest.mark.asyncio

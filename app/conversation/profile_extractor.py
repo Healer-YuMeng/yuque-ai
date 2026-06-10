@@ -22,6 +22,7 @@ class ProfileUpdate:
 
 
 _NAME_PATTERNS: Sequence[re.Pattern[str]] = (
+    re.compile(r"我姓\s*([一-龥])"),
     re.compile(r"(?:我叫|名字是|称呼我|叫我)\s*([^\s，,。；;]{1,12})"),
     re.compile(r"(?:我是|我时)\s*[^\s，,。；;]{2,40}?(?:学校|中学|小学|幼儿园|教育集团|机构|公司)的\s*([^\s，,。；;]{1,16}(?:老师|教师|校长|先生|女士|同学|家长|主任|院长|园长))"),
     # 整段称呼含老师/教师，避免只抽到姓氏「赵」
@@ -117,6 +118,8 @@ class ProfileExtractor:
         if org:
             org = org.strip().strip("，,。；;")
         if name:
+            if re.fullmatch(r"[一-龥]", name):
+                name = f"{name}老师"
             name = _sanitize_name(name, org=org)
 
         interests = _extract_interests(q, base=current_profile.interests if current_profile else None)
@@ -160,6 +163,8 @@ class ProfileExtractor:
                 if not name:
                     n2 = _pick_first_group(t, _NAME_PATTERNS)
                     if n2:
+                        if re.fullmatch(r"[一-龥]", n2):
+                            n2 = f"{n2}老师"
                         name = _sanitize_name(n2, org=org)
                 if not org:
                     o2 = _pick_first_group(t, _ORG_PATTERNS)
@@ -275,6 +280,10 @@ def _sanitize_name(name: str, *, org: str = "") -> str:
     if n in ("老师", "教师", "家长", "学生", "同学", "校长", "先生", "女士"):
         return ""
     if any(pat.fullmatch(n) for pat in _INVALID_DISPLAY_NAME_PATTERNS):
+        return ""
+    if re.search(r"(?:学校|中学|小学|幼儿园|机构|公司|教育集团)", n):
+        return ""
+    if re.search(r"[在做]", n) and not re.match(r"^.{1,4}(?:老师|教师|先生|女士)$", n):
         return ""
     return n[:24]
 
