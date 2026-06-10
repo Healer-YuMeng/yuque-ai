@@ -10,6 +10,9 @@ from app.schemas.chat import ChatMediaBundle, ChatResponse, ChatV2Response, Medi
 
 
 class FakeQAService:
+    def __init__(self) -> None:
+        self.refresh_calls: list[bool] = []
+
     async def chat(
         self,
         question: str,
@@ -140,6 +143,9 @@ class FakeQAService:
             "refresh_interval_s": 300,
             "refreshed_seconds_ago": 12.0,
         }
+
+    async def refresh_guide_titles(self, *, force: bool = False) -> None:
+        self.refresh_calls.append(force)
 
 
 def build_test_app() -> FastAPI:
@@ -340,3 +346,15 @@ def test_chat_v2_guide_titles_endpoint() -> None:
     assert payload["max_level"] == 3
     assert payload["titles"][0] == "平台介绍"
     assert payload["nodes"][0]["children"][0]["title"] == "课程产品矩阵"
+
+
+def test_chat_v2_guide_titles_refreshes_when_requested() -> None:
+    fake = FakeQAService()
+    test_app = build_test_app()
+    test_app.dependency_overrides[get_qa_service] = lambda: fake
+
+    client = TestClient(test_app)
+    response = client.get("/chat/v2/guide-titles?refresh=true")
+
+    assert response.status_code == 200
+    assert fake.refresh_calls == [True]

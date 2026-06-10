@@ -7,5 +7,6 @@ faiss-cpu>=1.8.0
 numpy>=1.26.0
 openai>=1.40.0
 aiosqlite>=0.20.0
+mcp>=1.0.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0

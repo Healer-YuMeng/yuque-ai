@@ -268,7 +268,12 @@ async def chat_v2_stream(request: ChatV2Request, qa_service: QAService = Depends
 
 
 @router.get("/chat/v2/guide-titles", response_model=GuideDocTitlesResponse)
-async def chat_v2_guide_titles(qa_service: QAService = Depends(get_qa_service)) -> GuideDocTitlesResponse:
+async def chat_v2_guide_titles(
+    refresh: bool = Query(default=False, description="强制重新拉取语雀目录"),
+    qa_service: QAService = Depends(get_qa_service),
+) -> GuideDocTitlesResponse:
+    if refresh and hasattr(qa_service, "refresh_guide_titles"):
+        await qa_service.refresh_guide_titles(force=True)
     data = qa_service.guide_titles_state()
     return GuideDocTitlesResponse(**data)
 

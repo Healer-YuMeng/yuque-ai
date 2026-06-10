@@ -77,6 +77,7 @@ async def assistant_only_by_llm(question: str) -> Tuple[bool, str]:
         resp = await client.chat.completions.create(
             model=model,
             temperature=0,
+            extra_body={"enable_thinking": False},
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": q[:500]},

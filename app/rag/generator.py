@@ -7,7 +7,10 @@ from typing import Any, AsyncIterator, Sequence
 from openai import AsyncOpenAI
 
 from app.core.config import settings
+from app.core.logger import get_logger
 from app.schemas.chat import SourceItem
+
+logger = get_logger(__name__)
 
 
 class GeneratorConfigError(RuntimeError):
@@ -197,6 +200,7 @@ class DeepSeekGenerator(Generator):
         options: dict[str, Any] = {"temperature": 0.2}
         if self._is_qwen_model():
             options["temperature"] = 0.08
+            options["extra_body"] = {"enable_thinking": False}
             if visitor_sales:
                 options["max_tokens"] = 340 if stream else 420
             else:
@@ -241,6 +245,7 @@ class DeepSeekGenerator(Generator):
         else:
             prompt = self._build_prompt(question=question, contexts=contexts, sources=sources)
             system = self._system_message(contexts, visitor_sales=False)
+        logger.info("LLM generate model=%s question=%.100s", self._model, question)
         response = await self._client.chat.completions.create(
             model=self._model,
             messages=[
@@ -269,6 +274,7 @@ class DeepSeekGenerator(Generator):
         else:
             prompt = self._build_prompt(question=question, contexts=contexts, sources=sources)
             system = self._system_message(contexts, visitor_sales=False)
+        logger.info("LLM stream_generate model=%s question=%.100s", self._model, question)
         stream = await self._client.chat.completions.create(
             model=self._model,
             messages=[

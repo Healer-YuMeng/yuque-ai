@@ -75,7 +75,7 @@ class Settings:
     dashscope_base_url: str = _env("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
     llm_provider: str = _env("LLM_PROVIDER", "openai")
-    llm_model: str = _env("LLM_MODEL", "qwen3.6-flash")
+    llm_model: str = _env("LLM_MODEL", "qwen3.7-plus")
     openai_base_url: str = _env("OPENAI_BASE_URL")
     deepseek_base_url: str = _env("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
     llm_base_url: str = _env(
@@ -104,19 +104,20 @@ class Settings:
     force_mcp_fallback: bool = _env_bool("FORCE_MCP_FALLBACK", False)
     auto_mcp_tool_router: bool = _env_bool("AUTO_MCP_TOOL_ROUTER", False)
     intent_llm_enabled: bool = _env_bool("INTENT_LLM_ENABLED", False)
-    intent_llm_model: str = _env("INTENT_LLM_MODEL", _env("LLM_MODEL", "qwen3.6-flash"))
+    intent_llm_model: str = _env("INTENT_LLM_MODEL", _env("LLM_MODEL", "qwen3.7-plus"))
 
     # 元问题：正则未命中时，可用一次 LLM 判断是否「只问助手自身」，减少无限扩写关键词（见 README / doc）
     assistant_meta_llm_router: bool = _env_bool("ASSISTANT_META_LLM_ROUTER", False)
     assistant_meta_router_max_chars: int = _env_int("ASSISTANT_META_ROUTER_MAX_CHARS", 120)
     assistant_meta_router_model: str = _env(
         "ASSISTANT_META_ROUTER_MODEL",
-        _env("INTENT_LLM_MODEL", _env("LLM_MODEL", "qwen3.6-flash")),
+        _env("INTENT_LLM_MODEL", _env("LLM_MODEL", "qwen3.7-plus")),
     )
 
     web_dir: Path = BASE_DIR / "web"
     frontend_dir: Path = BASE_DIR / "frontend"
     frontend_dist_dir: Path = BASE_DIR / "frontend" / "dist"
+    frontend_public_port: int = _env_int("FRONTEND_PORT", 8000)
     expose_source_urls: bool = _env_bool("EXPOSE_SOURCE_URLS", False)
 
     # 语雀插图：不启用多模态时，仍可将命中文档内的图片以 Markdown（/yuque/asset 代理）追加进上下文，供主模型原样插入回答
@@ -126,7 +127,7 @@ class Settings:
 
     # 语雀多媒体：独立多模态识读（OpenAI 兼容）+ 主模型写回答；可接阿里百炼视觉模型
     vision_enabled: bool = _env_bool("VISION_ENABLED", False)
-    vision_model: str = _env("VISION_MODEL", "qwen3.6-flash")
+    vision_model: str = _env("VISION_MODEL", "qwen3.7-plus")
     vision_max_images: int = _env_int("VISION_MAX_IMAGES", 4)
     vision_max_videos: int = _env_int("VISION_MAX_VIDEOS", 1)
     vision_video_fps: int = _env_int("VISION_VIDEO_FPS", 2)
@@ -149,6 +150,20 @@ class Settings:
 
     # V4：目录状态机 + 目录内关联检索（默认关闭，旁路接入）
     chat_v4_enabled: bool = _env_bool("CHAT_V4_ENABLED", False)
+    # V5：知心朋友小为 + 联网搜索来源（默认关闭，旁路接入）
+    chat_v5_enabled: bool = _env_bool("CHAT_V5_ENABLED", False)
+    chat_v5_model: str = _env("CHAT_V5_MODEL", "qwen3.7-plus")
+    chat_v5_search_strategy: str = _env("CHAT_V5_SEARCH_STRATEGY", "turbo")
+    chat_v5_max_tokens: int = _env_int("CHAT_V5_MAX_TOKENS", 400)
+    chat_v5_yuque_url_limit: int = _env_int("CHAT_V5_YUQUE_URL_LIMIT", 3)
+    chat_v5_yuque_deep_read_enabled: bool = _env_bool("CHAT_V5_YUQUE_DEEP_READ_ENABLED", False)
+    chat_v5_max_images: int = _env_int("CHAT_V5_MAX_IMAGES", 4)
+    chat_v5_max_videos: int = _env_int("CHAT_V5_MAX_VIDEOS", 1)
+    chat_v5_require_web_sources: bool = _env_bool("CHAT_V5_REQUIRE_WEB_SOURCES", True)
+    chat_v5_generation_url: str = _env(
+        "CHAT_V5_GENERATION_URL",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+    )
     # V4 开发者追踪：SSE done.debug.turn_trace（生产建议 false）
     expose_turn_trace: bool = _env_bool("EXPOSE_TURN_TRACE", True)
     # V4 试用账号池 JSON：[{"username":"demo","password":"***","label":"教师端"}]

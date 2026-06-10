@@ -1,0 +1,118 @@
+.build_and_push_backend: &build_and_push_backend
+  name: build-and-push-yuque-rag-demo-backend-image
+  services:
+    - docker
+  imports:
+    - https://cnb.cool/fenyuanSaki/key/-/blob/main/env.prod.yml
+  env:
+    SERVER_DOCKER_REGISTRY: youwei.tencentcloudcr.com
+    SERVER_DOCKER_NAMESPACE: yuque-rag-demo
+    BACKEND_IMAGE_NAME: yuque-rag-demo-backend
+  stages:
+    - name: docker-login-build-push
+      jobs:
+        - name: build and push backend image
+          image: docker:24
+          script:
+            - test -n "$SERVER_DOCKER_REGISTRY"
+            - test -n "$SERVER_DOCKER_NAMESPACE"
+            - test -n "$SERVER_DOCKER_USERNAME"
+            - test -n "$SERVER_DOCKER_PASSWORD"
+            - test -n "$CNB_COMMIT_SHORT"
+            - echo "$SERVER_DOCKER_PASSWORD" | docker login "$SERVER_DOCKER_REGISTRY" -u "$SERVER_DOCKER_USERNAME" --password-stdin
+            - |
+              rm -rf /tmp/yuque-rag-demo-backend
+              mkdir -p /tmp/yuque-rag-demo-backend
+              cp requirements.txt /tmp/yuque-rag-demo-backend/
+              cp -R app web scripts /tmp/yuque-rag-demo-backend/
+
+              DOCKER_BUILDKIT=1 docker build --progress=plain \
+                -t "${SERVER_DOCKER_REGISTRY}/${SERVER_DOCKER_NAMESPACE}/${BACKEND_IMAGE_NAME:-yuque-rag-demo-backend}:${CNB_COMMIT_SHORT}" \
+                -t "${SERVER_DOCKER_REGISTRY}/${SERVER_DOCKER_NAMESPACE}/${BACKEND_IMAGE_NAME:-yuque-rag-demo-backend}:latest" \
+                -f - /tmp/yuque-rag-demo-backend <<'DOCKERFILE'
+              FROM python:3.11-slim
+
+              ENV PYTHONDONTWRITEBYTECODE=1 \
+                  PYTHONUNBUFFERED=1
+
+              WORKDIR /app
+
+              RUN apt-get update \
+                  && apt-get install -y --no-install-recommends build-essential curl nodejs npm \
+                  && rm -rf /var/lib/apt/lists/*
+
+              COPY requirements.txt ./
+              RUN python -m pip install --no-cache-dir --upgrade pip \
+                  && python -m pip install --no-cache-dir -r requirements.txt
+
+              COPY app ./app
+              COPY web ./web
+              COPY scripts ./scripts
+
+              RUN mkdir -p data_runtime
+
+              EXPOSE 8000
+
+              CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+              DOCKERFILE
+            - docker push "${SERVER_DOCKER_REGISTRY}/${SERVER_DOCKER_NAMESPACE}/${BACKEND_IMAGE_NAME:-yuque-rag-demo-backend}:${CNB_COMMIT_SHORT}"
+            - docker push "${SERVER_DOCKER_REGISTRY}/${SERVER_DOCKER_NAMESPACE}/${BACKEND_IMAGE_NAME:-yuque-rag-demo-backend}:latest"
+
+.build_and_push_frontend: &build_and_push_frontend
+  name: build-and-push-yuque-rag-demo-frontend-image
+  services:
+    - docker
+  imports:
+    - https://cnb.cool/fenyuanSaki/key/-/blob/main/env.prod.yml
+  env:
+    SERVER_DOCKER_REGISTRY: youwei.tencentcloudcr.com
+    SERVER_DOCKER_NAMESPACE: yuque-rag-demo
+    FRONTEND_IMAGE_NAME: yuque-rag-demo-frontend
+  stages:
+    - name: docker-login-build-push
+      jobs:
+        - name: build and push frontend image
+          image: docker:24
+          script:
+            - test -n "$SERVER_DOCKER_REGISTRY"
+            - test -n "$SERVER_DOCKER_NAMESPACE"
+            - test -n "$SERVER_DOCKER_USERNAME"
+            - test -n "$SERVER_DOCKER_PASSWORD"
+            - test -n "$CNB_COMMIT_SHORT"
+            - echo "$SERVER_DOCKER_PASSWORD" | docker login "$SERVER_DOCKER_REGISTRY" -u "$SERVER_DOCKER_USERNAME" --password-stdin
+            - |
+              rm -rf /tmp/yuque-rag-demo-frontend
+              mkdir -p /tmp/yuque-rag-demo-frontend
+              cp frontend/package*.json /tmp/yuque-rag-demo-frontend/
+              cp frontend/index.html frontend/tsconfig.json frontend/tsconfig.app.json frontend/tsconfig.node.json frontend/vite.config.ts /tmp/yuque-rag-demo-frontend/
+              cp -R frontend/public frontend/src /tmp/yuque-rag-demo-frontend/
+
+              DOCKER_BUILDKIT=1 docker build --progress=plain \
+                -t "${SERVER_DOCKER_REGISTRY}/${SERVER_DOCKER_NAMESPACE}/${FRONTEND_IMAGE_NAME:-yuque-rag-demo-frontend}:${CNB_COMMIT_SHORT}" \
+                -t "${SERVER_DOCKER_REGISTRY}/${SERVER_DOCKER_NAMESPACE}/${FRONTEND_IMAGE_NAME:-yuque-rag-demo-frontend}:latest" \
+                -f - /tmp/yuque-rag-demo-frontend <<'DOCKERFILE'
+              FROM node:24-alpine AS build
+
+              WORKDIR /app
+
+              COPY package*.json ./
+              RUN npm ci
+
+              COPY . .
+              RUN npm run build
+
+              FROM nginx:1.27-alpine
+
+              COPY --from=build /app/dist /usr/share/nginx/html
+
+              EXPOSE 80
+
+              CMD ["nginx", "-g", "daemon off;"]
+              DOCKERFILE
+            - docker push "${SERVER_DOCKER_REGISTRY}/${SERVER_DOCKER_NAMESPACE}/${FRONTEND_IMAGE_NAME:-yuque-rag-demo-frontend}:${CNB_COMMIT_SHORT}"
+            - docker push "${SERVER_DOCKER_REGISTRY}/${SERVER_DOCKER_NAMESPACE}/${FRONTEND_IMAGE_NAME:-yuque-rag-demo-frontend}:latest"
+
+main:
+  push:
+    - *build_and_push_backend
+    - *build_and_push_frontend

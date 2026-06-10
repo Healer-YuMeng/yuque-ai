@@ -17,6 +17,7 @@ from app.data.splitter import RecursiveTextSplitter, TextChunk
 from app.data.yuque_loader import YuqueDocument, YuqueLoader, YuqueLoaderError
 from app.conversation.chat_display import display_name_for_chat, normalize_display_name
 from app.conversation.contact_extractor import extract_contact
+from app.conversation.friend_persona_v5 import all_friend_v5_scenes
 from app.conversation.lead_nudge_policy import LeadNudgePolicy
 from app.conversation.trial_account_pool import allocate_trial_account, load_trial_accounts
 from app.conversation.v4_lead_outreach import V4LeadOutreach
@@ -25,6 +26,7 @@ from app.conversation.visitor_profile import detect_visitor_type
 from app.db.repositories import ChatMessageRow, ChatSessionRepository, DocumentRepository, LeadCaptureRepository, QALogRepository
 from app.db.profile_repository import ChatSessionProfileRepository
 from app.rag.embedder import BGESmallEmbedder, Embedder, OpenAIEmbedder
+from app.rag.friend_v5_generator import FriendV5Generator
 from app.rag.generator import DeepSeekGenerator, Generator, GeneratorConfigError, OpenAIGenerator
 from app.rag.skill_router import route_skill
 from app.rag.pipeline import RAGPipeline
@@ -39,6 +41,9 @@ from app.schemas.chat import (
     VisitorProfileResponse,
 )
 from app.service.media_answer_orchestrator import MediaAnswerOrchestrator
+from app.service.friend_dialog_orchestrator_v5 import FriendDialogOrchestratorV5
+from app.service.friend_v5_scene_query_rewriter import FriendV5SceneQueryRewriter
+from app.service.friend_v5_yuque_deep_reader import FriendV5YuqueDeepReader
 from app.service.sales_dialog_orchestrator_v3 import SalesDialogOrchestratorV3
 from app.service.sales_dialog_orchestrator_v4 import SalesDialogOrchestratorV4, _strip_media_urls_from_text
 from app.storage.vector_store import StoredChunk, VectorStore
@@ -623,10 +628,12 @@ class QAService:
     ) -> AsyncIterator[dict[str, Any]]:
         """V4：目录状态机 + 目录内关联讲解（SSE）。"""
         sid = (session_id or "").strip()
+        history: List[ChatMessageRow] = []
         if sid:
             await self._chat_session_repository.ensure_session(
                 session_id=sid, chat_mode=(chat_mode or "visitor_sales"), advisor_role="sales"
             )
+            history = await self._chat_session_repository.list_recent_messages(session_id=sid, limit=20)
             await self._chat_session_repository.append_message(session_id=sid, role="user", content=question)
             if _is_v4_memory_only_question(question):
                 profile = await self._chat_session_profile_repository.get_profile(session_id=sid)
@@ -663,7 +670,6 @@ class QAService:
             lead_outreach=lead_outreach,
         )
 
-        history = await self._chat_session_repository.list_recent_messages(session_id=sid, limit=20) if sid else []
         answer_parts: List[str] = []
         selected_doc_ids = [int(x.doc_id) for x in (selected_yuque_docs or []) if int(x.doc_id) >= 1]
         async for event in orch.answer_stream(
@@ -707,6 +713,110 @@ class QAService:
                 yield {"event": "done", "data": data}
                 continue
             yield event
+
+    async def chat_v5_stream(
+        self,
+        question: str,
+        *,
+        model: Optional[str] = None,
+        owner: Optional[str] = None,
+        token_profile: Optional[str] = None,
+        chat_mode: Optional[str] = None,
+        session_id: Optional[str] = None,
+        scene: str,
+        trigger_type: str,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """V5：知心朋友小为 + 联网搜索来源（SSE）。"""
+        if not settings.chat_v5_enabled:
+            yield {"event": "error", "data": {"message": "V5 链路未开启，请先设置 CHAT_V5_ENABLED=true。"}}
+            return
+        sid = (session_id or "").strip()
+        if not sid.startswith("sess_v5_"):
+            yield {"event": "error", "data": {"message": "V5 session_id 必须以 sess_v5_ 开头。"}}
+            return
+        if scene not in all_friend_v5_scenes():
+            yield {"event": "error", "data": {"message": "V5 scene 不在允许范围内。"}}
+            return
+        if trigger_type not in {"scene", "tag", "manual"}:
+            yield {"event": "error", "data": {"message": "V5 trigger_type 必须是 scene、tag 或 manual。"}}
+            return
+
+        await self._chat_session_repository.ensure_session(
+            session_id=sid,
+            chat_mode=(chat_mode or "friend_v5"),
+            advisor_role="friend",
+        )
+        history = await self._chat_session_repository.list_recent_messages(session_id=sid, limit=20)
+        await self._chat_session_repository.append_message(session_id=sid, role="user", content=question)
+
+        selected_model = (model or settings.chat_v5_model or "qwen3.7-plus").strip()
+        if not settings.is_dashscope_model(selected_model):
+            raise GeneratorConfigError(f"V5 当前仅支持 DashScope 千问模型，收到 {selected_model}。")
+        api_key, _ = settings.resolve_model_endpoint(selected_model)
+        generator = FriendV5Generator(
+            api_key=api_key,
+            model=selected_model,
+            generation_url=settings.chat_v5_generation_url,
+            search_strategy=settings.chat_v5_search_strategy,
+            max_tokens=settings.chat_v5_max_tokens,
+            require_web_sources=settings.chat_v5_require_web_sources,
+        )
+        scene_query_rewriter = FriendV5SceneQueryRewriter(
+            api_key=api_key,
+            model=selected_model,
+            generation_url=settings.chat_v5_generation_url,
+        )
+        scope = self._compute_yuque_scope(owner, token_profile)
+        mcp_client = self._build_mcp_client(scope)
+        yuque_loader = self._build_yuque_loader(scope, token_profile)
+        yuque_search: Any = mcp_client if mcp_client.enabled else yuque_loader
+        yuque_deep_reader = (
+            FriendV5YuqueDeepReader(
+                mcp_client=mcp_client,
+                yuque_loader=yuque_loader,
+                scope=scope,
+                max_images=settings.chat_v5_max_images,
+                max_videos=settings.chat_v5_max_videos,
+            )
+            if settings.chat_v5_yuque_deep_read_enabled
+            else None
+        )
+        orch = FriendDialogOrchestratorV5(
+            generator=generator,
+            profile_repo=self._chat_session_profile_repository,
+            yuque_search=yuque_search,
+            scene_query_rewriter=scene_query_rewriter,
+            yuque_deep_reader=yuque_deep_reader,
+            toc_nodes=self._guide_toc_nodes,
+            yuque_url_limit=settings.chat_v5_yuque_url_limit,
+            require_web_sources=settings.chat_v5_require_web_sources,
+        )
+
+        try:
+            async for event in orch.answer_stream(
+                question=question,
+                session_id=sid,
+                scene=scene,
+                trigger_type=trigger_type,
+                history=history,
+            ):
+                if event.get("event") == "done":
+                    data = event.get("data") or {}
+                    if isinstance(data, dict):
+                        answer = str(data.get("answer") or "")
+                        if answer.strip():
+                            await self._chat_session_repository.append_message(
+                                session_id=sid,
+                                role="assistant",
+                                content=answer,
+                            )
+                    yield event
+                    continue
+                yield event
+        finally:
+            if not mcp_client.enabled:
+                with contextlib.suppress(Exception):
+                    await yuque_loader.close()
 
     async def issue_v4_trial_credentials(self, *, session_id: str) -> TrialCredentialsResponse:
         sid = (session_id or "").strip()
@@ -1049,7 +1159,12 @@ class QAService:
         sid = (session_id or "").strip()
         if not sid:
             return
-        await self._chat_session_repository.reset_session(session_id=sid, chat_mode=chat_mode, advisor_role="sales")
+        advisor_role = "friend" if chat_mode == "friend_v5" else "sales"
+        await self._chat_session_repository.reset_session(
+            session_id=sid,
+            chat_mode=chat_mode,
+            advisor_role=advisor_role,
+        )
 
     def guide_titles_state(self) -> dict[str, Any]:
         refresh_s = max(0, int(settings.chat_v15_guide_refresh_s))
@@ -1074,6 +1189,9 @@ class QAService:
             "refresh_interval_s": refresh_s,
             "refreshed_seconds_ago": age_s,
         }
+
+    async def refresh_guide_titles(self, *, force: bool = False) -> None:
+        await self._refresh_guide_doc_titles_if_stale(force=force)
 
     async def _history_block_for_session(self, session_id: str) -> str:
         """取最近 10 轮（=20 条消息）作为生成上下文；不用于向量检索。"""
@@ -1161,8 +1279,6 @@ class QAService:
                     }
                 )
                 titles.append(title)
-                if len(titles) >= 80:
-                    break
         except Exception:
             titles = []
             toc_nodes_data = []
@@ -1199,7 +1315,7 @@ class QAService:
             seen.add(t)
             dedup.append(t)
         self._guide_doc_titles = dedup[:80]
-        self._guide_toc_nodes = toc_nodes_data[:200]
+        self._guide_toc_nodes = toc_nodes_data
         self._guide_titles_refreshed_at = time.monotonic()
 
     def _build_guide_toc_tree(self) -> List[Dict[str, Any]]:
@@ -1321,7 +1437,9 @@ class QAService:
             raise GeneratorConfigError(f"缺少 LLM_API_KEY，无法使用模型 {normalized}。")
 
         if settings.is_deepseek_model(normalized):
+            logger.info("构建生成器 model=%s endpoint=%s", normalized, base_url or "default")
             return DeepSeekGenerator(model=normalized, api_key=api_key, base_url=base_url)
+        logger.info("构建生成器 model=%s endpoint=%s", normalized, base_url or "default")
         return OpenAIGenerator(model=normalized, api_key=api_key, base_url=base_url)
 
     def mcp_capabilities(self) -> dict[str, Any]:
@@ -1374,6 +1492,13 @@ class QAService:
             else "",
             "yuque_scope_secondary_explicit": bool((settings.yuque_scope_secondary or "").strip()),
             "tools": tools,
+        }
+
+    def chat_v5_capabilities(self) -> dict[str, Any]:
+        return {
+            "enabled": bool(settings.chat_v5_enabled),
+            "model": settings.chat_v5_model,
+            "require_web_sources": bool(settings.chat_v5_require_web_sources),
         }
 
     async def resolve_yuque_token_logins(self) -> tuple[str, str]:

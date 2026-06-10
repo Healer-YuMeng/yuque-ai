@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, Dict, List, Sequence, Tuple
+from urllib.parse import parse_qs, urlparse
 
 from app.core.config import settings
 from app.core.logger import get_logger
-from app.data.yuque_images import extract_image_refs_from_body, is_allowed_yuque_image_url
+from app.data.yuque_images import decode_image_proxy_token, extract_image_refs_from_body, is_allowed_yuque_image_url
 from app.rag.doc_image_enrichment import _download_image, _vision_caption, _vision_video_caption
 from app.service.media_answer_orchestrator import MediaAnswerOrchestrator, _DocContext
 from app.schemas.chat import ChatMediaBundle, MediaItem
@@ -15,6 +16,45 @@ logger = get_logger(__name__)
 _FIGURE_PREFIX = "【文档多媒体识读摘要｜供你理解配图和视频含义，勿在回答中粘贴媒体 URL】"
 _VISION_IMAGE_SUMMARY_CACHE: Dict[tuple[str, str], str] = {}
 _VISION_VIDEO_SUMMARY_CACHE: Dict[tuple[str, str], str] = {}
+_MEDIA_INTENT_GROUPS: Sequence[tuple[tuple[str, ...], tuple[str, ...]]] = (
+    (
+        ("老师", "教师", "培训", "师资", "备课", "教学支持"),
+        ("老师", "教师", "培训", "师资", "备课", "教案", "专业发展", "教学支持", "课堂支持"),
+    ),
+    (
+        ("软件", "平台", "资源", "课件", "课程内容", "技术支持", "配套"),
+        ("软件", "平台", "资源", "课件", "课程内容", "技术支持", "配套", "学习系统", "课程资源"),
+    ),
+    (
+        ("硬件", "积木", "机器人", "传感器", "电机", "搭建", "套装"),
+        ("硬件", "积木", "机器人", "传感器", "电机", "搭建", "套装", "核心套装"),
+    ),
+    (
+        ("年级", "年龄", "阶段", "分龄", "进阶", "体系", "适合"),
+        ("年级", "年龄", "阶段", "分龄", "进阶", "体系", "1-9", "5+", "8+", "11+"),
+    ),
+    (
+        ("效果", "成果", "兴趣", "参与", "自信", "课堂表现"),
+        ("效果", "成果", "兴趣", "参与", "自信", "深度学习", "课堂表现", "快乐学习"),
+    ),
+)
+
+
+def _resolve_yuque_image_for_vision(src: str) -> str:
+    value = (src or "").strip()
+    if not value:
+        return ""
+    if is_allowed_yuque_image_url(value):
+        return value
+    if not value.startswith("/yuque/asset"):
+        return ""
+    try:
+        query = parse_qs(urlparse(value).query)
+        token = (query.get("t") or [""])[0]
+        raw = decode_image_proxy_token(token)
+    except Exception:
+        return ""
+    return raw if is_allowed_yuque_image_url(raw) else ""
 
 
 def _normalize_question_keywords(question: str) -> List[str]:
@@ -22,12 +62,30 @@ def _normalize_question_keywords(question: str) -> List[str]:
     return [kw.lower() for kw in kws if (kw or "").strip()]
 
 
+def _contains_any(text: str, terms: Sequence[str]) -> bool:
+    lowered = (text or "").lower()
+    return any(term.lower() in lowered for term in terms if term)
+
+
+def _intent_group_score(question: str, haystack: str) -> int:
+    q = (question or "").lower()
+    score = 0
+    for question_terms, media_terms in _MEDIA_INTENT_GROUPS:
+        if not _contains_any(q, question_terms) or not _contains_any(haystack, media_terms):
+            continue
+        media_hits = sum(1 for term in media_terms if term.lower() in haystack)
+        question_hits = sum(1 for term in question_terms if term.lower() in q)
+        score += 14 + min(8, media_hits * 2) + min(4, question_hits)
+    return score
+
+
 def _media_match_score(*, question: str, item: MediaItem, summary: str, media_kind: str, original_rank: int) -> int:
     haystack = f"{item.title} {item.doc_title} {summary}".lower()
-    score = max(0, 12 - original_rank)
+    score = max(0, 4 - min(original_rank, 4))
+    score += _intent_group_score(question, haystack)
     for kw in _normalize_question_keywords(question):
         if kw and kw in haystack:
-            score += 5 if len(kw) >= 2 else 2
+            score += 8 if len(kw) >= 2 else 3
     q = (question or "").lower()
     if media_kind == "video" and any(k in q for k in ("视频", "演示", "录屏", "讲解", "demo")):
         score += 6
@@ -37,15 +95,14 @@ def _media_match_score(*, question: str, item: MediaItem, summary: str, media_ki
 
 
 async def _get_cached_image_summary(*, src: str, token: str, question: str) -> str:
-    cache_key = ((src or "").strip(), settings.vision_model)
-    if not cache_key[0]:
+    raw_src = _resolve_yuque_image_for_vision(src)
+    cache_key = (raw_src, settings.vision_model)
+    if not raw_src:
         return ""
     cached = _VISION_IMAGE_SUMMARY_CACHE.get(cache_key)
     if cached is not None:
         return cached
-    if not is_allowed_yuque_image_url(src):
-        return ""
-    data, mime = await _download_image(src, token)
+    data, mime = await _download_image(raw_src, token)
     if not data:
         return ""
     summary = (await _vision_caption(data, mime, user_hint=question)).strip()
@@ -172,7 +229,7 @@ async def enrich_media_bundle_with_vision(
     image_summaries = await asyncio.gather(
         *[
             _get_cached_image_summary(src=(item.url or "").strip(), token=token, question=question)
-            if (item.url or "").strip() and token and is_allowed_yuque_image_url((item.url or "").strip())
+            if (item.url or "").strip() and token and _resolve_yuque_image_for_vision((item.url or "").strip())
             else asyncio.sleep(0, result=(item.summary or "").strip())
             for item in media.images
         ],
@@ -247,27 +304,37 @@ async def enrich_media_bundle_with_vision(
     enriched_images.sort(key=lambda x: (x[0], -x[1]), reverse=True)
     enriched_videos.sort(key=lambda x: (x[0], -x[1]), reverse=True)
 
+    all_summary_images = [item for _, _, item in enriched_images if (item.summary or "").strip()]
+    all_summary_videos = [item for _, _, item in enriched_videos if (item.summary or "").strip()]
     final_images = [item for _, _, item in enriched_images[: max(0, int(max_images))]]
     final_videos = [item for _, _, item in enriched_videos[: max(0, int(max_videos))]]
 
     lines: List[str] = []
-    if final_images or final_videos:
+    image_summary_count = len(all_summary_images)
+    video_summary_count = len(all_summary_videos)
+    if image_summary_count or video_summary_count:
         lines = [_FIGURE_PREFIX, ""]
-        for idx, item in enumerate(final_images, start=1):
-            lines.append(
-                f"- 参考图{idx}｜《{item.doc_title or item.title or '图片'}》：{(item.summary or '').strip() or '（未能识读到稳定文字或画面重点）'}"
-            )
-        for idx, item in enumerate(final_videos, start=1):
-            lines.append(
-                f"- 参考视频{idx}｜《{item.doc_title or item.title or '视频'}》：{(item.summary or '').strip() or '（未能识读到稳定视频重点）'}"
-            )
+        for idx, item in enumerate(all_summary_images, start=1):
+            summary = (item.summary or "").strip()
+            if summary:
+                lines.append(f"- 参考图{idx}｜《{item.doc_title or item.title or '图片'}》：{summary}")
+        for idx, item in enumerate(all_summary_videos, start=1):
+            summary = (item.summary or "").strip()
+            if summary:
+                lines.append(f"- 参考视频{idx}｜《{item.doc_title or item.title or '视频'}》：{summary}")
 
     return (
         ChatMediaBundle(images=final_images, videos=final_videos),
         lines,
         {
-            "vision_images_used": len(final_images),
-            "vision_videos_used": len(final_videos),
+            "vision_images_used": image_summary_count,
+            "vision_videos_used": video_summary_count,
+            "vision_image_summaries_used": image_summary_count,
+            "vision_video_summaries_used": video_summary_count,
+            "vision_candidate_images": len(enriched_images),
+            "vision_candidate_videos": len(enriched_videos),
+            "vision_display_images": len(final_images),
+            "vision_display_videos": len(final_videos),
             "vision_model": settings.vision_model,
         },
     )

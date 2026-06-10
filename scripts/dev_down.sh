@@ -15,6 +15,5 @@ stop_port() {
 }
 
 stop_port 8000
-stop_port 5173
 
 echo "==> 完成"
