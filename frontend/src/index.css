@@ -1618,12 +1618,8 @@ body {
   padding: 0;
 }
 
-.bubble img {
-  max-width: 100%;
-  height: auto;
-  border-radius: 8px;
+.bubble .msg-image-card {
   margin: 8px 0;
-  display: block;
 }
 
 .msg.user .bubble {
@@ -1656,7 +1652,8 @@ body {
 
 .msg-inline-media {
   display: grid;
-  gap: 10px;
+  gap: 12px;
+  max-width: min(520px, 100%);
 }
 
 .msg-inline-media--tail {
@@ -1702,30 +1699,49 @@ body {
 
 .msg-image-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 8px;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  max-width: min(520px, 100%);
 }
 
 .msg-image-card {
-  display: grid;
-  gap: 4px;
+  display: block;
   text-decoration: none;
   color: #334155;
   font-size: 12px;
   padding: 8px;
   border: 1px solid #dbeafe;
-  border-radius: 10px;
+  border-radius: 12px;
   background: #f8fafc;
+  max-width: min(520px, 100%);
+  box-sizing: border-box;
 }
 
-.msg-image-card img {
+.msg-image-frame {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 100%;
-  max-height: 220px;
-  height: auto;
-  object-fit: cover;
+  height: var(--chat-image-frame-height, 280px);
   border-radius: 8px;
-  border: 1px solid #dbeafe;
+  border: 1px solid #e2e8f0;
   background: #fff;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.msg-image-card-media,
+.msg-image-card img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  object-position: center;
+  border: none;
+  border-radius: 0;
+  background: transparent;
 }
 
 .msg-media-summary {
@@ -1845,46 +1861,48 @@ body {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 10px;
+  gap: 8px;
 }
 
 .friend-v5-tag-chip {
   display: inline-flex;
   align-items: center;
-  gap: 12px;
+  justify-content: space-between;
+  gap: 16px;
+  width: fit-content;
   max-width: 100%;
-  border: 1px solid #e5e7eb;
-  background: #fff;
-  color: #374151;
-  border-radius: 12px;
-  padding: 10px 16px;
+  border: none;
+  background: #f2f3f5;
+  color: #1f2937;
+  border-radius: 10px;
+  padding: 11px 14px;
   font-size: 14px;
-  line-height: 1.4;
+  line-height: 1.45;
   text-align: left;
   cursor: pointer;
   font-family: inherit;
+  box-shadow: none;
   transition:
-    border-color 0.15s ease,
     background 0.15s ease,
     color 0.15s ease;
 }
 
 .friend-v5-tag-chip::after {
   content: "→";
-  margin-left: auto;
-  color: #9ca3af;
+  flex: 0 0 auto;
+  margin-left: 8px;
+  color: #6b7280;
   font-size: 14px;
   line-height: 1;
 }
 
 .friend-v5-tag-chip:hover:not(:disabled) {
-  border-color: #d1d5db;
-  background: #f9fafb;
+  background: #e8eaed;
   color: #111827;
 }
 
 .friend-v5-tag-chip:hover:not(:disabled)::after {
-  color: #6b7280;
+  color: #4b5563;
 }
 
 .friend-v5-tag-chip:disabled {
@@ -4431,30 +4449,36 @@ button:disabled {
 }
 
 /* ------ 访客端预约咨询页专用样式（仅 /visitor） ------ */
+
 .app-shell--visitor .app-body {
-  grid-template-columns: minmax(400px, 500px) minmax(760px, 1120px);
-  justify-content: center;
-  align-items: start;
-  column-gap: 28px;
-  padding-top: 12px;
+  grid-template-columns: minmax(280px, min(32vw, 400px)) minmax(0, 1fr);
+  justify-content: stretch;
+  align-items: stretch;
+  width: 100%;
+  max-width: none;
+  column-gap: clamp(16px, 2vw, 28px);
+  padding: 12px clamp(16px, 2.5vw, 32px) 16px;
   box-sizing: border-box;
 }
 
 .app-shell--visitor .visitor-scene-column {
-  justify-self: start;
-  align-self: start;
+  justify-self: stretch;
+  align-self: stretch;
   display: flex;
   flex-direction: column;
   width: 100%;
+  min-width: 0;
   margin: 8px 0 0;
   gap: 26px;
+  min-height: 0;
 }
 
 .app-shell--visitor .focus-scene-sidebar {
   justify-self: stretch;
   align-self: stretch;
   height: auto;
-  min-height: 560px;
+  min-height: 0;
+  max-height: calc(100vh - 132px);
   width: 100%;
   margin: 2px 0 0;
   padding: 36px 30px 30px;
@@ -4754,12 +4778,36 @@ button:disabled {
 
 .app-shell--visitor .app-main.chat-shell {
   width: 100%;
-  max-width: 1120px;
-  justify-self: start;
+  max-width: none;
+  justify-self: stretch;
   margin-top: 0;
+  padding-left: 0;
+  padding-right: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
+}
+
+.app-shell--visitor .chat-main,
+.app-shell--visitor .chat-subbar,
+.app-shell--visitor .chat-consulting-direction {
+  width: 100%;
+  max-width: none;
+  margin-left: 0;
+  margin-right: 0;
+}
+
+.app-shell--visitor .chat-content-inner,
+.app-shell--visitor .chat-body-inner .chat-list,
+.app-shell--visitor .chat-body-inner .welcome-hero {
+  max-width: none;
+  margin-left: 0;
+  margin-right: 0;
+}
+
+.app-shell--visitor .bubble {
+  max-width: min(920px, 96%);
 }
 
 .chat-main--visitor-reveal {
@@ -4932,6 +4980,171 @@ button:disabled {
     opacity: 1;
     transform: translateY(0);
   }
+}
+
+@media (max-width: 1100px) {
+  .app-shell--visitor .app-body {
+    grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+    column-gap: 16px;
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+}
+
+@media (max-width: 860px) {
+  .app-shell--visitor .app-body {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    row-gap: 16px;
+    padding-top: 8px;
+  }
+
+  .app-shell--visitor .visitor-scene-column {
+    margin-top: 0;
+    gap: 12px;
+  }
+
+  .app-shell--visitor .focus-scene-sidebar {
+    max-height: none;
+    min-height: auto;
+    padding: 24px 20px 20px;
+  }
+
+  .app-shell--visitor .focus-scene-btn {
+    min-height: 68px;
+    padding: 12px 36px 12px 20px;
+  }
+
+  .app-shell--visitor .app-main.chat-shell {
+    min-height: min(72vh, calc(100vh - 280px));
+  }
+}
+
+/* ------ 访客端全局字号上调（/visitor） ------ */
+.app-shell--visitor {
+  font-size: 20px;
+  --chat-pane-width: 100%;
+}
+
+.app-shell--visitor .app-top-brand-text {
+  font-size: 21px;
+}
+
+.app-shell--visitor .focus-scene-title {
+  font-size: 26px;
+}
+
+.app-shell--visitor .focus-scene-btn {
+  font-size: 22px;
+}
+
+.app-shell--visitor .focus-scene-consult-btn {
+  font-size: 21px;
+}
+
+.app-shell--visitor .visitor-top-utility-btn,
+.app-shell--visitor .chat-consulting-direction-label,
+.app-shell--visitor .chat-consulting-direction-tag {
+  font-size: 19px;
+}
+
+.app-shell--visitor .bubble,
+.app-shell--visitor .bubble-stream-text {
+  font-size: 19px;
+  line-height: 1.7;
+}
+
+.app-shell--visitor .bubble h2 {
+  font-size: 1.22em;
+}
+
+.app-shell--visitor .bubble h3 {
+  font-size: 1.1em;
+}
+
+.app-shell--visitor .msg.assistant .stream-stage--pending {
+  font-size: 19px;
+}
+
+.app-shell--visitor .friend-v5-tag-chip {
+  font-size: 19px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  gap: 18px;
+}
+
+.app-shell--visitor .friend-v5-tag-chip::after {
+  font-size: 19px;
+  margin-left: 10px;
+}
+
+.app-shell--visitor .friend-v5-sources-summary,
+.app-shell--visitor .friend-v5-sources-keywords,
+.app-shell--visitor .friend-v5-sources-arrow {
+  font-size: 18px;
+}
+
+.app-shell--visitor .friend-v5-source-item {
+  font-size: 19px;
+}
+
+.app-shell--visitor .friend-v5-source-snippet {
+  font-size: 17px;
+}
+
+.app-shell--visitor .msg-sources {
+  font-size: 18px;
+}
+
+.app-shell--visitor .msg-sources-url-text,
+.app-shell--visitor .msg-media-title,
+.app-shell--visitor .msg-video-link,
+.app-shell--visitor .msg-image-card,
+.app-shell--visitor .msg-media-summary {
+  font-size: 17px;
+}
+
+.app-shell--visitor .composer-simple-textarea,
+.app-shell--visitor .composer-simple-textarea::placeholder {
+  font-size: 19px;
+}
+
+.app-shell--visitor .composer-simple-send {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.app-shell--visitor .selected-docs-label,
+.app-shell--visitor .doc-chip {
+  font-size: 17px;
+}
+
+.app-shell--visitor .visitor-dialog-title {
+  font-size: 24px;
+}
+
+.app-shell--visitor .visitor-dialog-field input,
+.app-shell--visitor .visitor-dialog-field textarea,
+.app-shell--visitor .visitor-dialog-btn,
+.app-shell--visitor .visitor-dialog-error {
+  font-size: 19px;
+}
+
+.app-shell--visitor .visitor-workspace-title {
+  font-size: 21px;
+}
+
+.app-shell--visitor .visitor-workspace-sub,
+.app-shell--visitor .visitor-workspace-item-title,
+.app-shell--visitor .visitor-workspace-preview,
+.app-shell--visitor .visitor-workspace-primary,
+.app-shell--visitor .visitor-workspace-count {
+  font-size: 18px;
+}
+
+.app-shell--visitor .visitor-workspace-item-time,
+.app-shell--visitor .visitor-workspace-badge {
+  font-size: 16px;
 }
 
 .consult-top-ghost-btn {

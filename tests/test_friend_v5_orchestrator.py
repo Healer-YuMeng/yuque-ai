@@ -12,7 +12,10 @@ from app.schemas.chat_v5 import FriendV5SourceItem
 from app.core.config import settings
 from app.db.repositories import ChatMessageRow
 from app.service.qa_service import QAService
-from app.service.friend_dialog_orchestrator_v5 import FriendDialogOrchestratorV5
+from app.service.friend_dialog_orchestrator_v5 import (
+    FriendDialogOrchestratorV5,
+    _CASE_KB_FALLBACK_ANSWER,
+)
 from app.service.friend_v5_tags import (
     case_tag_for_scene,
     explore_product_tag_for_title,
@@ -110,9 +113,10 @@ class _FakeYuqueSearch:
 
 
 class _FakeDeepReader:
-    def __init__(self) -> None:
+    def __init__(self, *, used: bool = True) -> None:
         self.calls: list[str] = []
         self.node_calls: list[dict[str, Any]] = []
+        self._used = used
 
     async def read(self, *, question: str) -> FriendV5YuqueDeepReadResult:
         self.calls.append(question)
@@ -123,6 +127,8 @@ class _FakeDeepReader:
         return self._result()
 
     def _result(self) -> FriendV5YuqueDeepReadResult:
+        if not self._used:
+            return FriendV5YuqueDeepReadResult(debug={"mode": "yuque_get_doc_by_toc", "empty_body": True})
         return FriendV5YuqueDeepReadResult(
             used=True,
             prompt_block="【语雀文档深读】\n标题：乐高人工智能课程介绍\n正文摘录：课程目标、课堂流程、作品展示。",
@@ -610,7 +616,7 @@ async def test_case_tag_uses_product_from_tag_text_not_sidebar_scene() -> None:
 
 
 @pytest.mark.asyncio
-async def test_case_tag_without_toc_node_enables_web_search_fallback() -> None:
+async def test_case_tag_without_toc_node_returns_fixed_fallback() -> None:
     generator = _FakeGenerator()
     orch = FriendDialogOrchestratorV5(
         generator=generator,
@@ -630,10 +636,42 @@ async def test_case_tag_without_toc_node_enables_web_search_fallback() -> None:
     )
 
     done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["answer"] == _CASE_KB_FALLBACK_ANSWER
+    assert done["fallback_used"] is True
     assert done["debug"]["case_toc_miss"] is True
     assert done["debug"]["doc_deep_read_used"] is False
-    assert done["debug"]["web_search_fallback_enabled"] is True
-    assert generator.enable_search is True
+    assert done["debug"]["case_kb_fallback"] is True
+    assert done["debug"]["web_search_fallback_enabled"] is False
+    assert not hasattr(generator, "enable_search")
+
+
+@pytest.mark.asyncio
+async def test_case_tag_with_empty_yuque_body_returns_fixed_fallback() -> None:
+    generator = _FakeGenerator()
+    deep_reader = _FakeDeepReader(used=False)
+    orch = FriendDialogOrchestratorV5(
+        generator=generator,
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=deep_reader,
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=_FAKE_CASE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question=case_tag_for_scene("人工智能通识教育"),
+        session_id="sess_v5_case_empty_body",
+        scene="人工智能通识教育",
+        trigger_type="tag",
+        history=[],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert deep_reader.node_calls
+    assert done["answer"] == _CASE_KB_FALLBACK_ANSWER
+    assert done["debug"]["case_kb_fallback"] is True
+    assert done["debug"]["doc_deep_read"]["empty_body"] is True
+    assert done["debug"]["web_search_fallback_enabled"] is False
 
 
 @pytest.mark.asyncio
