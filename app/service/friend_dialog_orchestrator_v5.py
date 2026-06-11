@@ -44,6 +44,10 @@ _CASE_SECTION_TITLE = "案例与社区"
 _CASE_LIBRARY_TITLE = "优秀案例库"
 _PLATFORM_SECTION_TITLE = "平台介绍"
 _GUIDE_SOURCES_HINT = "使用指南中的详细操作链接已整理在下方参考资料，您可点击查阅。"
+_CASE_KB_FALLBACK_ANSWER = (
+    "目前在上海、江苏、成都多所K12学校均有落地实施的具体案例，"
+    "需了解更为具体的案例介绍，方便的话可以留下您的联系方式。"
+)
 
 
 @dataclass(frozen=True)
@@ -446,17 +450,67 @@ class FriendDialogOrchestratorV5:
         if skill_route is None and deep_read.used:
             skill_route = SKILL_CATALOG.get("smart-summary")
 
-        yield _stage("searching", "小为正在结合语雀资料整理回答...")
-        system_prompt = build_friend_v5_system_prompt()
-        case_answer_mode = (
-            (case_branch_used or scene_case_continuation or tag_route.kind == "case")
-            and deep_read.used
-        )
+        case_intent = case_branch_used or scene_case_continuation or tag_route.kind == "case"
         effective_scene = scene
         if tag_route.target_title:
             mapped_scene = scene_for_toc_title(tag_route.target_title)
             if mapped_scene:
                 effective_scene = mapped_scene
+
+        if case_intent and not deep_read.used:
+            answer = _case_kb_fallback_answer()
+            tags_result = _apply_recommendation_tag_rhythm(
+                content_tags=[],
+                question=question,
+                scene=effective_scene,
+                trigger_type=trigger_type,
+                history=history,
+                route_kind="case",
+                focus_node=catalog_focus,
+                toc_nodes=self._toc_nodes,
+            )
+            yield {"event": "token", "data": {"token": answer}}
+            payload = ChatV5DonePayload(
+                answer=answer,
+                tags=tags_result.tags,
+                sources=[],
+                search_keywords=_derive_search_keywords(question),
+                media=deep_read.media,
+                profile_fields=_profile_fields(profile),
+                fallback_used=True,
+                debug={
+                    "pipeline": "friend_v5",
+                    "scene": scene,
+                    "trigger_type": trigger_type,
+                    "scene_query_rewrite": scene_query_rewrite,
+                    "tag_route": _tag_route_debug(tag_route),
+                    "scene_case_continuation": scene_case_continuation,
+                    "scene_guide_continuation": scene_guide_continuation,
+                    "case_product_switch": case_product_switch,
+                    "guide_product_switch": guide_product_switch,
+                    "web_search_fallback_enabled": False,
+                    "skill_route": None,
+                    "mcp_route": mcp_route,
+                    "doc_deep_read_used": False,
+                    "doc_deep_read": deep_read.debug,
+                    "case_toc_miss": tag_route.kind == "case" and not deep_read.used,
+                    "case_branch_used": case_branch_used,
+                    "case_kb_fallback": True,
+                    "conversion_state": tags_result.conversion_state,
+                    "search_keyword_count": len(_derive_search_keywords(question)),
+                    "web_source_count": 0,
+                    "yuque_source_count": 0,
+                    "catalog_tag_source": "fixed_v5_navigation",
+                    "catalog_tag_node_count": len(self._toc_nodes),
+                    "catalog_focus_node": _catalog_focus_debug(catalog_focus),
+                },
+            )
+            yield {"event": "done", "data": payload.model_dump()}
+            return
+
+        yield _stage("searching", "小为正在结合语雀资料整理回答...")
+        system_prompt = build_friend_v5_system_prompt()
+        case_answer_mode = case_intent and deep_read.used
         user_prompt = self._build_user_prompt(
             question=question,
             scene=effective_scene,
@@ -1404,6 +1458,10 @@ def _append_guide_inline_link(
     if link_line in text:
         return text
     return f"{text}\n\n{link_line}"
+
+
+def _case_kb_fallback_answer() -> str:
+    return _CASE_KB_FALLBACK_ANSWER
 
 
 def _price_handoff_answer(*, scene: str, profile: Any) -> str:

@@ -10,12 +10,19 @@ const MARKDOWN_COMPONENTS: Components = {
     return <a {...rest} target="_blank" rel="noreferrer noopener" />;
   },
   img(props) {
-    const { node, ...rest } = props;
+    const { node, className, ...rest } = props;
     void node;
     const src = typeof rest.src === "string" ? rest.src : undefined;
     return (
-      <a href={src} target="_blank" rel="noreferrer noopener">
-        <img {...rest} />
+      <a
+        href={src}
+        target="_blank"
+        rel="noreferrer noopener"
+        className={["msg-image-card", className].filter(Boolean).join(" ")}
+      >
+        <span className="msg-image-frame">
+          <img {...rest} className="msg-image-card-media" />
+        </span>
       </a>
     );
   },
@@ -43,9 +50,16 @@ const CHAT_V2_ENV_ENABLED = String(import.meta.env.VITE_CHAT_V2_ENABLED ?? "fals
 const CHAT_V3_ENV_ENABLED = String(import.meta.env.VITE_CHAT_V3_ENABLED ?? "false").toLowerCase() === "true";
 const CHAT_V4_ENV_ENABLED = String(import.meta.env.VITE_CHAT_V4_ENABLED ?? "false").toLowerCase() === "true";
 const CHAT_V5_ENV_ENABLED = String(import.meta.env.VITE_CHAT_V5_ENABLED ?? "false").toLowerCase() === "true";
-/** 是否为访客专用入口：/visitor 开头的路径 */
+/** 是否为访客专用入口：/visitor 开头的路径（布局等静态判断） */
 const IS_VISITOR_ROUTE =
   typeof window !== "undefined" && window.location && window.location.pathname.startsWith("/visitor");
+/** 访客端流式等待时统一展示的提示（替代各阶段文案、等待秒数、安抚卡片） */
+const VISITOR_STREAM_STAGE_TEXT = "小为正在输入中......";
+
+function isVisitorRoute(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.location.pathname.startsWith("/visitor");
+}
 const FOCUS_SCENE_ITEMS = ["人工智能通识教育", "智能招生", "跨学科项目化学习", "学校AI场景定制"] as const;
 type FocusScene = (typeof FOCUS_SCENE_ITEMS)[number];
 
@@ -576,7 +590,9 @@ function renderInlineMediaCard(item: ChatMediaItem, kind: "image" | "video", key
   }
   return (
     <a key={key} className="msg-image-card" href={item.url} target="_blank" rel="noreferrer" aria-label={label || "查看相关图片"}>
-      <img src={item.url} alt={label} loading="lazy" />
+      <span className="msg-image-frame">
+        <img className="msg-image-card-media" src={item.url} alt={label} loading="lazy" />
+      </span>
     </a>
   );
 }
@@ -1890,6 +1906,7 @@ function App() {
     userStreamStopRef.current = false;
     setStreamingAssistantId(assistantId);
     setIsStreaming(true);
+    const visitorStreamUi = isVisitorRoute();
     const nextTurnMessages: ChatItem[] = [
       { id: userId, role: "user", text, hidden: options?.hideUserMessage },
       {
@@ -1897,7 +1914,11 @@ function App() {
         role: "assistant",
         text: "",
         isFriendV5: isFriendV5Request,
-        streamStage: isFriendV5Request ? "小为正在看相关资料..." : "正在搜索知识库资料…",
+        streamStage: visitorStreamUi
+          ? VISITOR_STREAM_STAGE_TEXT
+          : isFriendV5Request
+            ? "小为正在看相关资料..."
+            : "正在搜索知识库资料…",
         streamElapsedSec: 0,
       },
     ];
@@ -2115,36 +2136,38 @@ function App() {
       }
       if (!response.ok || !response.body) throw new Error("stream_unavailable");
 
-      elapsedTimer = window.setInterval(() => {
-        elapsedSec += 1;
-        setSessions((prev) =>
-          prev.map((session) =>
-            session.id === sessionId
-              ? {
-                  ...session,
-                  messages: session.messages.map((item) =>
-                    item.id === assistantId
-                      ? {
-                          ...item,
-                          streamElapsedSec: elapsedSec,
-                          pendingComfortMessage:
-                            item.text.trim().length > 0
-                              ? undefined
-                              : elapsedSec >= STREAM_COMFORT_FOLLOWUP_SEC
-                                ? resolveComfortMessage(comfortScene, "followup", isFriendV5Request)
-                                : elapsedSec >= STREAM_COMFORT_INITIAL_SEC
-                                  ? item.pendingComfortMessage?.phase === "followup"
-                                    ? item.pendingComfortMessage
-                                    : resolveComfortMessage(comfortScene, "initial", isFriendV5Request)
-                                  : item.pendingComfortMessage,
-                        }
-                      : item
-                  ),
-                }
-              : session
-          )
-        );
-      }, 1000);
+      if (!visitorStreamUi) {
+        elapsedTimer = window.setInterval(() => {
+          elapsedSec += 1;
+          setSessions((prev) =>
+            prev.map((session) =>
+              session.id === sessionId
+                ? {
+                    ...session,
+                    messages: session.messages.map((item) =>
+                      item.id === assistantId
+                        ? {
+                            ...item,
+                            streamElapsedSec: elapsedSec,
+                            pendingComfortMessage:
+                              item.text.trim().length > 0
+                                ? undefined
+                                : elapsedSec >= STREAM_COMFORT_FOLLOWUP_SEC
+                                  ? resolveComfortMessage(comfortScene, "followup", isFriendV5Request)
+                                  : elapsedSec >= STREAM_COMFORT_INITIAL_SEC
+                                    ? item.pendingComfortMessage?.phase === "followup"
+                                      ? item.pendingComfortMessage
+                                      : resolveComfortMessage(comfortScene, "initial", isFriendV5Request)
+                                    : item.pendingComfortMessage,
+                          }
+                        : item
+                    ),
+                  }
+                : session
+            )
+          );
+        }, 1000);
+      }
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder("utf-8");
@@ -2172,7 +2195,9 @@ function App() {
             const payload = JSON.parse(parsed.data || "{}") as Record<string, unknown>;
             const detail = typeof payload.detail === "string" ? payload.detail : "";
             const stage = typeof payload.stage === "string" ? payload.stage : "";
-            const line = formatStreamStageLine(stage, detail);
+            const line = visitorStreamUi
+              ? VISITOR_STREAM_STAGE_TEXT
+              : formatStreamStageLine(stage, detail);
             setSessions((prev) =>
               prev.map((session) =>
                 session.id === sessionId
@@ -3174,20 +3199,31 @@ function App() {
                       <div className={`msg ${item.role}`} key={item.id}>
                         <div style={{ width: "100%" }}>
                           {item.role === "assistant" && item.isFriendV5 ? renderFriendV5Sources(item.sources, item.searchKeywords) : null}
-                          {item.role === "assistant" && (item.streamStage || (item.streamElapsedSec ?? 0) > 0) ? (
+                          {item.role === "assistant" &&
+                          (isVisitorRoute()
+                            ? !hasBubbleContent && isStreaming && item.id === streamingAssistantId
+                            : Boolean(item.streamStage) || (item.streamElapsedSec ?? 0) > 0) ? (
                             <div className="stream-stage-block">
-                              {item.streamStage ? (
-                                <div className="stream-stage stream-stage--pending">{item.streamStage}</div>
-                              ) : null}
-                              {(item.streamElapsedSec ?? 0) > 0 ? (
-                                <div className="stream-elapsed">已等待 {item.streamElapsedSec} 秒</div>
-                              ) : null}
-                              {item.pendingComfortMessage ? (
-                                <div className="stream-comfort-card">
-                                  <div className="stream-comfort-label">{item.isFriendV5 ? "小为再看一眼资料" : "小为顾问正在核对资料"}</div>
-                                  <div className="stream-comfort-text">{item.pendingComfortMessage.text}</div>
-                                </div>
-                              ) : null}
+                              {isVisitorRoute() ? (
+                                <div className="stream-stage stream-stage--pending">{VISITOR_STREAM_STAGE_TEXT}</div>
+                              ) : (
+                                <>
+                                  {item.streamStage ? (
+                                    <div className="stream-stage stream-stage--pending">{item.streamStage}</div>
+                                  ) : null}
+                                  {(item.streamElapsedSec ?? 0) > 0 ? (
+                                    <div className="stream-elapsed">已等待 {item.streamElapsedSec} 秒</div>
+                                  ) : null}
+                                  {item.pendingComfortMessage ? (
+                                    <div className="stream-comfort-card">
+                                      <div className="stream-comfort-label">
+                                        {item.isFriendV5 ? "小为再看一眼资料" : "小为顾问正在核对资料"}
+                                      </div>
+                                      <div className="stream-comfort-text">{item.pendingComfortMessage.text}</div>
+                                    </div>
+                                  ) : null}
+                                </>
+                              )}
                             </div>
                           ) : null}
                           {hasBubbleContent ? (
