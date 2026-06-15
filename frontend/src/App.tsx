@@ -576,6 +576,18 @@ function sanitizeFriendV5AnswerText(text: string): string {
     .join("\n");
   out = out.replace(/[ \t]+([，。、；：！？）])/g, "$1");
   out = out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n");
+  out = out.replace(/苹果\s*STAM(?!E)/gi, "苹果 STEAM");
+  out = out.replace(/(?<!E)IDAS\s*-?\s*PBL/gi, "IDEAS-PBL");
+  out = out.replace(/IDEAS\s+PBL/gi, "IDEAS-PBL");
+  return stripTrialAccountDisclosure(out.trim());
+}
+
+function stripTrialAccountDisclosure(text: string): string {
+  let out = text || "";
+  out = out.replace(/信息校验通过[，,]?\s*已为您分配测试账号。?/g, "提交成功，我们会尽快与您联系。");
+  out = out.replace(/【测试账号】[^\n]*/g, "");
+  out = out.replace(/^[ \t]*(?:账号|密码|说明)[：:][^\n]*$/gm, "");
+  out = out.replace(/\n{3,}/g, "\n\n");
   return out.trim();
 }
 
@@ -1049,6 +1061,7 @@ function App() {
   const [trialApplyName, setTrialApplyName] = useState("");
   const [trialApplyOrg, setTrialApplyOrg] = useState("");
   const [trialApplyContact, setTrialApplyContact] = useState("");
+  const [trialApplySuccess, setTrialApplySuccess] = useState(false);
   const [welcomeHeroTitle, setWelcomeHeroTitle] = useState("");
   const controllerRef = useRef<AbortController | null>(null);
   /** 用户点击「停止」触发的 abort，与超时/空闲 abort 区分 */
@@ -1092,22 +1105,6 @@ function App() {
     setCopiedMessageId(messageId);
     window.setTimeout(() => setCopiedMessageId((prev) => (prev === messageId ? null : prev)), 1200);
   };
-
-  const appendAssistantMessageToActiveSession = useCallback((text: string) => {
-    const sid = activeSessionRef.current;
-    if (!sid || !(text || "").trim()) return;
-    const messageId = `assistant-note-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-    setSessions((prev) =>
-      prev.map((session) =>
-        session.id === sid
-          ? {
-              ...touchSession(session),
-              messages: [...session.messages, { id: messageId, role: "assistant", text }],
-            }
-          : session
-      )
-    );
-  }, []);
 
   useEffect(() => {
     activeSessionRef.current = activeSessionId;
@@ -1625,6 +1622,7 @@ function App() {
     setTrialApplyOrg((prev) => prev || profile.org_name || "");
     setTrialApplyContact((prev) => prev || profile.contact || "");
     setTrialApplyError("");
+    setTrialApplySuccess(false);
     setTrialApplyDialogOpen(true);
   }, [activeFocusScene, activeSession]);
 
@@ -1632,8 +1630,10 @@ function App() {
     const sid = activeSessionRef.current;
     if (!sid) return;
     setTrialApplyError("");
+    setTrialApplySuccess(false);
     setTrialApplySubmitting(true);
     try {
+      const draft = extractTrialApplyDraft(activeSession, activeFocusScene || "");
       const resp = await fetch("/visitor/trial/apply", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1642,18 +1642,15 @@ function App() {
           name: trialApplyName.trim(),
           org_name: trialApplyOrg.trim(),
           contact: trialApplyContact.trim(),
+          interested_product: draft.interested_product || activeFocusScene || "",
         }),
       });
       const data = (await resp.json()) as TrialApplyResponse;
-      const text = data.ok
-        ? `信息校验通过，已为您分配测试账号。\n\n【测试账号】\n账号：${data.username || ""}\n密码：${data.password || ""}${data.label ? `\n说明：${data.label}` : ""}`
-        : data.message || "信息校验未通过，请补充完整后重试。";
       if (!resp.ok || !data.ok) {
         setTrialApplyError(data.message || "信息校验未通过，请检查后重试。");
         setLastPipelineDebug({ source: "visitor_trial_apply", error: data.message || "信息校验未通过" });
         return;
       }
-      appendAssistantMessageToActiveSession(text);
       setSessions((prev) =>
         prev.map((session) =>
           session.id === sid
@@ -1667,10 +1664,14 @@ function App() {
             : session
         )
       );
-      setTrialApplyDialogOpen(false);
+      setTrialApplySuccess(true);
       setTrialApplyName("");
       setTrialApplyOrg("");
       setTrialApplyContact("");
+      window.setTimeout(() => {
+        setTrialApplyDialogOpen(false);
+        setTrialApplySuccess(false);
+      }, 1600);
     } catch {
       const msg = "账号申请请求失败，请稍后重试。";
       setTrialApplyError(msg);
@@ -1679,7 +1680,8 @@ function App() {
       setTrialApplySubmitting(false);
     }
   }, [
-    appendAssistantMessageToActiveSession,
+    activeFocusScene,
+    activeSession,
     trialApplyContact,
     trialApplyName,
     trialApplyOrg,
@@ -3189,10 +3191,14 @@ function App() {
                           item.media &&
                           (item.media.videos.length > 0 || item.media.images.length > 0)
                       );
-                      const displayText =
-                        item.role === "assistant" && item.isFriendV5
-                          ? sanitizeFriendV5AnswerText(item.text)
-                          : item.text;
+                      let displayText = item.text || "";
+                      if (item.role === "assistant") {
+                        if (item.isFriendV5) {
+                          displayText = sanitizeFriendV5AnswerText(displayText);
+                        } else if (IS_VISITOR_ROUTE) {
+                          displayText = stripTrialAccountDisclosure(displayText);
+                        }
+                      }
                       const hasBubbleContent = displayText.trim().length > 0 || hasInlineMedia;
                       if (item.hidden) return null;
                       return (
@@ -3397,43 +3403,53 @@ function App() {
       {trialApplyDialogOpen ? (
         <div className="visitor-dialog-mask" role="dialog" aria-modal="true" aria-label="账号申请">
           <div className="visitor-dialog-card">
-            <div className="visitor-dialog-title">测试账号申请</div>
-            <label className="visitor-dialog-field">
-              <span>姓名</span>
-              <input value={trialApplyName} onChange={(e) => setTrialApplyName(e.target.value)} placeholder="请输入姓名" disabled={trialApplySubmitting} />
-            </label>
-            <label className="visitor-dialog-field">
-              <span>单位</span>
-              <input value={trialApplyOrg} onChange={(e) => setTrialApplyOrg(e.target.value)} placeholder="请输入单位" disabled={trialApplySubmitting} />
-            </label>
-            <label className="visitor-dialog-field">
-              <span>联系方式</span>
-              <input
-                value={trialApplyContact}
-                onChange={(e) => setTrialApplyContact(e.target.value)}
-                placeholder="手机号或微信号"
-                disabled={trialApplySubmitting}
-              />
-            </label>
-            {trialApplyError ? <p className="visitor-dialog-error">{trialApplyError}</p> : null}
-            <div className="visitor-dialog-actions">
-              <button type="button" className="visitor-dialog-btn visitor-dialog-btn--ghost" onClick={() => setTrialApplyDialogOpen(false)}>
-                取消
-              </button>
-              <button
-                type="button"
-                className="visitor-dialog-btn"
-                onClick={() => void submitTrialApply()}
-                disabled={
-                  trialApplySubmitting ||
-                  !trialApplyName.trim() ||
-                  !trialApplyOrg.trim() ||
-                  !trialApplyContact.trim()
-                }
-              >
-                {trialApplySubmitting ? "提交中…" : "提交申请"}
-              </button>
-            </div>
+            {trialApplySuccess ? (
+              <div className="visitor-dialog-success" role="status">
+                <div className="visitor-dialog-success-icon" aria-hidden="true">✓</div>
+                <div className="visitor-dialog-success-title">提交成功</div>
+                <p className="visitor-dialog-success-text">我们已收到您的申请，会尽快与您联系。</p>
+              </div>
+            ) : (
+              <>
+                <div className="visitor-dialog-title">测试账号申请</div>
+                <label className="visitor-dialog-field">
+                  <span>姓名</span>
+                  <input value={trialApplyName} onChange={(e) => setTrialApplyName(e.target.value)} placeholder="请输入姓名" disabled={trialApplySubmitting} />
+                </label>
+                <label className="visitor-dialog-field">
+                  <span>单位</span>
+                  <input value={trialApplyOrg} onChange={(e) => setTrialApplyOrg(e.target.value)} placeholder="请输入单位" disabled={trialApplySubmitting} />
+                </label>
+                <label className="visitor-dialog-field">
+                  <span>联系方式</span>
+                  <input
+                    value={trialApplyContact}
+                    onChange={(e) => setTrialApplyContact(e.target.value)}
+                    placeholder="手机号或微信号"
+                    disabled={trialApplySubmitting}
+                  />
+                </label>
+                {trialApplyError ? <p className="visitor-dialog-error">{trialApplyError}</p> : null}
+                <div className="visitor-dialog-actions">
+                  <button type="button" className="visitor-dialog-btn visitor-dialog-btn--ghost" onClick={() => setTrialApplyDialogOpen(false)} disabled={trialApplySubmitting}>
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    className="visitor-dialog-btn"
+                    onClick={() => void submitTrialApply()}
+                    disabled={
+                      trialApplySubmitting ||
+                      !trialApplyName.trim() ||
+                      !trialApplyOrg.trim() ||
+                      !trialApplyContact.trim()
+                    }
+                  >
+                    {trialApplySubmitting ? "提交中…" : "提交申请"}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       ) : null}

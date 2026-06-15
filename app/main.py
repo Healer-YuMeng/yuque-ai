@@ -7,12 +7,14 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 
+from app.api.admin_api import router as admin_router
 from app.api.chat_api import router as chat_router
 from app.api.chat_v5_api import router as chat_v5_router
 from app.core.config import settings
 from app.core.logger import setup_logging
 from app.data.yuque_loader import YuqueLoader
-from app.db.repositories import ChatSessionRepository, DocumentRepository, LeadCaptureRepository, QALogRepository
+from app.db.admin_customers import AdminCustomerRepository
+from app.db.repositories import AdminVideoAssetRepository, ChatSessionRepository, DocumentRepository, LeadCaptureRepository, QALogRepository
 from app.db.session import DatabaseSessionFactory
 from app.db.profile_repository import ChatSessionProfileRepository
 from app.service.qa_service import QAService
@@ -23,6 +25,8 @@ from app.storage.vector_store import VectorStore
 async def lifespan(application: FastAPI):
     setup_logging()
     session_factory = DatabaseSessionFactory(str(settings.sqlite_path))
+    admin_video_repository = AdminVideoAssetRepository(session_factory)
+    admin_customer_repository = AdminCustomerRepository(session_factory)
     qa_service = QAService(
         yuque_loader=YuqueLoader(
             token=settings.yuque_token,
@@ -36,9 +40,14 @@ async def lifespan(application: FastAPI):
         lead_capture_repository=LeadCaptureRepository(session_factory),
         chat_session_repository=ChatSessionRepository(session_factory),
         chat_session_profile_repository=ChatSessionProfileRepository(session_factory),
+        admin_video_asset_repository=admin_video_repository,
     )
     await qa_service.startup()
+    await admin_video_repository.init_db()
     application.state.qa_service = qa_service
+    application.state.admin_video_repository = admin_video_repository
+    application.state.admin_customer_repository = admin_customer_repository
+    application.state.admin_upload_dir = settings.admin_upload_dir
     yield
     await qa_service.shutdown()
 
@@ -53,6 +62,7 @@ app.add_middleware(
 )
 app.include_router(chat_router)
 app.include_router(chat_v5_router)
+app.include_router(admin_router)
 
 
 def current_ui_dir() -> Path:
@@ -76,6 +86,30 @@ async def serve_frontend_asset(asset_path: str) -> FileResponse:
         target,
         headers={"Cache-Control": "public, max-age=31536000, immutable"},
     )
+
+
+@app.get("/admin-media/videos/{scene_key}/{filename}")
+async def serve_admin_video(scene_key: str, filename: str) -> FileResponse:
+    videos_dir = (settings.admin_upload_dir / "videos").resolve()
+    target = (videos_dir / scene_key / filename).resolve()
+    if videos_dir not in target.parents or not target.is_file():
+        raise HTTPException(status_code=404, detail="video not found")
+    return FileResponse(
+        target,
+        media_type=_video_media_type(target.suffix),
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+def _video_media_type(suffix: str) -> str:
+    ext = (suffix or "").lower()
+    if ext == ".mp4":
+        return "video/mp4"
+    if ext == ".mov":
+        return "video/quicktime"
+    if ext == ".webm":
+        return "video/webm"
+    return "application/octet-stream"
 
 
 @app.get("/")

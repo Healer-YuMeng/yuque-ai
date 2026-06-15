@@ -23,3 +23,14 @@ def test_frontend_main_switches_admin_to_dedicated_app() -> None:
     assert "import AdminApp from './AdminApp.tsx'" in content
     assert 'window.location.pathname.startsWith("/admin")' in content
     assert "rootComponent === AdminApp ? <AdminApp />" in content
+
+
+def test_admin_frontend_wires_video_upload_and_listing() -> None:
+    content = (Path(__file__).resolve().parents[1] / "frontend" / "src" / "AdminApp.tsx").read_text(encoding="utf-8")
+
+    assert 'type="file"' in content
+    assert "video/mp4,video/quicktime,video/webm" in content
+    assert "/admin-api/videos/upload" in content
+    assert "/admin-api/videos?scene_key=" in content
+    assert 'method: "DELETE"' in content
+    assert "/admin-api/videos/" in content

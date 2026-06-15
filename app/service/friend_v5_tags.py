@@ -329,7 +329,37 @@ def _clean_answer(answer: str) -> str:
     text = re.sub(r"[ \t]+([，。、；：！？）])", r"\1", text)
     # 折叠多余空行
     text = re.sub(r"\n{3,}", "\n\n", text)
+    text = _fix_product_terminology(text)
+    text = _strip_trial_account_disclosure(text)
     return text.strip()
+
+
+_TRIAL_VERIFY_OK_RE = re.compile(r"信息校验通过[，,]?\s*已为您分配测试账号。?")
+_TRIAL_ACCOUNT_BLOCK_RE = re.compile(r"【测试账号】[^\n]*")
+_TRIAL_ACCOUNT_LINE_RE = re.compile(r"(?m)^[ \t]*(?:账号|密码|说明)[：:][^\n]*\s*$")
+
+
+def _strip_trial_account_disclosure(text: str) -> str:
+    out = text or ""
+    out = _TRIAL_VERIFY_OK_RE.sub("提交成功，我们会尽快与您联系。", out)
+    out = _TRIAL_ACCOUNT_BLOCK_RE.sub("", out)
+    out = _TRIAL_ACCOUNT_LINE_RE.sub("", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
+_APPLE_STAM_TYPO_RE = re.compile(r"苹果\s*STAM(?!E)", re.IGNORECASE)
+_IDAS_PBL_TYPO_RE = re.compile(r"(?<!E)IDAS\s*-?\s*PBL", re.IGNORECASE)
+_IDEAS_PBL_SPACE_RE = re.compile(r"IDEAS\s+PBL", re.IGNORECASE)
+
+
+def _fix_product_terminology(text: str) -> str:
+    """纠正常见产品术语笔误。"""
+    out = text or ""
+    out = _APPLE_STAM_TYPO_RE.sub("苹果 STEAM", out)
+    out = _IDAS_PBL_TYPO_RE.sub("IDEAS-PBL", out)
+    out = _IDEAS_PBL_SPACE_RE.sub("IDEAS-PBL", out)
+    return out
 
 
 def _parse_tags(raw: str) -> List[str]:

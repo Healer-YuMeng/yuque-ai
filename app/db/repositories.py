@@ -7,6 +7,8 @@ from typing import Iterable, List, Optional
 
 from app.data.splitter import TextChunk
 from app.db.models import (
+    ADMIN_VIDEO_ASSETS_DDL,
+    ADMIN_VIDEO_ASSETS_SCENE_INDEX,
     CHAT_MESSAGES_DDL,
     CHAT_MESSAGES_SESSION_CREATED_INDEX,
     CHAT_SESSION_PROFILES_DDL,
@@ -37,6 +39,8 @@ class DocumentRepository:
             await conn.execute(CHAT_MESSAGES_DDL)
             await conn.execute(CHAT_MESSAGES_SESSION_CREATED_INDEX)
             await conn.execute(CHAT_SESSION_PROFILES_DDL)
+            await conn.execute(ADMIN_VIDEO_ASSETS_DDL)
+            await conn.execute(ADMIN_VIDEO_ASSETS_SCENE_INDEX)
             await conn.commit()
         finally:
             await conn.close()
@@ -70,6 +74,145 @@ class DocumentRepository:
             await conn.commit()
         finally:
             await conn.close()
+
+
+@dataclass(frozen=True)
+class AdminVideoAssetRow:
+    id: int
+    scene_key: str
+    scene_name: str
+    title: str
+    original_filename: str
+    stored_filename: str
+    file_path: str
+    file_url: str
+    mime_type: str
+    file_size: int
+    duration_seconds: int | None
+    status: str
+    created_at: str
+    updated_at: str
+
+
+class AdminVideoAssetRepository:
+    def __init__(self, session_factory: DatabaseSessionFactory) -> None:
+        self._session_factory = session_factory
+
+    async def init_db(self) -> None:
+        conn = await self._session_factory.connect()
+        try:
+            await conn.execute(ADMIN_VIDEO_ASSETS_DDL)
+            await conn.execute(ADMIN_VIDEO_ASSETS_SCENE_INDEX)
+            await conn.commit()
+        finally:
+            await conn.close()
+
+    async def insert_video(
+        self,
+        *,
+        scene_key: str,
+        scene_name: str,
+        title: str,
+        original_filename: str,
+        stored_filename: str,
+        file_path: str,
+        file_url: str,
+        mime_type: str,
+        file_size: int,
+        duration_seconds: int | None = None,
+    ) -> AdminVideoAssetRow:
+        conn = await self._session_factory.connect()
+        try:
+            cur = await conn.execute(
+                "INSERT INTO admin_video_assets("
+                "scene_key, scene_name, title, original_filename, stored_filename, file_path, file_url, "
+                "mime_type, file_size, duration_seconds"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    scene_key,
+                    scene_name,
+                    title,
+                    original_filename,
+                    stored_filename,
+                    file_path,
+                    file_url,
+                    mime_type,
+                    int(file_size),
+                    duration_seconds,
+                ),
+            )
+            await conn.commit()
+            asset_id = int(cur.lastrowid)
+            row = await self.get_video(asset_id=asset_id)
+            if row is None:
+                raise RuntimeError("inserted admin video asset not found")
+            return row
+        finally:
+            await conn.close()
+
+    async def get_video(self, *, asset_id: int) -> AdminVideoAssetRow | None:
+        conn = await self._session_factory.connect()
+        try:
+            cur = await conn.execute(
+                "SELECT * FROM admin_video_assets WHERE id=? AND status='active'",
+                (int(asset_id),),
+            )
+            row = await cur.fetchone()
+            return _admin_video_asset_from_row(row) if row else None
+        finally:
+            await conn.close()
+
+    async def list_videos(self, *, scene_key: str | None = None) -> List[AdminVideoAssetRow]:
+        conn = await self._session_factory.connect()
+        try:
+            if scene_key:
+                cur = await conn.execute(
+                    "SELECT * FROM admin_video_assets WHERE scene_key=? AND status='active' ORDER BY id DESC",
+                    (scene_key,),
+                )
+            else:
+                cur = await conn.execute(
+                    "SELECT * FROM admin_video_assets WHERE status='active' ORDER BY id DESC",
+                )
+            rows = await cur.fetchall()
+            return [_admin_video_asset_from_row(row) for row in rows]
+        finally:
+            await conn.close()
+
+    async def delete_video(self, *, asset_id: int) -> AdminVideoAssetRow | None:
+        row = await self.get_video(asset_id=asset_id)
+        if row is None:
+            return None
+        conn = await self._session_factory.connect()
+        try:
+            await conn.execute(
+                "UPDATE admin_video_assets SET status='deleted', updated_at=CURRENT_TIMESTAMP "
+                "WHERE id=? AND status='active'",
+                (int(asset_id),),
+            )
+            await conn.commit()
+        finally:
+            await conn.close()
+        return row
+
+
+def _admin_video_asset_from_row(row) -> AdminVideoAssetRow:
+    return AdminVideoAssetRow(
+        id=int(row["id"]),
+        scene_key=str(row["scene_key"] or ""),
+        scene_name=str(row["scene_name"] or ""),
+        title=str(row["title"] or ""),
+        original_filename=str(row["original_filename"] or ""),
+        stored_filename=str(row["stored_filename"] or ""),
+        file_path=str(row["file_path"] or ""),
+        file_url=str(row["file_url"] or ""),
+        mime_type=str(row["mime_type"] or ""),
+        file_size=int(row["file_size"] or 0),
+        duration_seconds=int(row["duration_seconds"]) if row["duration_seconds"] is not None else None,
+        status=str(row["status"] or ""),
+        created_at=str(row["created_at"] or ""),
+        updated_at=str(row["updated_at"] or ""),
+    )
 
 
 class LeadCaptureRepository:
@@ -284,4 +427,3 @@ class ChatSessionRepository:
             return deleted
         finally:
             await conn.close()
-
