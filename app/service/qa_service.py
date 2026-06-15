@@ -23,7 +23,14 @@ from app.conversation.trial_account_pool import allocate_trial_account, load_tri
 from app.conversation.v4_lead_outreach import V4LeadOutreach
 from app.conversation.visitor_prompt import build_visitor_generation_question
 from app.conversation.visitor_profile import detect_visitor_type
-from app.db.repositories import ChatMessageRow, ChatSessionRepository, DocumentRepository, LeadCaptureRepository, QALogRepository
+from app.db.repositories import (
+    AdminVideoAssetRepository,
+    ChatMessageRow,
+    ChatSessionRepository,
+    DocumentRepository,
+    LeadCaptureRepository,
+    QALogRepository,
+)
 from app.db.profile_repository import ChatSessionProfileRepository
 from app.rag.embedder import BGESmallEmbedder, Embedder, OpenAIEmbedder
 from app.rag.friend_v5_generator import FriendV5Generator
@@ -177,6 +184,7 @@ class QAService:
         lead_capture_repository: LeadCaptureRepository,
         chat_session_repository: ChatSessionRepository,
         chat_session_profile_repository: ChatSessionProfileRepository,
+        admin_video_asset_repository: Optional[AdminVideoAssetRepository] = None,
     ) -> None:
         self._yuque_loader = yuque_loader
         self._vector_store = vector_store
@@ -184,6 +192,7 @@ class QAService:
         self._qa_log_repository = qa_log_repository
         self._lead_capture_repository = lead_capture_repository
         self._chat_session_repository = chat_session_repository
+        self._admin_video_asset_repository = admin_video_asset_repository
         self._splitter = RecursiveTextSplitter(
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap,
@@ -787,6 +796,7 @@ class QAService:
             yuque_search=yuque_search,
             scene_query_rewriter=scene_query_rewriter,
             yuque_deep_reader=yuque_deep_reader,
+            admin_video_repository=self._admin_video_asset_repository,
             toc_nodes=self._guide_toc_nodes,
             yuque_url_limit=settings.chat_v5_yuque_url_limit,
             require_web_sources=settings.chat_v5_require_web_sources,
@@ -909,8 +919,12 @@ class QAService:
         interests["_lead"] = lead
         session_meta = dict(interests.get("_session") or {})
         session_meta["module_scope"] = "使用指南"
-        session_meta["trial_account_issued"] = True
+        session_meta["trial_apply_submitted"] = True
         interests["_session"] = session_meta
+        admin_meta = dict(interests.get("_admin") or {})
+        admin_meta.setdefault("follow_up_status", "待跟进")
+        admin_meta.setdefault("test_account_status", "待发放")
+        interests["_admin"] = admin_meta
         await self._chat_session_profile_repository.upsert_profile(
             session_id=sid,
             display_name=display_name,
@@ -918,18 +932,9 @@ class QAService:
             interests=interests,
         )
 
-        accounts = load_trial_accounts()
-        if not accounts:
-            return TrialCredentialsResponse(ok=False, message="暂未配置试用账号，请联系顾问。")
-        picked = allocate_trial_account(sid, accounts)
-        if not picked:
-            return TrialCredentialsResponse(ok=False, message="试用账号分配失败，请稍后重试。")
         return TrialCredentialsResponse(
             ok=True,
-            username=picked.username,
-            password=picked.password,
-            label=picked.label,
-            message="信息校验通过，已为您分配测试账号。",
+            message="提交成功，我们会尽快与您联系。",
         )
 
     async def visitor_profile_summary(self, *, session_id: str) -> VisitorProfileResponse:

@@ -87,3 +87,26 @@ CREATE TABLE IF NOT EXISTS chat_session_profiles (
 );
 """
 
+ADMIN_VIDEO_ASSETS_DDL = """
+CREATE TABLE IF NOT EXISTS admin_video_assets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scene_key TEXT NOT NULL,
+    scene_name TEXT NOT NULL,
+    title TEXT NOT NULL,
+    original_filename TEXT NOT NULL,
+    stored_filename TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    file_url TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    file_size INTEGER NOT NULL,
+    duration_seconds INTEGER,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+ADMIN_VIDEO_ASSETS_SCENE_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_admin_video_assets_scene_status
+ON admin_video_assets(scene_key, status, created_at);
+"""

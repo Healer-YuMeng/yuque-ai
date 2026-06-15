@@ -48,6 +48,8 @@ class Settings:
     data_dir: Path = BASE_DIR / "data_runtime"
     vector_dir: Path = BASE_DIR / "data_runtime" / "vector_store"
     sqlite_path: Path = BASE_DIR / "data_runtime" / "rag_mvp.db"
+    admin_upload_dir: Path = BASE_DIR / "data_runtime" / "admin_uploads"
+    admin_video_max_bytes: int = _env_int("ADMIN_VIDEO_MAX_BYTES", 500 * 1024 * 1024)
 
     yuque_token: str = _env("YUQUE_TOKEN")
     yuque_token_secondary: str = _env("YUQUE_TOKEN_SECONDARY", "")
@@ -204,6 +206,7 @@ class Settings:
     def ensure_runtime_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.vector_dir.mkdir(parents=True, exist_ok=True)
+        self.admin_upload_dir.mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()

@@ -14,6 +14,7 @@ from app.db.repositories import ChatMessageRow
 logger = get_logger(__name__)
 from app.rag.friend_v5_generator import FriendV5Generator
 from app.rag.skill_router import route_skill
+from app.schemas.chat import ChatMediaBundle, MediaItem
 from app.schemas.chat_v5 import ChatV5DonePayload, FriendV5SourceItem
 from app.service.friend_v5_tags import (
     SCENE_TO_TOC_TITLE,
@@ -82,6 +83,7 @@ class FriendDialogOrchestratorV5:
         toc_nodes: Optional[Sequence[dict[str, Any]]] = None,
         yuque_url_limit: int = 3,
         require_web_sources: bool = True,
+        admin_video_repository: Optional[Any] = None,
     ) -> None:
         self._generator = generator
         self._profile_repo = profile_repo
@@ -92,6 +94,7 @@ class FriendDialogOrchestratorV5:
         self._toc_nodes = _normalize_toc_nodes(toc_nodes or [])
         self._yuque_url_limit = max(0, int(yuque_url_limit or 0))
         self._require_web_sources = bool(require_web_sources)
+        self._admin_video_repository = admin_video_repository
 
     async def answer_stream(
         self,
@@ -602,13 +605,24 @@ class FriendDialogOrchestratorV5:
             focus_node=catalog_tags.focus_node,
             toc_nodes=self._toc_nodes,
         )
+        media_suppressed = _should_suppress_initial_media(trigger_type=trigger_type, tag_route=tag_route)
+        admin_scene_media = await _load_admin_scene_media(
+            repository=self._admin_video_repository,
+            scene=scene,
+            trigger_type=trigger_type,
+            history=history,
+        )
+        display_media = _merge_media(
+            ChatMediaBundle() if media_suppressed else deep_read.media,
+            admin_scene_media,
+        )
 
         payload = ChatV5DonePayload(
             answer=answer,
             tags=rhythm_tags.tags,
             sources=merged_sources,
             search_keywords=merged_keywords,
-            media=deep_read.media,
+            media=display_media,
             profile_fields=_profile_fields(profile),
             fallback_used=False,
             debug={
@@ -627,6 +641,8 @@ class FriendDialogOrchestratorV5:
                 "skill_route": _skill_route_debug(skill_route),
                 "mcp_route": mcp_route,
                 "doc_deep_read_used": bool(deep_read.used),
+                "media_suppressed": media_suppressed,
+                "admin_scene_video_count": len(admin_scene_media.videos),
                 "doc_deep_read": deep_read.debug,
                 "case_toc_miss": tag_route.kind == "case" and not deep_read.used,
                 "case_branch_used": case_branch_used,
@@ -969,6 +985,63 @@ def _case_query_context(*, question: str, scene: str, history: Sequence[ChatMess
             parts.append(content)
     parts.append(question)
     return " ".join(parts).strip()
+
+
+def _should_suppress_initial_media(*, trigger_type: str, tag_route: _TagRouteResult) -> bool:
+    return trigger_type == "scene" or tag_route.kind == "explore_product"
+
+
+async def _load_admin_scene_media(
+    *,
+    repository: Optional[Any],
+    scene: str,
+    trigger_type: str,
+    history: Sequence[ChatMessageRow],
+) -> ChatMediaBundle:
+    if repository is None or trigger_type != "scene" or history:
+        return ChatMediaBundle()
+    scene_key = _admin_scene_key(scene)
+    if not scene_key:
+        return ChatMediaBundle()
+    try:
+        rows = await repository.list_videos(scene_key=scene_key)
+    except Exception:
+        logger.exception("friend_v5_admin_scene_video_load_failed")
+        return ChatMediaBundle()
+    videos = [
+        MediaItem(
+            url=str(getattr(row, "file_url", "") or ""),
+            title=str(getattr(row, "title", "") or getattr(row, "original_filename", "") or ""),
+            doc_title=str(getattr(row, "scene_name", "") or scene),
+            doc_id=f"admin_video:{getattr(row, 'id', '')}",
+        )
+        for row in rows[:1]
+        if str(getattr(row, "file_url", "") or "").strip()
+    ]
+    return ChatMediaBundle(videos=videos)
+
+
+def _admin_scene_key(scene: str) -> str:
+    normalized = (scene or "").strip()
+    return {
+        "人工智能通识教育": "general_ai_course",
+        "人工智能通识课程": "general_ai_course",
+        "跨学科项目化学习": "project_based_learning",
+        "跨学科项目式学习": "project_based_learning",
+        "智能招生": "smart_enrollment",
+        "学校AI场景定制": "school_ai_custom",
+    }.get(normalized, "")
+
+
+def _merge_media(primary: ChatMediaBundle, extra: ChatMediaBundle) -> ChatMediaBundle:
+    if not extra.images and not extra.videos:
+        return primary
+    image_urls = {item.url for item in primary.images}
+    extra_video_urls = {item.url for item in extra.videos}
+    return ChatMediaBundle(
+        images=[*primary.images, *[item for item in extra.images if item.url not in image_urls]],
+        videos=[*extra.videos, *[item for item in primary.videos if item.url not in extra_video_urls]],
+    )
 
 
 def _resolve_tag_route(

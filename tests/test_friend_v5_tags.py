@@ -138,3 +138,38 @@ def test_filter_drops_placeholder_example_sources() -> None:
 
     assert result.source_urls == []
     assert "example.com" not in result.answer
+
+
+def test_filter_strips_trial_account_disclosure() -> None:
+    parser = FriendV5TagStreamFilter(scene="人工智能通识教育")
+
+    parser.feed("信息校验通过，已为您分配测试账号。\n\n【测试账号】\n账号：demo01\n密码：pass123")
+    result = parser.finish()
+
+    assert result.answer == "提交成功，我们会尽快与您联系。"
+    assert "【测试账号】" not in result.answer
+    assert "demo01" not in result.answer
+    assert "pass123" not in result.answer
+
+
+def test_filter_fixes_ideas_pbl_typo() -> None:
+    parser = FriendV5TagStreamFilter(scene="跨学科项目化学习")
+
+    parser.feed("跨学科项目化学习（IDAS PBL）是由有为云联合上海师范大学打造的 AI 原生应用。")
+    result = parser.finish()
+
+    assert "IDEAS-PBL" in result.answer
+    assert "IDAS PBL" not in result.answer
+    assert "IDAS-PBL" not in result.answer
+
+
+def test_filter_fixes_apple_steam_typo() -> None:
+    parser = FriendV5TagStreamFilter(scene="人工智能通识教育")
+
+    parser.feed("2. **苹果 STAM**：基于 Swift Playgrounds，融合编程与设计。\n如果您对苹果STAM课程也感兴趣。")
+    result = parser.finish()
+
+    assert "苹果 STEAM" in result.answer
+    assert "苹果 STEAM课程" in result.answer
+    assert "苹果 STAM" not in result.answer
+    assert "苹果STAM" not in result.answer

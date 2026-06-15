@@ -162,6 +162,34 @@ class _FakeDeepReader:
         )
 
 
+class _FakeAdminVideoRepo:
+    def __init__(self) -> None:
+        self.calls: list[str | None] = []
+
+    async def list_videos(self, *, scene_key: str | None = None):
+        self.calls.append(scene_key)
+        if scene_key != "school_ai_custom":
+            return []
+
+        class _Row:
+            id = 88
+            scene_key = "school_ai_custom"
+            scene_name = "学校AI场景定制"
+            title = "学校AI场景定制演示视频"
+            original_filename = "school-demo.mp4"
+            stored_filename = "20260615120000_school.mp4"
+            file_path = "videos/school_ai_custom/20260615120000_school.mp4"
+            file_url = "/admin-media/videos/school_ai_custom/20260615120000_school.mp4"
+            mime_type = "video/mp4"
+            file_size = 1024
+            duration_seconds = None
+            status = "active"
+            created_at = ""
+            updated_at = ""
+
+        return [_Row()]
+
+
 @dataclass
 class _FakeTocNode:
     uuid: str
@@ -815,6 +843,35 @@ async def test_tag_trigger_queries_yuque_url_without_document_body() -> None:
 
 
 @pytest.mark.asyncio
+async def test_scene_first_turn_returns_uploaded_admin_video() -> None:
+    admin_videos = _FakeAdminVideoRepo()
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        yuque_search=_FakeYuqueSearch(),
+        profile_extractor=_FakeProfileExtractor(),
+        admin_video_repository=admin_videos,
+    )
+
+    events = [
+        item
+        async for item in orch.answer_stream(
+            question="学校AI场景定制",
+            session_id="sess_v5_admin_video",
+            scene="学校AI场景定制",
+            trigger_type="scene",
+            history=[],
+        )
+    ]
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert admin_videos.calls == ["school_ai_custom"]
+    assert done["media"]["videos"][0]["url"] == "/admin-media/videos/school_ai_custom/20260615120000_school.mp4"
+    assert done["media"]["videos"][0]["title"] == "学校AI场景定制演示视频"
+    assert done["debug"]["admin_scene_video_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_manual_specific_doc_question_uses_deep_reader_and_returns_media() -> None:
     deep_reader = _FakeDeepReader()
     generator = _FakeGenerator()
@@ -1155,6 +1212,10 @@ async def test_after_explore_product_tag_restores_normal_rhythm() -> None:
     assert done["tags"][2] == trial_tag_for_scene("学校AI场景定制")
     assert explore_product_tag_for_title("跨学科项目式学习") not in done["tags"]
     assert done["debug"]["conversion_state"]["stage"] == "fixed_entry"
+    assert done["debug"]["doc_deep_read_used"] is True
+    assert done["debug"]["media_suppressed"] is True
+    assert done["media"]["images"] == []
+    assert done["media"]["videos"] == []
 
 
 @pytest.mark.asyncio
@@ -1180,6 +1241,10 @@ async def test_scene_trigger_without_case_history_keeps_platform_intro_route() -
     done = [item for item in events if item["event"] == "done"][0]["data"]
     assert done["debug"]["scene_case_continuation"] is False
     assert done["debug"]["mcp_route"]["mode"] == "scene_toc"
+    assert done["debug"]["doc_deep_read_used"] is True
+    assert done["debug"]["media_suppressed"] is True
+    assert done["media"]["images"] == []
+    assert done["media"]["videos"] == []
 
 
 @pytest.mark.asyncio
