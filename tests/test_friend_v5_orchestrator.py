@@ -865,9 +865,47 @@ async def test_scene_first_turn_returns_uploaded_admin_video() -> None:
     ]
 
     done = [item for item in events if item["event"] == "done"][0]["data"]
+    event_names = [item["event"] for item in events]
+    assert event_names.index("media_preview") < event_names.index("token")
+    preview = [item for item in events if item["event"] == "media_preview"][0]["data"]
+    assert preview["media"]["videos"][0]["url"] == "/admin-media/videos/school_ai_custom/20260615120000_school.mp4"
+    assert preview["media_display_mode"] == "before_answer"
     assert admin_videos.calls == ["school_ai_custom"]
     assert done["media"]["videos"][0]["url"] == "/admin-media/videos/school_ai_custom/20260615120000_school.mp4"
     assert done["media"]["videos"][0]["title"] == "学校AI场景定制演示视频"
+    assert done["debug"]["admin_scene_video_count"] == 1
+    assert done["debug"]["media_display_mode"] == "before_answer"
+    assert "可以先看这段学校AI场景定制的演示视频" in done["debug"]["media_intro"]
+
+
+@pytest.mark.asyncio
+async def test_scene_trigger_returns_uploaded_admin_video_even_with_history() -> None:
+    admin_videos = _FakeAdminVideoRepo()
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        yuque_search=_FakeYuqueSearch(),
+        profile_extractor=_FakeProfileExtractor(),
+        admin_video_repository=admin_videos,
+    )
+
+    events = [
+        item
+        async for item in orch.answer_stream(
+            question="学校AI场景定制",
+            session_id="sess_v5_admin_video_with_history",
+            scene="学校AI场景定制",
+            trigger_type="scene",
+            history=[
+                ChatMessageRow(role="user", content="智能招生", created_at=""),
+                ChatMessageRow(role="assistant", content="智能招生介绍。", created_at=""),
+            ],
+        )
+    ]
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert admin_videos.calls == ["school_ai_custom"]
+    assert done["media"]["videos"][0]["url"] == "/admin-media/videos/school_ai_custom/20260615120000_school.mp4"
     assert done["debug"]["admin_scene_video_count"] == 1
 
 
@@ -1146,6 +1184,7 @@ async def test_case_history_recommends_other_platform_intro_products() -> None:
         yuque_deep_reader=_FakeDeepReader(),
         profile_extractor=_FakeProfileExtractor(),
         toc_nodes=toc_nodes,
+        admin_video_repository=_FakeAdminVideoRepo(),
     )
 
     events = await _collect_v5_events(
@@ -1187,6 +1226,7 @@ async def test_after_explore_product_tag_restores_normal_rhythm() -> None:
         yuque_deep_reader=_FakeDeepReader(),
         profile_extractor=_FakeProfileExtractor(),
         toc_nodes=toc_nodes,
+        admin_video_repository=_FakeAdminVideoRepo(),
     )
 
     events = await _collect_v5_events(
@@ -1215,7 +1255,10 @@ async def test_after_explore_product_tag_restores_normal_rhythm() -> None:
     assert done["debug"]["doc_deep_read_used"] is True
     assert done["debug"]["media_suppressed"] is True
     assert done["media"]["images"] == []
-    assert done["media"]["videos"] == []
+    assert done["media"]["videos"][0]["url"] == "/admin-media/videos/school_ai_custom/20260615120000_school.mp4"
+    assert done["debug"]["admin_scene_video_count"] == 1
+    assert done["debug"]["media_display_mode"] == "before_answer"
+    assert "可以先看这段学校AI场景定制的演示视频" in done["debug"]["media_intro"]
 
 
 @pytest.mark.asyncio

@@ -511,6 +511,28 @@ class FriendDialogOrchestratorV5:
             yield {"event": "done", "data": payload.model_dump()}
             return
 
+        media_suppressed = _should_suppress_initial_media(trigger_type=trigger_type, tag_route=tag_route)
+        admin_media_scene = _admin_media_scene_for_turn(
+            scene=scene,
+            trigger_type=trigger_type,
+            tag_route=tag_route,
+        )
+        admin_scene_media = await _load_admin_scene_media(
+            repository=self._admin_video_repository,
+            scene=admin_media_scene,
+        )
+        media_display_mode = _media_display_mode_for_turn(admin_scene_media)
+        media_intro = _media_intro_for_turn(scene=admin_media_scene, media=admin_scene_media)
+        if admin_scene_media.videos:
+            yield {
+                "event": "media_preview",
+                "data": {
+                    "media": admin_scene_media.model_dump(),
+                    "media_display_mode": media_display_mode,
+                    "media_intro": media_intro,
+                },
+            }
+
         yield _stage("searching", "小为正在结合语雀资料整理回答...")
         system_prompt = build_friend_v5_system_prompt()
         case_answer_mode = case_intent and deep_read.used
@@ -605,13 +627,6 @@ class FriendDialogOrchestratorV5:
             focus_node=catalog_tags.focus_node,
             toc_nodes=self._toc_nodes,
         )
-        media_suppressed = _should_suppress_initial_media(trigger_type=trigger_type, tag_route=tag_route)
-        admin_scene_media = await _load_admin_scene_media(
-            repository=self._admin_video_repository,
-            scene=scene,
-            trigger_type=trigger_type,
-            history=history,
-        )
         display_media = _merge_media(
             ChatMediaBundle() if media_suppressed else deep_read.media,
             admin_scene_media,
@@ -643,6 +658,9 @@ class FriendDialogOrchestratorV5:
                 "doc_deep_read_used": bool(deep_read.used),
                 "media_suppressed": media_suppressed,
                 "admin_scene_video_count": len(admin_scene_media.videos),
+                "admin_scene_video_scene": admin_media_scene,
+                "media_display_mode": media_display_mode,
+                "media_intro": media_intro,
                 "doc_deep_read": deep_read.debug,
                 "case_toc_miss": tag_route.kind == "case" and not deep_read.used,
                 "case_branch_used": case_branch_used,
@@ -991,14 +1009,31 @@ def _should_suppress_initial_media(*, trigger_type: str, tag_route: _TagRouteRes
     return trigger_type == "scene" or tag_route.kind == "explore_product"
 
 
+def _admin_media_scene_for_turn(*, scene: str, trigger_type: str, tag_route: _TagRouteResult) -> str:
+    if trigger_type == "scene":
+        return scene
+    if tag_route.kind == "explore_product":
+        return scene_for_toc_title(tag_route.target_title) or tag_route.target_title
+    return ""
+
+
+def _media_display_mode_for_turn(media: ChatMediaBundle) -> str:
+    return "before_answer" if media.videos else "after_answer"
+
+
+def _media_intro_for_turn(*, scene: str, media: ChatMediaBundle) -> str:
+    if not media.videos:
+        return ""
+    title = toc_title_for_scene(scene)
+    return f"可以先看这段{title}的演示视频，直观感受一下实际效果。"
+
+
 async def _load_admin_scene_media(
     *,
     repository: Optional[Any],
     scene: str,
-    trigger_type: str,
-    history: Sequence[ChatMessageRow],
 ) -> ChatMediaBundle:
-    if repository is None or trigger_type != "scene" or history:
+    if repository is None or not scene:
         return ChatMediaBundle()
     scene_key = _admin_scene_key(scene)
     if not scene_key:

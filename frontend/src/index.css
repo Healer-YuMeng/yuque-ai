@@ -348,6 +348,39 @@ body {
   font-weight: 600;
 }
 
+.admin-upload-progress {
+  margin-top: 18px;
+  padding: 14px 16px;
+  border: 1px solid #bfdbfe;
+  border-radius: 12px;
+  background: #eff6ff;
+}
+
+.admin-upload-progress-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  color: #1d4ed8;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.admin-upload-progress-track {
+  margin-top: 10px;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dbeafe;
+}
+
+.admin-upload-progress-bar {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2d6cff, #5ec6d6);
+  transition: width 180ms ease;
+}
+
 .admin-video-list {
   margin-top: 28px;
   display: grid;
@@ -2025,6 +2058,21 @@ body {
 
 .msg-inline-media--tail {
   margin-top: 4px;
+}
+
+.msg-inline-media--lead {
+  margin-bottom: 2px;
+}
+
+.msg-media-intro {
+  color: #334155;
+  font-size: 14px;
+  line-height: 1.7;
+  font-weight: 600;
+}
+
+.msg-media-stream-stage {
+  margin-top: 2px;
 }
 
 .msg-media-block {

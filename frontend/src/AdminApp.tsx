@@ -98,6 +98,7 @@ function AdminApp() {
   const [videosByScene, setVideosByScene] = useState<Partial<Record<KnowledgeSceneKey, AdminVideoAsset[]>>>({});
   const [videosLoading, setVideosLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [deletingVideoIds, setDeletingVideoIds] = useState<Set<number>>(() => new Set());
   const [videoError, setVideoError] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -275,17 +276,11 @@ function AdminApp() {
     formData.append("title", file.name.replace(/\.[^.]+$/, ""));
     formData.append("file", file);
     setUploading(true);
+    setUploadProgress(0);
     setVideoError("");
     try {
-      const resp = await fetch("/admin-api/videos/upload", {
-        method: "POST",
-        body: formData,
-      });
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) {
-        throw new Error(data.detail || "视频上传失败");
-      }
-      const video = data as AdminVideoAsset;
+      const video = await uploadAdminVideo(formData, (percent) => setUploadProgress(percent));
+      setUploadProgress(100);
       setVideosByScene((prev) => ({
         ...prev,
         [activeSceneKey]: [video, ...(prev[activeSceneKey] ?? [])],
@@ -294,6 +289,7 @@ function AdminApp() {
       setVideoError(err instanceof Error ? err.message : "视频上传失败");
     } finally {
       setUploading(false);
+      window.setTimeout(() => setUploadProgress(null), 600);
     }
   };
 
@@ -510,6 +506,17 @@ function AdminApp() {
                 </div>
 
                 {videoError ? <div className="admin-video-error" role="alert">{videoError}</div> : null}
+                {uploadProgress !== null ? (
+                  <div className="admin-upload-progress" aria-label={`视频上传进度 ${uploadProgress}%`}>
+                    <div className="admin-upload-progress-row">
+                      <span>{uploading ? "正在上传视频" : "上传完成"}</span>
+                      <strong>{uploadProgress}%</strong>
+                    </div>
+                    <div className="admin-upload-progress-track">
+                      <div className="admin-upload-progress-bar" style={{ width: `${uploadProgress}%` }} />
+                    </div>
+                  </div>
+                ) : null}
                 {videosLoading ? (
                   <div className="admin-empty-state">
                     <div className="admin-empty-title">正在加载视频素材</div>
@@ -675,6 +682,35 @@ function formatFileSize(bytes: number) {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function uploadAdminVideo(formData: FormData, onProgress: (percent: number) => void) {
+  return new Promise<AdminVideoAsset>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/admin-api/videos/upload");
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable || event.total <= 0) return;
+      const percent = Math.min(99, Math.max(1, Math.round((event.loaded / event.total) * 100)));
+      onProgress(percent);
+    };
+    xhr.onload = () => {
+      let data: unknown;
+      try {
+        data = xhr.responseText ? JSON.parse(xhr.responseText) : {};
+      } catch {
+        data = {};
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        const detail = typeof data === "object" && data && "detail" in data ? String(data.detail || "") : "";
+        reject(new Error(detail || "视频上传失败"));
+        return;
+      }
+      resolve(data as AdminVideoAsset);
+    };
+    xhr.onerror = () => reject(new Error("视频上传失败，请检查网络后重试"));
+    xhr.onabort = () => reject(new Error("视频上传已取消"));
+    xhr.send(formData);
+  });
 }
 
 export default AdminApp;

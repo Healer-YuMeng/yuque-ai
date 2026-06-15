@@ -70,6 +70,24 @@ const SCENE_TO_TOC_TITLE: Record<FocusScene, string> = {
   学校AI场景定制: "学校AI场景定制",
 };
 
+type AdminSceneKey = "general_ai_course" | "project_based_learning" | "smart_enrollment" | "school_ai_custom";
+
+const SCENE_TO_ADMIN_VIDEO_KEY: Record<FocusScene, AdminSceneKey> = {
+  人工智能通识教育: "general_ai_course",
+  跨学科项目化学习: "project_based_learning",
+  智能招生: "smart_enrollment",
+  学校AI场景定制: "school_ai_custom",
+};
+
+type AdminVideoPreviewAsset = {
+  id: number;
+  scene_key: AdminSceneKey;
+  scene_name?: string;
+  title?: string;
+  original_filename?: string;
+  file_url: string;
+};
+
 function resolveSceneForFriendV5Tag(tag: string, fallback: FocusScene): FocusScene {
   const patterns = [
     /^想看看(.+?)的产品的使用指南？$/,
@@ -88,6 +106,14 @@ function resolveSceneForFriendV5Tag(tag: string, fallback: FocusScene): FocusSce
     }
   }
   return fallback;
+}
+
+function isFriendV5ExploreProductTag(tag: string): boolean {
+  return /^想了解一下(.+?)产品？$/.test((tag || "").trim());
+}
+
+function friendV5VideoIntroForScene(scene: FocusScene): string {
+  return `可以先看这段${SCENE_TO_TOC_TITLE[scene]}的演示视频，直观感受一下实际效果。`;
 }
 
 function isFriendV5TrialApplyTag(tag: string) {
@@ -263,6 +289,9 @@ type ChatItem = {
   sources?: FriendV5SourceItem[];
   /** V5：搜索关键词 */
   searchKeywords?: string[];
+  /** V5：部分场景需要先看视频，再读文字 */
+  mediaDisplayMode?: "before_answer" | "after_answer";
+  mediaIntro?: string;
   isFriendV5?: boolean;
 };
 
@@ -436,6 +465,16 @@ function parseChatMedia(input: unknown): ChatMediaBundle | undefined {
   return { images, videos };
 }
 
+function parseFriendV5MediaDisplay(debug: Record<string, unknown> | undefined): {
+  mode?: "before_answer" | "after_answer";
+  intro?: string;
+} {
+  const rawMode = typeof debug?.media_display_mode === "string" ? debug.media_display_mode : "";
+  const mode = rawMode === "before_answer" || rawMode === "after_answer" ? rawMode : undefined;
+  const intro = typeof debug?.media_intro === "string" ? debug.media_intro.trim() : "";
+  return { mode, intro };
+}
+
 function parseFriendV5Tags(input: unknown): string[] {
   if (!Array.isArray(input)) return [];
   const tags: string[] = [];
@@ -606,6 +645,17 @@ function renderInlineMediaCard(item: ChatMediaItem, kind: "image" | "video", key
         <img className="msg-image-card-media" src={item.url} alt={label} loading="lazy" />
       </span>
     </a>
+  );
+}
+
+function renderInlineMediaBlock(item: ChatItem, placement: "lead" | "tail") {
+  if (!item.media) return null;
+  const videos = item.media.videos.map((video, idx) => renderInlineMediaCard(video, "video", `${item.id}-video-${idx}`));
+  const images = item.media.images.map((image, idx) => renderInlineMediaCard(image, "image", `${item.id}-img-${idx}`));
+  return (
+    <div className={`msg-inline-media msg-inline-media--${placement}`}>
+      {placement === "lead" ? [...videos, ...images] : [...images, ...videos]}
+    </div>
   );
 }
 
@@ -1074,6 +1124,7 @@ function App() {
   const resetPendingRef = useRef<Map<string, Promise<void>>>(new Map());
   const sessionTitleSeqRef = useRef<number | null>(null);
   const v5PageRefreshInitDoneRef = useRef(false);
+  const adminVideoPreviewCacheRef = useRef<Partial<Record<FocusScene, ChatMediaBundle | null>>>({});
   const [inactivityEpoch, setInactivityEpoch] = useState(0);
   const messageIdSeqRef = useRef(0);
   const floatingInitDoneRef = useRef(false);
@@ -1839,6 +1890,76 @@ function App() {
     }
   };
 
+  const loadAdminSceneVideoPreview = async (scene: FocusScene): Promise<ChatMediaBundle | null> => {
+    const cached = adminVideoPreviewCacheRef.current[scene];
+    if (cached !== undefined) return cached;
+    const sceneKey = SCENE_TO_ADMIN_VIDEO_KEY[scene];
+    try {
+      const resp = await fetch(`/admin-api/videos?scene_key=${encodeURIComponent(sceneKey)}`);
+      if (!resp.ok) {
+        adminVideoPreviewCacheRef.current[scene] = null;
+        return null;
+      }
+      const data = (await resp.json()) as { items?: AdminVideoPreviewAsset[] };
+      const video = (data.items || []).find((item) => item.file_url);
+      if (!video) {
+        adminVideoPreviewCacheRef.current[scene] = null;
+        return null;
+      }
+      const media: ChatMediaBundle = {
+        images: [],
+        videos: [
+          {
+            url: video.file_url,
+            title: video.title || video.original_filename || "",
+            doc_title: video.scene_name || SCENE_TO_TOC_TITLE[scene],
+            doc_id: `admin_video:${video.id}`,
+            summary: "",
+          },
+        ],
+      };
+      adminVideoPreviewCacheRef.current[scene] = media;
+      return media;
+    } catch {
+      adminVideoPreviewCacheRef.current[scene] = null;
+      return null;
+    }
+  };
+
+  const applyImmediateAdminVideoPreview = async (
+    scene: FocusScene,
+    sessionId: string,
+    assistantId: string,
+  ) => {
+    const media = await loadAdminSceneVideoPreview(scene);
+    if (!media) return;
+    try {
+      setSessions((prev) =>
+        prev.map((session) =>
+          session.id === sessionId
+            ? {
+                ...touchSession(session),
+                messages: session.messages.map((item) =>
+                  item.id === assistantId
+                    ? {
+                        ...item,
+                        media,
+                        mediaDisplayMode: "before_answer",
+                        mediaIntro: friendV5VideoIntroForScene(scene),
+                        isFriendV5: true,
+                        pendingComfortMessage: undefined,
+                      }
+                    : item
+                ),
+              }
+            : session
+        )
+      );
+    } catch {
+      // 视频只是首屏体验增强，失败时继续走后端流式回答。
+    }
+  };
+
   const askQuestion = async (
     presetQuestion?: string,
     bypassSceneGate = false,
@@ -1889,6 +2010,13 @@ function App() {
     setQuestion("");
     const docsForRequest = selectedYuqueDocs.filter((d) => d.docId >= 1);
     setSelectedYuqueDocs([]);
+    const shouldShowImmediateSceneVideo =
+      isFriendV5Request &&
+      (friendV5TriggerType === "scene" || (friendV5TriggerType === "tag" && isFriendV5ExploreProductTag(text)));
+    const cachedSceneVideo =
+      shouldShowImmediateSceneVideo && adminVideoPreviewCacheRef.current[friendV5Scene]
+        ? adminVideoPreviewCacheRef.current[friendV5Scene] || undefined
+        : undefined;
     const streamPathForMeta = isFriendV5Request
       ? "/chat/v5/stream"
       : chatV4Enabled
@@ -1915,6 +2043,9 @@ function App() {
         id: assistantId,
         role: "assistant",
         text: "",
+        media: cachedSceneVideo,
+        mediaDisplayMode: cachedSceneVideo ? "before_answer" : undefined,
+        mediaIntro: cachedSceneVideo ? friendV5VideoIntroForScene(friendV5Scene) : undefined,
         isFriendV5: isFriendV5Request,
         streamStage: visitorStreamUi
           ? VISITOR_STREAM_STAGE_TEXT
@@ -1952,6 +2083,10 @@ function App() {
         ...next,
       ];
     });
+
+    if (shouldShowImmediateSceneVideo && !cachedSceneVideo) {
+      void applyImmediateAdminVideoPreview(friendV5Scene, sessionId, assistantId);
+    }
 
     const controller = new AbortController();
     controllerRef.current = controller;
@@ -2016,12 +2151,40 @@ function App() {
       );
     };
 
+    const applyMediaPreviewPayload = (payload: Record<string, unknown>) => {
+      const media = parseChatMedia(payload.media);
+      if (!media) return;
+      const mediaDisplay = parseFriendV5MediaDisplay(payload);
+      setSessions((prev) =>
+        prev.map((session) =>
+          session.id === sessionId
+            ? {
+                ...touchSession(session),
+                messages: session.messages.map((item) =>
+                  item.id === assistantId
+                    ? {
+                        ...item,
+                        media,
+                        mediaDisplayMode: mediaDisplay.mode,
+                        mediaIntro: mediaDisplay.intro,
+                        isFriendV5: isFriendV5Request,
+                        pendingComfortMessage: undefined,
+                      }
+                    : item
+                ),
+              }
+            : session
+        )
+      );
+    };
+
     const applyDonePayload = (payload: Record<string, unknown>) => {
       const dbg = payload.debug as Record<string, unknown> | undefined;
       const media = parseChatMedia(payload.media);
       const friendTags = isFriendV5Request ? parseFriendV5Tags(payload.tags) : [];
       const friendSources = isFriendV5Request ? parseFriendV5Sources(payload.sources) : [];
       const friendSearchKw = isFriendV5Request ? parseFriendV5SearchKeywords(payload.search_keywords) : [];
+      const friendMediaDisplay = isFriendV5Request ? parseFriendV5MediaDisplay(dbg) : {};
       if (isFriendV5Request && typeof window !== "undefined") {
         console.log("[V5 done]", { sources: payload.sources, parsed: friendSources, search_keywords: friendSearchKw });
       }
@@ -2058,6 +2221,8 @@ function App() {
                         tags: friendTags,
                         sources: friendSources,
                         searchKeywords: friendSearchKw,
+                        mediaDisplayMode: friendMediaDisplay.mode,
+                        mediaIntro: friendMediaDisplay.intro,
                         isFriendV5: isFriendV5Request,
                         streamStage: undefined,
                         streamElapsedSec: undefined,
@@ -2212,6 +2377,9 @@ function App() {
                   : session
               )
             );
+          } else if (parsed.event === "media_preview") {
+            const payload = JSON.parse(parsed.data || "{}") as Record<string, unknown>;
+            applyMediaPreviewPayload(payload);
           } else if (parsed.event === "done") {
             doneReceived = true;
             const payload = JSON.parse(parsed.data || "{}") as Record<string, unknown>;
@@ -2341,7 +2509,10 @@ function App() {
     }
     setSelectedGuideNodeId(null);
     setSelectedYuqueDocs([]);
-    if (IS_VISITOR_ROUTE) return;
+    if (IS_VISITOR_ROUTE) {
+      void loadAdminSceneVideoPreview(scene);
+      return;
+    }
     if (chatV5Enabled) {
       void askQuestion(scene, true, {
         triggerType: "scene",
@@ -3200,6 +3371,11 @@ function App() {
                         }
                       }
                       const hasBubbleContent = displayText.trim().length > 0 || hasInlineMedia;
+                      const shouldLeadWithMedia =
+                        item.role === "assistant" &&
+                        item.isFriendV5 &&
+                        item.mediaDisplayMode === "before_answer" &&
+                        hasInlineMedia;
                       if (item.hidden) return null;
                       return (
                       <div className={`msg ${item.role}`} key={item.id}>
@@ -3234,29 +3410,34 @@ function App() {
                           ) : null}
                           {hasBubbleContent ? (
                             <div className="bubble">
-                              {displayText.trim() ? (
-                                isStreaming && item.role === "assistant" && item.id === streamingAssistantId ? (
-                                  <div className="bubble-stream-text">{displayText}</div>
-                                ) : hasInlineMedia ? (
-                                  <div className="msg-rich-content">
+                              {hasInlineMedia ? (
+                                <div className="msg-rich-content">
+                                  {shouldLeadWithMedia ? (
+                                    <>
+                                      {item.mediaIntro ? <div className="msg-media-intro">{item.mediaIntro}</div> : null}
+                                      {renderInlineMediaBlock(item, "lead")}
+                                      {isStreaming && item.role === "assistant" && item.id === streamingAssistantId ? (
+                                        <div className="stream-stage stream-stage--pending msg-media-stream-stage">
+                                          {isVisitorRoute() ? VISITOR_STREAM_STAGE_TEXT : item.streamStage || "小为正在看相关资料..."}
+                                        </div>
+                                      ) : null}
+                                    </>
+                                  ) : null}
+                                  {displayText.trim() ? (
                                     <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
                                       {normalizeMarkdownAutolinks(displayText)}
                                     </ReactMarkdown>
-                                    <div className="msg-inline-media msg-inline-media--tail">
-                                      {item.media?.images.map((image, idx) => renderInlineMediaCard(image, "image", `${item.id}-img-${idx}`))}
-                                      {item.media?.videos.map((video, idx) => renderInlineMediaCard(video, "video", `${item.id}-video-${idx}`))}
-                                    </div>
-                                  </div>
+                                  ) : null}
+                                  {shouldLeadWithMedia ? null : renderInlineMediaBlock(item, "tail")}
+                                </div>
+                              ) : displayText.trim() ? (
+                                isStreaming && item.role === "assistant" && item.id === streamingAssistantId ? (
+                                  <div className="bubble-stream-text">{displayText}</div>
                                 ) : (
                                   <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
                                     {normalizeMarkdownAutolinks(displayText)}
                                   </ReactMarkdown>
                                 )
-                              ) : hasInlineMedia ? (
-                                <div className="msg-inline-media msg-inline-media--tail">
-                                  {item.media?.images.map((image, idx) => renderInlineMediaCard(image, "image", `${item.id}-img-${idx}`))}
-                                  {item.media?.videos.map((video, idx) => renderInlineMediaCard(video, "video", `${item.id}-video-${idx}`))}
-                                </div>
                               ) : null}
                             </div>
                           ) : null}
