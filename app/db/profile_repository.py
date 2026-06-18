@@ -23,6 +23,11 @@ class ChatSessionProfileRepository:
         self._session_factory = session_factory
 
     async def _ensure_catalog_column(self, conn: Any) -> None:
+        if self._session_factory.is_postgres:
+            await conn.execute(
+                "ALTER TABLE chat_session_profiles ADD COLUMN IF NOT EXISTS catalog_state_json TEXT NOT NULL DEFAULT '{}'"
+            )
+            return
         try:
             await conn.execute(
                 "ALTER TABLE chat_session_profiles ADD COLUMN catalog_state_json TEXT NOT NULL DEFAULT '{}'"
@@ -37,11 +42,10 @@ class ChatSessionProfileRepository:
         conn = await self._session_factory.connect()
         try:
             await self._ensure_catalog_column(conn)
-            cur = await conn.execute(
+            row = await conn.fetchone(
                 "SELECT catalog_state_json FROM chat_session_profiles WHERE session_id=? LIMIT 1",
                 (sid,),
             )
-            row = await cur.fetchone()
             if not row:
                 return CatalogDialogState()
             return parse_catalog_state_json(row["catalog_state_json"])
@@ -55,10 +59,17 @@ class ChatSessionProfileRepository:
         conn = await self._session_factory.connect()
         try:
             await self._ensure_catalog_column(conn)
-            await conn.execute(
-                "INSERT OR IGNORE INTO chat_session_profiles(session_id) VALUES (?)",
-                (sid,),
-            )
+            if self._session_factory.is_postgres:
+                await conn.execute(
+                    "INSERT INTO chat_session_profiles(session_id) VALUES (?) "
+                    "ON CONFLICT(session_id) DO NOTHING",
+                    (sid,),
+                )
+            else:
+                await conn.execute(
+                    "INSERT OR IGNORE INTO chat_session_profiles(session_id) VALUES (?)",
+                    (sid,),
+                )
             await conn.execute(
                 "UPDATE chat_session_profiles SET catalog_state_json=?, updated_at=CURRENT_TIMESTAMP WHERE session_id=?",
                 (dump_catalog_state_json(state), sid),
@@ -74,12 +85,11 @@ class ChatSessionProfileRepository:
         conn = await self._session_factory.connect()
         try:
             await self._ensure_catalog_column(conn)
-            cur = await conn.execute(
+            row = await conn.fetchone(
                 "SELECT session_id, display_name, visitor_type, org_name, interests_json, focused_doc_ids_json "
                 "FROM chat_session_profiles WHERE session_id=? LIMIT 1",
                 (sid,),
             )
-            row = await cur.fetchone()
             if not row:
                 return None
             interests = _safe_json_obj(row["interests_json"], default={})
@@ -111,10 +121,17 @@ class ChatSessionProfileRepository:
         conn = await self._session_factory.connect()
         try:
             await self._ensure_catalog_column(conn)
-            await conn.execute(
-                "INSERT OR IGNORE INTO chat_session_profiles(session_id) VALUES (?)",
-                (sid,),
-            )
+            if self._session_factory.is_postgres:
+                await conn.execute(
+                    "INSERT INTO chat_session_profiles(session_id) VALUES (?) "
+                    "ON CONFLICT(session_id) DO NOTHING",
+                    (sid,),
+                )
+            else:
+                await conn.execute(
+                    "INSERT OR IGNORE INTO chat_session_profiles(session_id) VALUES (?)",
+                    (sid,),
+                )
             fields: List[str] = []
             values: List[Any] = []
             if display_name is not None:
@@ -195,4 +212,3 @@ def _safe_json_list(raw: Any, *, default: List[Any]) -> List[Any]:
         return v if isinstance(v, list) else list(default)
     except Exception:
         return list(default)
-

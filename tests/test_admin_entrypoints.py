@@ -30,7 +30,13 @@ def test_admin_frontend_wires_video_upload_and_listing() -> None:
 
     assert 'type="file"' in content
     assert "video/mp4,video/quicktime,video/webm" in content
+    assert "/admin-api/scene-intros" in content
+    assert "保存介绍" in content
+    assert "admin-scene-intro-textarea" in content
     assert "/admin-api/videos/upload" in content
     assert "/admin-api/videos?scene_key=" in content
+    assert "XMLHttpRequest" in content
+    assert "xhr.upload.onprogress" in content
+    assert "admin-upload-progress" in content
     assert 'method: "DELETE"' in content
     assert "/admin-api/videos/" in content

@@ -82,3 +82,21 @@ async def test_profile_extractor_does_not_treat_org_role_phrase_as_name() -> Non
     assert not upd.display_name
     assert upd.org_name == "育才中学"
     assert upd.visitor_type == "teacher"
+
+
+@pytest.mark.asyncio
+async def test_profile_extractor_does_not_treat_generic_school_teacher_as_name_or_org() -> None:
+    ex = ProfileExtractor()
+    upd = await ex.extract_update(question="我是学校老师", history=[], current_profile=None)
+    assert not upd.display_name
+    assert not upd.org_name
+    assert upd.visitor_type == "teacher"
+
+
+@pytest.mark.asyncio
+async def test_profile_extractor_does_not_treat_generic_org_teacher_as_name_or_org() -> None:
+    ex = ProfileExtractor()
+    upd = await ex.extract_update(question="我是机构老师", history=[], current_profile=None)
+    assert not upd.display_name
+    assert not upd.org_name
+    assert upd.visitor_type == "teacher"

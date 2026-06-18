@@ -305,9 +305,9 @@ async def test_deep_reader_skips_sync_vision_when_doc_has_too_many_images() -> N
 
     assert result.used is True
     assert result.debug["candidate_media_images"] == 25
-    assert result.debug["vision_prefilter_images"] == 2
+    assert result.debug["vision_prefilter_images"] == 4
     assert result.debug["vision_media_skipped"] == "too_many_media_fast_path"
-    assert len(result.media.images) == 2
+    assert len(result.media.images) == 3
 
 
 @pytest.mark.asyncio

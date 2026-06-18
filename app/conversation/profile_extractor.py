@@ -66,7 +66,21 @@ _INVALID_DISPLAY_NAME_PATTERNS: Sequence[re.Pattern[str]] = (
     re.compile(r"^[0-9]+年级$"),
     re.compile(r"^(?:软件项目|软件编程|硬件搭建|信息课|社团)$"),
     re.compile(r"^(?:给|带|做|看)(?:小学|初中|高中|低年级|中年级|高年级|低中年级|中高年级|软件项目|软件编程|硬件搭建|社团).*$"),
+    re.compile(r"^(?:学校|机构|培训机构|学校里|机构里)?(?:老师|教师|家长|学生|同学|校长|主任|负责人)$"),
 )
+
+_INVALID_ORG_VALUES = {
+    "老师",
+    "教师",
+    "家长",
+    "学生",
+    "同学",
+    "校长",
+    "主任",
+    "负责人",
+    "先生",
+    "女士",
+}
 
 
 class ProfileExtractor:
@@ -117,6 +131,8 @@ class ProfileExtractor:
         org = _pick_first_group(q, _ORG_PATTERNS)
         if org:
             org = org.strip().strip("，,。；;")
+            if org in _INVALID_ORG_VALUES:
+                org = ""
         if name:
             if re.fullmatch(r"[一-龥]", name):
                 name = f"{name}老师"
@@ -170,6 +186,8 @@ class ProfileExtractor:
                     o2 = _pick_first_group(t, _ORG_PATTERNS)
                     if o2:
                         org = o2.strip().strip("，,。；;")
+                        if org in _INVALID_ORG_VALUES:
+                            org = ""
                         if name:
                             name = _sanitize_name(name, org=org)
                 if visitor_type and name and org:

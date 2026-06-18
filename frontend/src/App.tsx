@@ -60,6 +60,14 @@ function isVisitorRoute(): boolean {
   if (typeof window === "undefined") return false;
   return window.location.pathname.startsWith("/visitor");
 }
+
+function isInactivityReminderMessage(item: ChatItem): boolean {
+  return (
+    item.isInactivityReminder === true ||
+    item.id.startsWith("inact-") ||
+    item.text === INACTIVITY_REMINDER_TEXT
+  );
+}
 const FOCUS_SCENE_ITEMS = ["人工智能通识教育", "智能招生", "跨学科项目化学习", "学校AI场景定制"] as const;
 type FocusScene = (typeof FOCUS_SCENE_ITEMS)[number];
 
@@ -68,6 +76,24 @@ const SCENE_TO_TOC_TITLE: Record<FocusScene, string> = {
   跨学科项目化学习: "跨学科项目式学习",
   智能招生: "智能招生",
   学校AI场景定制: "学校AI场景定制",
+};
+
+type AdminSceneKey = "general_ai_course" | "project_based_learning" | "smart_enrollment" | "school_ai_custom";
+
+const SCENE_TO_ADMIN_VIDEO_KEY: Record<FocusScene, AdminSceneKey> = {
+  人工智能通识教育: "general_ai_course",
+  跨学科项目化学习: "project_based_learning",
+  智能招生: "smart_enrollment",
+  学校AI场景定制: "school_ai_custom",
+};
+
+type AdminVideoPreviewAsset = {
+  id: number;
+  scene_key: AdminSceneKey;
+  scene_name?: string;
+  title?: string;
+  original_filename?: string;
+  file_url: string;
 };
 
 function resolveSceneForFriendV5Tag(tag: string, fallback: FocusScene): FocusScene {
@@ -90,9 +116,32 @@ function resolveSceneForFriendV5Tag(tag: string, fallback: FocusScene): FocusSce
   return fallback;
 }
 
+function isFriendV5ExploreProductTag(tag: string): boolean {
+  return /^想了解一下(.+?)产品？$/.test((tag || "").trim());
+}
+
+function friendV5VideoIntroForScene(scene: FocusScene): string {
+  return `可以先看这段${SCENE_TO_TOC_TITLE[scene]}的演示视频，直观感受一下实际效果。`;
+}
+
 function isFriendV5TrialApplyTag(tag: string) {
   const normalized = tag.replace(/[\s？?，,。！!、：:；;]/g, "");
   return normalized.includes("申请测试账号") || (normalized.includes("试一试") && normalized.includes("产品"));
+}
+
+function friendV5TagDisplayText(tag: string): string {
+  const normalized = tag.replace(/[\s「」『』《》【】\[\]（）()、，,。！!？?:：;；\-_\\/|]/g, "");
+  let label = tag.trim();
+  if (normalized.includes("价格") || normalized.includes("报价") || normalized.includes("费用")) {
+    label = "想了解一下价格？";
+  } else if (normalized.includes("优秀案例库") || normalized.includes("产品案例") || normalized.includes("案例库")) {
+    label = "想看看优秀案例库？";
+  } else if (normalized.includes("申请测试账号") || (normalized.includes("试一试") && normalized.includes("产品"))) {
+    label = "想申请测试账号，试试产品？";
+  } else if (normalized.includes("使用指南") || normalized.includes("操作说明")) {
+    label = "想看看使用指南？";
+  }
+  return label;
 }
 
 function renderFocusSceneIcon(scene: FocusScene) {
@@ -263,7 +312,12 @@ type ChatItem = {
   sources?: FriendV5SourceItem[];
   /** V5：搜索关键词 */
   searchKeywords?: string[];
+  /** V5：部分场景需要先看视频，再读文字 */
+  mediaDisplayMode?: "before_answer" | "after_answer";
+  mediaIntro?: string;
   isFriendV5?: boolean;
+  /** 访客无互动定时提醒，不计入新一轮助手回复 */
+  isInactivityReminder?: boolean;
 };
 
 type FriendV5SourceItem = {
@@ -434,6 +488,16 @@ function parseChatMedia(input: unknown): ChatMediaBundle | undefined {
   const videos = normalize(raw.videos);
   if (images.length === 0 && videos.length === 0) return undefined;
   return { images, videos };
+}
+
+function parseFriendV5MediaDisplay(debug: Record<string, unknown> | undefined): {
+  mode?: "before_answer" | "after_answer";
+  intro?: string;
+} {
+  const rawMode = typeof debug?.media_display_mode === "string" ? debug.media_display_mode : "";
+  const mode = rawMode === "before_answer" || rawMode === "after_answer" ? rawMode : undefined;
+  const intro = typeof debug?.media_intro === "string" ? debug.media_intro.trim() : "";
+  return { mode, intro };
 }
 
 function parseFriendV5Tags(input: unknown): string[] {
@@ -609,6 +673,17 @@ function renderInlineMediaCard(item: ChatMediaItem, kind: "image" | "video", key
   );
 }
 
+function renderInlineMediaBlock(item: ChatItem, placement: "lead" | "tail") {
+  if (!item.media) return null;
+  const videos = item.media.videos.map((video, idx) => renderInlineMediaCard(video, "video", `${item.id}-video-${idx}`));
+  const images = item.media.images.map((image, idx) => renderInlineMediaCard(image, "image", `${item.id}-img-${idx}`));
+  return (
+    <div className={`msg-inline-media msg-inline-media--${placement}`}>
+      {placement === "lead" ? [...videos, ...images] : [...images, ...videos]}
+    </div>
+  );
+}
+
 function renderFriendV5Sources(sources: FriendV5SourceItem[] | undefined, searchKeywords: string[] | undefined) {
   if (!sources || sources.length === 0) return null;
   const normalizedSources = sources
@@ -704,6 +779,20 @@ const INVALID_TRIAL_APPLY_NAME_PATTERNS = [
   /^[0-9]+年级$/,
   /^(?:软件项目|软件编程|硬件搭建|信息课|社团)$/,
   /^(?:给|带|做|看)(?:小学|初中|高中|低年级|中年级|高年级|低中年级|中高年级|软件项目|软件编程|硬件搭建|社团).*$/,
+  /^(?:学校|机构|培训机构|学校里|机构里)?(?:老师|教师|家长|学生|同学|校长|主任|负责人)$/,
+];
+
+const INVALID_TRIAL_APPLY_ORG_VALUES = [
+  "老师",
+  "教师",
+  "家长",
+  "学生",
+  "同学",
+  "校长",
+  "主任",
+  "负责人",
+  "先生",
+  "女士",
 ];
 
 function sanitizeTrialApplyNameCandidate(raw: string): string {
@@ -714,6 +803,13 @@ function sanitizeTrialApplyNameCandidate(raw: string): string {
   if (["老师", "教师", "家长", "学生", "同学", "校长", "先生", "女士"].includes(name)) return "";
   if (INVALID_TRIAL_APPLY_NAME_PATTERNS.some((pattern) => pattern.test(name))) return "";
   return name.slice(0, 24);
+}
+
+function sanitizeTrialApplyOrgCandidate(raw: string): string {
+  const org = (raw || "").trim().replace(/^[，,。；;：:\s]+|[，,。；;：:\s]+$/g, "");
+  if (!org) return "";
+  if (INVALID_TRIAL_APPLY_ORG_VALUES.includes(org)) return "";
+  return org.slice(0, 40);
 }
 
 function extractTrialApplyName(userText: string): string {
@@ -735,8 +831,9 @@ function extractTrialApplyDraft(session: SessionState | null, fallbackProduct: s
     .join("\n");
   const phone = userText.match(/1[3-9]\d{9}/)?.[0] || "";
   const name = extractTrialApplyName(userText);
-  const org =
-    userText.match(/(?:单位是|学校是|来自|在)\s*([^，,。；;\n]{2,40}(?:学校|学院|机构|中心|公司|集团|教育局)?)/)?.[1] || "";
+  const org = sanitizeTrialApplyOrgCandidate(
+    userText.match(/(?:单位是|学校是|来自|在)\s*([^，,。；;\n]{2,40}(?:学校|学院|机构|中心|公司|集团|教育局)?)/)?.[1] || "",
+  );
   const concern =
     [...(session?.messages || [])]
       .reverse()
@@ -828,6 +925,7 @@ function refreshVisitorWelcomeText(messages: ChatItem[]): ChatItem[] {
       (
         message.text.includes("我想先了解一下：您是学校或机构负责人、老师、学生，还是家长呢？") ||
         message.text.includes("您好，欢迎了解有为人工智能教育平台。") ||
+        message.text.includes("您好，欢迎了解人工智能教育平台。") ||
         message.text.includes("我可以帮您介绍平台功能、适用场景、使用方式和案例。")
       )
     ) {
@@ -1062,6 +1160,7 @@ function App() {
   const [trialApplyOrg, setTrialApplyOrg] = useState("");
   const [trialApplyContact, setTrialApplyContact] = useState("");
   const [trialApplySuccess, setTrialApplySuccess] = useState(false);
+  const [visitorMobileSceneOpen, setVisitorMobileSceneOpen] = useState(false);
   const [welcomeHeroTitle, setWelcomeHeroTitle] = useState("");
   const controllerRef = useRef<AbortController | null>(null);
   /** 用户点击「停止」触发的 abort，与超时/空闲 abort 区分 */
@@ -1074,6 +1173,7 @@ function App() {
   const resetPendingRef = useRef<Map<string, Promise<void>>>(new Map());
   const sessionTitleSeqRef = useRef<number | null>(null);
   const v5PageRefreshInitDoneRef = useRef(false);
+  const adminVideoPreviewCacheRef = useRef<Partial<Record<FocusScene, ChatMediaBundle | null>>>({});
   const [inactivityEpoch, setInactivityEpoch] = useState(0);
   const messageIdSeqRef = useRef(0);
   const floatingInitDoneRef = useRef(false);
@@ -1213,7 +1313,7 @@ function App() {
                 inactivityPromptSent: true,
                 messages: [
                   ...sess.messages,
-                  { id: aid, role: "assistant", text: INACTIVITY_REMINDER_TEXT },
+                  { id: aid, role: "assistant", text: INACTIVITY_REMINDER_TEXT, isInactivityReminder: true },
                 ],
               },
         );
@@ -1394,10 +1494,14 @@ function App() {
   }, [chatV5Enabled]);
 
   const chatItems = useMemo(() => activeSession?.messages ?? [], [activeSession]);
-  // 仅最新一轮助手回复展示推荐标签，进入下一轮后旧标签不再显示
-  const latestAssistantId = useMemo(() => {
+  // 仅最新一轮助手回复展示推荐标签；无互动定时提醒不算新一轮
+  const tagDisplayAssistantId = useMemo(() => {
     for (let i = chatItems.length - 1; i >= 0; i -= 1) {
-      if (chatItems[i].role === "assistant") return chatItems[i].id;
+      const item = chatItems[i];
+      if (item.role !== "assistant") continue;
+      if (isInactivityReminderMessage(item)) continue;
+      if (item.isFriendV5 && item.tags && item.tags.length > 0) return item.id;
+      return null;
     }
     return null;
   }, [chatItems]);
@@ -1839,6 +1943,76 @@ function App() {
     }
   };
 
+  const loadAdminSceneVideoPreview = async (scene: FocusScene): Promise<ChatMediaBundle | null> => {
+    const cached = adminVideoPreviewCacheRef.current[scene];
+    if (cached !== undefined) return cached;
+    const sceneKey = SCENE_TO_ADMIN_VIDEO_KEY[scene];
+    try {
+      const resp = await fetch(`/admin-api/videos?scene_key=${encodeURIComponent(sceneKey)}`);
+      if (!resp.ok) {
+        adminVideoPreviewCacheRef.current[scene] = null;
+        return null;
+      }
+      const data = (await resp.json()) as { items?: AdminVideoPreviewAsset[] };
+      const video = (data.items || []).find((item) => item.file_url);
+      if (!video) {
+        adminVideoPreviewCacheRef.current[scene] = null;
+        return null;
+      }
+      const media: ChatMediaBundle = {
+        images: [],
+        videos: [
+          {
+            url: video.file_url,
+            title: video.title || video.original_filename || "",
+            doc_title: video.scene_name || SCENE_TO_TOC_TITLE[scene],
+            doc_id: `admin_video:${video.id}`,
+            summary: "",
+          },
+        ],
+      };
+      adminVideoPreviewCacheRef.current[scene] = media;
+      return media;
+    } catch {
+      adminVideoPreviewCacheRef.current[scene] = null;
+      return null;
+    }
+  };
+
+  const applyImmediateAdminVideoPreview = async (
+    scene: FocusScene,
+    sessionId: string,
+    assistantId: string,
+  ) => {
+    const media = await loadAdminSceneVideoPreview(scene);
+    if (!media) return;
+    try {
+      setSessions((prev) =>
+        prev.map((session) =>
+          session.id === sessionId
+            ? {
+                ...touchSession(session),
+                messages: session.messages.map((item) =>
+                  item.id === assistantId
+                    ? {
+                        ...item,
+                        media,
+                        mediaDisplayMode: "before_answer",
+                        mediaIntro: friendV5VideoIntroForScene(scene),
+                        isFriendV5: true,
+                        pendingComfortMessage: undefined,
+                      }
+                    : item
+                ),
+              }
+            : session
+        )
+      );
+    } catch {
+      // 视频只是首屏体验增强，失败时继续走后端流式回答。
+    }
+  };
+
   const askQuestion = async (
     presetQuestion?: string,
     bypassSceneGate = false,
@@ -1889,6 +2063,13 @@ function App() {
     setQuestion("");
     const docsForRequest = selectedYuqueDocs.filter((d) => d.docId >= 1);
     setSelectedYuqueDocs([]);
+    const shouldShowImmediateSceneVideo =
+      isFriendV5Request &&
+      (friendV5TriggerType === "scene" || (friendV5TriggerType === "tag" && isFriendV5ExploreProductTag(text)));
+    const cachedSceneVideo =
+      shouldShowImmediateSceneVideo && adminVideoPreviewCacheRef.current[friendV5Scene]
+        ? adminVideoPreviewCacheRef.current[friendV5Scene] || undefined
+        : undefined;
     const streamPathForMeta = isFriendV5Request
       ? "/chat/v5/stream"
       : chatV4Enabled
@@ -1915,6 +2096,9 @@ function App() {
         id: assistantId,
         role: "assistant",
         text: "",
+        media: cachedSceneVideo,
+        mediaDisplayMode: cachedSceneVideo ? "before_answer" : undefined,
+        mediaIntro: cachedSceneVideo ? friendV5VideoIntroForScene(friendV5Scene) : undefined,
         isFriendV5: isFriendV5Request,
         streamStage: visitorStreamUi
           ? VISITOR_STREAM_STAGE_TEXT
@@ -1952,6 +2136,10 @@ function App() {
         ...next,
       ];
     });
+
+    if (shouldShowImmediateSceneVideo && !cachedSceneVideo) {
+      void applyImmediateAdminVideoPreview(friendV5Scene, sessionId, assistantId);
+    }
 
     const controller = new AbortController();
     controllerRef.current = controller;
@@ -2016,12 +2204,40 @@ function App() {
       );
     };
 
+    const applyMediaPreviewPayload = (payload: Record<string, unknown>) => {
+      const media = parseChatMedia(payload.media);
+      if (!media) return;
+      const mediaDisplay = parseFriendV5MediaDisplay(payload);
+      setSessions((prev) =>
+        prev.map((session) =>
+          session.id === sessionId
+            ? {
+                ...touchSession(session),
+                messages: session.messages.map((item) =>
+                  item.id === assistantId
+                    ? {
+                        ...item,
+                        media,
+                        mediaDisplayMode: mediaDisplay.mode,
+                        mediaIntro: mediaDisplay.intro,
+                        isFriendV5: isFriendV5Request,
+                        pendingComfortMessage: undefined,
+                      }
+                    : item
+                ),
+              }
+            : session
+        )
+      );
+    };
+
     const applyDonePayload = (payload: Record<string, unknown>) => {
       const dbg = payload.debug as Record<string, unknown> | undefined;
       const media = parseChatMedia(payload.media);
       const friendTags = isFriendV5Request ? parseFriendV5Tags(payload.tags) : [];
       const friendSources = isFriendV5Request ? parseFriendV5Sources(payload.sources) : [];
       const friendSearchKw = isFriendV5Request ? parseFriendV5SearchKeywords(payload.search_keywords) : [];
+      const friendMediaDisplay = isFriendV5Request ? parseFriendV5MediaDisplay(dbg) : {};
       if (isFriendV5Request && typeof window !== "undefined") {
         console.log("[V5 done]", { sources: payload.sources, parsed: friendSources, search_keywords: friendSearchKw });
       }
@@ -2058,6 +2274,8 @@ function App() {
                         tags: friendTags,
                         sources: friendSources,
                         searchKeywords: friendSearchKw,
+                        mediaDisplayMode: friendMediaDisplay.mode,
+                        mediaIntro: friendMediaDisplay.intro,
                         isFriendV5: isFriendV5Request,
                         streamStage: undefined,
                         streamElapsedSec: undefined,
@@ -2212,6 +2430,9 @@ function App() {
                   : session
               )
             );
+          } else if (parsed.event === "media_preview") {
+            const payload = JSON.parse(parsed.data || "{}") as Record<string, unknown>;
+            applyMediaPreviewPayload(payload);
           } else if (parsed.event === "done") {
             doneReceived = true;
             const payload = JSON.parse(parsed.data || "{}") as Record<string, unknown>;
@@ -2333,17 +2554,19 @@ function App() {
 
   const handleFocusSceneShortcut = (scene: (typeof FOCUS_SCENE_ITEMS)[number]) => {
     if (isStreaming) return;
+    setVisitorMobileSceneOpen(false);
     setActiveFocusScene(scene);
     if (IS_VISITOR_ROUTE) {
-      setHasPickedFocusScene(false);
+      setHasPickedFocusScene(true);
     } else {
       setHasPickedFocusScene(true);
     }
     setSelectedGuideNodeId(null);
     setSelectedYuqueDocs([]);
-    if (IS_VISITOR_ROUTE) return;
+    if (IS_VISITOR_ROUTE) void loadAdminSceneVideoPreview(scene);
     if (chatV5Enabled) {
       void askQuestion(scene, true, {
+        hideUserMessage: false,
         triggerType: "scene",
         scene,
       });
@@ -2485,7 +2708,7 @@ function App() {
       <div
         className={`app-shell${
           IS_VISITOR_ROUTE
-            ? " app-shell--visitor"
+            ? ` app-shell--visitor${visitorChatVisible ? " app-shell--visitor-chat-active" : ""}${visitorMobileSceneOpen ? " app-shell--visitor-scene-open" : ""}`
             : !SHOW_DEV_PANEL
               ? " app-shell--no-dev"
               : devSidebarCollapsed
@@ -2498,16 +2721,37 @@ function App() {
             <div className="consult-top-brand">
               <img className="consult-top-brand-image" src="/youwei-logo.png" alt="有为 Logo" />
               <span className="consult-top-brand-divider" aria-hidden="true" />
-              <span className="consult-top-brand-title">有为人工智能教育平台</span>
+              <span className="consult-top-brand-title">人工智能教育平台</span>
             </div>
           </div>
         </header>
 
         <div className="app-body">
+          {IS_VISITOR_ROUTE && visitorMobileSceneOpen ? (
+            <button
+              type="button"
+              className="visitor-scene-overlay-backdrop"
+              aria-label="关闭场景选择"
+              onClick={() => setVisitorMobileSceneOpen(false)}
+            />
+          ) : null}
           {IS_VISITOR_ROUTE ? (
-            <div className="visitor-scene-column" aria-label="你最关注的场景">
+            <div
+              className={`visitor-scene-column${visitorMobileSceneOpen ? " visitor-scene-column--overlay" : ""}`}
+              aria-label="你关注的场景"
+            >
+              {visitorMobileSceneOpen ? (
+                <button
+                  type="button"
+                  className="visitor-scene-overlay-close"
+                  aria-label="关闭场景选择"
+                  onClick={() => setVisitorMobileSceneOpen(false)}
+                >
+                  ×
+                </button>
+              ) : null}
               <div className="focus-scene-title-card focus-scene-title-card--visitor">
-                <div className="focus-scene-title">你最关注的场景</div>
+                <div className="focus-scene-title">你关注的场景</div>
               </div>
               <aside className="focus-scene-sidebar focus-scene-sidebar--visitor">
                 <div className="focus-scene-list">
@@ -2528,34 +2772,12 @@ function App() {
                     </button>
                   ))}
                 </div>
-                <div className="focus-scene-footer">
-                  <button
-                    type="button"
-                    className="focus-scene-consult-btn"
-                    onClick={() => {
-                      if (!activeFocusScene || isStreaming) return;
-                      setHasPickedFocusScene(true);
-                      if (chatV5Enabled) {
-                        void askQuestion(activeFocusScene, true, {
-                          hideUserMessage: false,
-                          triggerType: "scene",
-                          scene: activeFocusScene,
-                        });
-                        return;
-                      }
-                      void askQuestion(`我想要咨询${activeFocusScene}的内容，请帮我解答。`, true, { hideUserMessage: false });
-                    }}
-                    disabled={!activeFocusScene || isStreaming}
-                  >
-                    咨询
-                  </button>
-                </div>
               </aside>
             </div>
           ) : (
-            <aside className="focus-scene-sidebar" aria-label="你最关注的场景">
+            <aside className="focus-scene-sidebar" aria-label="你关注的场景">
               <div className="focus-scene-title-card">
-                <div className="focus-scene-title">你最关注的场景</div>
+                <div className="focus-scene-title">你关注的场景</div>
               </div>
               <div className="focus-scene-list">
                 {FOCUS_SCENE_ITEMS.map((scene) => (
@@ -3141,6 +3363,22 @@ function App() {
             <div
               className={`chat-main${IS_VISITOR_ROUTE ? " chat-main--visitor-reveal" : ""}${chatHasThreadContent ? " chat-main--content-fit" : ""}${selectedYuqueDocs.length > 0 ? " chat-main--has-selected-docs" : ""}`}
             >
+              {IS_VISITOR_ROUTE && activeFocusScene ? (
+                <div className="visitor-mobile-scene-bar">
+                  <div className="visitor-mobile-scene-bar-main">
+                    <span className="visitor-mobile-scene-bar-label">当前场景</span>
+                    <span className="visitor-mobile-scene-bar-scene">{activeFocusScene}</span>
+                  </div>
+                  <button
+                    type="button"
+                    className="visitor-mobile-scene-bar-switch"
+                    onClick={() => setVisitorMobileSceneOpen(true)}
+                    disabled={isStreaming}
+                  >
+                    换场景
+                  </button>
+                </div>
+              ) : null}
               <div
                 className={`chat-content-inner chat-body-inner${showWelcomeHero ? "" : " chat-body-inner--scroll"}${chatHasThreadContent ? " chat-body-inner--thread-active" : ""}${IS_VISITOR_ROUTE && !assistantHasRenderedOutput ? " chat-body-inner--waiting-assistant" : ""}`}
               >
@@ -3200,6 +3438,11 @@ function App() {
                         }
                       }
                       const hasBubbleContent = displayText.trim().length > 0 || hasInlineMedia;
+                      const shouldLeadWithMedia =
+                        item.role === "assistant" &&
+                        item.isFriendV5 &&
+                        item.mediaDisplayMode === "before_answer" &&
+                        hasInlineMedia;
                       if (item.hidden) return null;
                       return (
                       <div className={`msg ${item.role}`} key={item.id}>
@@ -3234,33 +3477,38 @@ function App() {
                           ) : null}
                           {hasBubbleContent ? (
                             <div className="bubble">
-                              {displayText.trim() ? (
-                                isStreaming && item.role === "assistant" && item.id === streamingAssistantId ? (
-                                  <div className="bubble-stream-text">{displayText}</div>
-                                ) : hasInlineMedia ? (
-                                  <div className="msg-rich-content">
+                              {hasInlineMedia ? (
+                                <div className="msg-rich-content">
+                                  {shouldLeadWithMedia ? (
+                                    <>
+                                      {item.mediaIntro ? <div className="msg-media-intro">{item.mediaIntro}</div> : null}
+                                      {renderInlineMediaBlock(item, "lead")}
+                                      {isStreaming && item.role === "assistant" && item.id === streamingAssistantId ? (
+                                        <div className="stream-stage stream-stage--pending msg-media-stream-stage">
+                                          {isVisitorRoute() ? VISITOR_STREAM_STAGE_TEXT : item.streamStage || "小为正在看相关资料..."}
+                                        </div>
+                                      ) : null}
+                                    </>
+                                  ) : null}
+                                  {displayText.trim() ? (
                                     <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
                                       {normalizeMarkdownAutolinks(displayText)}
                                     </ReactMarkdown>
-                                    <div className="msg-inline-media msg-inline-media--tail">
-                                      {item.media?.images.map((image, idx) => renderInlineMediaCard(image, "image", `${item.id}-img-${idx}`))}
-                                      {item.media?.videos.map((video, idx) => renderInlineMediaCard(video, "video", `${item.id}-video-${idx}`))}
-                                    </div>
-                                  </div>
+                                  ) : null}
+                                  {shouldLeadWithMedia ? null : renderInlineMediaBlock(item, "tail")}
+                                </div>
+                              ) : displayText.trim() ? (
+                                isStreaming && item.role === "assistant" && item.id === streamingAssistantId ? (
+                                  <div className="bubble-stream-text">{displayText}</div>
                                 ) : (
                                   <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
                                     {normalizeMarkdownAutolinks(displayText)}
                                   </ReactMarkdown>
                                 )
-                              ) : hasInlineMedia ? (
-                                <div className="msg-inline-media msg-inline-media--tail">
-                                  {item.media?.images.map((image, idx) => renderInlineMediaCard(image, "image", `${item.id}-img-${idx}`))}
-                                  {item.media?.videos.map((video, idx) => renderInlineMediaCard(video, "video", `${item.id}-video-${idx}`))}
-                                </div>
                               ) : null}
                             </div>
                           ) : null}
-                          {item.role === "assistant" && item.isFriendV5 && item.id === latestAssistantId && item.tags && item.tags.length > 0 ? (
+                          {item.role === "assistant" && item.isFriendV5 && item.id === tagDisplayAssistantId && item.tags && item.tags.length > 0 ? (
                             <div className="friend-v5-tags" aria-label="小为推荐的继续了解方向">
                               {item.tags.map((tag) => (
                                 <button
@@ -3280,7 +3528,7 @@ function App() {
                                   }}
                                   disabled={isStreaming}
                                 >
-                                  {tag}
+                                  {friendV5TagDisplayText(tag)}
                                 </button>
                               ))}
                             </div>

@@ -20,8 +20,6 @@ def detect_visitor_type(text: str) -> VisitorType:
         return "unknown"
     low = t.lower()
 
-    if re.search(r"(机构|培训|学校|校长|园长|负责人|采购|校方)", t):
-        return "institution_decision_maker"
     if "老师" in t or "教师" in t or "班主任" in t:
         return "teacher"
     if "家长" in t or "孩子" in t or "小孩" in t or "学生家" in t:
@@ -32,6 +30,8 @@ def detect_visitor_type(text: str) -> VisitorType:
         or ("student" in low and "家长" not in t and len(t) < 24)
     ):
         return "student"
+    if re.search(r"(机构|培训|学校|校长|园长|负责人|采购|校方)", t):
+        return "institution_decision_maker"
 
     if any(k in t for k in ("了解一下", "随便看看", "路过", "看看")):
         return "other"

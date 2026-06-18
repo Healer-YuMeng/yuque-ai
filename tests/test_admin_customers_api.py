@@ -26,7 +26,9 @@ def build_admin_customer_test_client(tmp_path: Path) -> TestClient:
         app.state.admin_customer_repository = customer_repo
 
     app.include_router(router)
-    return TestClient(app)
+    client = TestClient(app)
+    client.post("/admin-api/auth/login", json={"username": "admin", "password": "admin123456"})
+    return client
 
 
 def _trial_apply_interests(*, trial_issued: bool = True, username: str = "") -> dict:
@@ -97,6 +99,36 @@ def test_list_customers_only_shows_trial_apply_submissions(tmp_path: Path) -> No
         assert payload["page_size"] == 10
 
 
+def test_list_customers_includes_leads_even_without_trial_apply(tmp_path: Path) -> None:
+    client = build_admin_customer_test_client(tmp_path)
+    session_factory = DatabaseSessionFactory(str(tmp_path / "admin_customers.db"))
+
+    with client:
+        async def seed_lead_only() -> None:
+            conn = await session_factory.connect()
+            try:
+                await conn.execute(
+                    "INSERT INTO chat_session_profiles(session_id, display_name, org_name, interests_json) VALUES (?, ?, ?, ?)",
+                    ("sess_lead_only", "王老师", "创新学校", json.dumps({}, ensure_ascii=False)),
+                )
+                await conn.execute(
+                    "INSERT INTO lead_captures(session_id, contact_type, contact_value, visitor_type) VALUES (?, ?, ?, ?)",
+                    ("sess_lead_only", "phone", "13900001111", None),
+                )
+                await conn.commit()
+            finally:
+                await conn.close()
+
+        asyncio.run(seed_lead_only())
+
+        list_resp = client.get("/admin-api/customers")
+        assert list_resp.status_code == 200
+        payload = list_resp.json()
+        assert payload["total"] == 1
+        assert payload["items"][0]["display_name"] == "王老师"
+        assert payload["items"][0]["contact"] == "13900001111"
+
+
 def test_list_customers_pagination(tmp_path: Path) -> None:
     client = build_admin_customer_test_client(tmp_path)
     session_factory = DatabaseSessionFactory(str(tmp_path / "admin_customers.db"))
@@ -163,6 +195,23 @@ def test_delete_customer_hides_from_list(tmp_path: Path) -> None:
     with client:
         asyncio.run(_seed_trial_customer(session_factory, session_id="sess_delete_1", display_name="待删客户", org_name="测试单位"))
 
+        async def seed_chat_history() -> None:
+            conn = await session_factory.connect()
+            try:
+                await conn.execute(
+                    "INSERT INTO chat_sessions(session_id, chat_mode, advisor_role) VALUES (?, ?, ?)",
+                    ("sess_delete_1", "friend_v5", "friend"),
+                )
+                await conn.execute(
+                    "INSERT INTO chat_messages(session_id, role, content) VALUES (?, ?, ?)",
+                    ("sess_delete_1", "user", "我来咨询一下"),
+                )
+                await conn.commit()
+            finally:
+                await conn.close()
+
+        asyncio.run(seed_chat_history())
+
         delete_resp = client.delete("/admin-api/customers/sess_delete_1")
         assert delete_resp.status_code == 200
         assert delete_resp.json()["ok"] is True
@@ -170,6 +219,30 @@ def test_delete_customer_hides_from_list(tmp_path: Path) -> None:
         list_resp = client.get("/admin-api/customers")
         assert list_resp.status_code == 200
         assert list_resp.json()["total"] == 0
+
+        async def assert_hard_deleted() -> None:
+            conn = await session_factory.connect()
+            try:
+                assert await conn.fetchval(
+                    "SELECT COUNT(*) FROM lead_captures WHERE session_id=?",
+                    ("sess_delete_1",),
+                ) == 0
+                assert await conn.fetchval(
+                    "SELECT COUNT(*) FROM chat_session_profiles WHERE session_id=?",
+                    ("sess_delete_1",),
+                ) == 0
+                assert await conn.fetchval(
+                    "SELECT COUNT(*) FROM chat_messages WHERE session_id=?",
+                    ("sess_delete_1",),
+                ) == 0
+                assert await conn.fetchval(
+                    "SELECT COUNT(*) FROM chat_sessions WHERE session_id=?",
+                    ("sess_delete_1",),
+                ) == 0
+            finally:
+                await conn.close()
+
+        asyncio.run(assert_hard_deleted())
 
 
 def test_update_follow_up_status(tmp_path: Path) -> None:

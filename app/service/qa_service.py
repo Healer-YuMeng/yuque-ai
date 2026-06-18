@@ -185,6 +185,7 @@ class QAService:
         chat_session_repository: ChatSessionRepository,
         chat_session_profile_repository: ChatSessionProfileRepository,
         admin_video_asset_repository: Optional[AdminVideoAssetRepository] = None,
+        admin_scene_intro_repository: Optional[Any] = None,
     ) -> None:
         self._yuque_loader = yuque_loader
         self._vector_store = vector_store
@@ -193,6 +194,7 @@ class QAService:
         self._lead_capture_repository = lead_capture_repository
         self._chat_session_repository = chat_session_repository
         self._admin_video_asset_repository = admin_video_asset_repository
+        self._admin_scene_intro_repository = admin_scene_intro_repository
         self._splitter = RecursiveTextSplitter(
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap,
@@ -768,7 +770,7 @@ class QAService:
             generation_url=settings.chat_v5_generation_url,
             search_strategy=settings.chat_v5_search_strategy,
             max_tokens=settings.chat_v5_max_tokens,
-            require_web_sources=settings.chat_v5_require_web_sources,
+            require_web_sources=(settings.chat_v5_require_web_sources and settings.chat_v5_web_search_enabled),
         )
         scene_query_rewriter = FriendV5SceneQueryRewriter(
             api_key=api_key,
@@ -797,6 +799,7 @@ class QAService:
             scene_query_rewriter=scene_query_rewriter,
             yuque_deep_reader=yuque_deep_reader,
             admin_video_repository=self._admin_video_asset_repository,
+            admin_scene_intro_repository=self._admin_scene_intro_repository,
             toc_nodes=self._guide_toc_nodes,
             yuque_url_limit=settings.chat_v5_yuque_url_limit,
             require_web_sources=settings.chat_v5_require_web_sources,

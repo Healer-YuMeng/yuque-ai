@@ -48,8 +48,14 @@ class Settings:
     data_dir: Path = BASE_DIR / "data_runtime"
     vector_dir: Path = BASE_DIR / "data_runtime" / "vector_store"
     sqlite_path: Path = BASE_DIR / "data_runtime" / "rag_mvp.db"
+    database_url: str = _env("DATABASE_URL", str(BASE_DIR / "data_runtime" / "rag_mvp.db"))
     admin_upload_dir: Path = BASE_DIR / "data_runtime" / "admin_uploads"
     admin_video_max_bytes: int = _env_int("ADMIN_VIDEO_MAX_BYTES", 500 * 1024 * 1024)
+    admin_auth_enabled: bool = _env_bool("ADMIN_AUTH_ENABLED", True)
+    admin_username: str = _env("ADMIN_USERNAME", "admin")
+    admin_password: str = _env("ADMIN_PASSWORD", "admin123456")
+    admin_session_secret: str = _env("ADMIN_SESSION_SECRET", _env("SECRET_KEY", "dev-admin-session-secret"))
+    admin_session_max_age_s: int = _env_int("ADMIN_SESSION_MAX_AGE_S", 7 * 24 * 60 * 60)
 
     yuque_token: str = _env("YUQUE_TOKEN")
     yuque_token_secondary: str = _env("YUQUE_TOKEN_SECONDARY", "")
@@ -129,7 +135,7 @@ class Settings:
 
     # 语雀多媒体：独立多模态识读（OpenAI 兼容）+ 主模型写回答；可接阿里百炼视觉模型
     vision_enabled: bool = _env_bool("VISION_ENABLED", False)
-    vision_model: str = _env("VISION_MODEL", "qwen3.7-plus")
+    vision_model: str = _env("VISION_MODEL", "qwen-vl-max")
     vision_max_images: int = _env_int("VISION_MAX_IMAGES", 4)
     vision_max_videos: int = _env_int("VISION_MAX_VIDEOS", 1)
     vision_video_fps: int = _env_int("VISION_VIDEO_FPS", 2)
@@ -161,6 +167,7 @@ class Settings:
     chat_v5_yuque_deep_read_enabled: bool = _env_bool("CHAT_V5_YUQUE_DEEP_READ_ENABLED", False)
     chat_v5_max_images: int = _env_int("CHAT_V5_MAX_IMAGES", 4)
     chat_v5_max_videos: int = _env_int("CHAT_V5_MAX_VIDEOS", 1)
+    chat_v5_web_search_enabled: bool = _env_bool("CHAT_V5_WEB_SEARCH_ENABLED", True)
     chat_v5_require_web_sources: bool = _env_bool("CHAT_V5_REQUIRE_WEB_SOURCES", True)
     chat_v5_generation_url: str = _env(
         "CHAT_V5_GENERATION_URL",
