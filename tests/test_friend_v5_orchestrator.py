@@ -15,6 +15,7 @@ from app.service.qa_service import QAService
 from app.service.friend_dialog_orchestrator_v5 import (
     FriendDialogOrchestratorV5,
     _CASE_KB_FALLBACK_ANSWER,
+    _public_yuque_share_url_for_focus,
 )
 from app.service.friend_v5_tags import (
     case_tag_for_scene,
@@ -24,11 +25,31 @@ from app.service.friend_v5_tags import (
 )
 from app.service.friend_v5_yuque_deep_reader import FriendV5YuqueDeepReadResult
 
+YUQUE_SHARED_AI_COURSE_URL = (
+    "https://www.yuque.com/suesun-yb1bi/sspenu/sbdx665n47rz9rt5?singleDoc#%20《人工智能通识课程》"
+)
+YUQUE_SHARED_PBL_GUIDE_URL = (
+    "https://www.yuque.com/suesun-yb1bi/sspenu/dl4rxzdb0ahgq42n?singleDoc#%20《跨学科项目式学习》"
+)
+YUQUE_SHARED_SMART_ENROLLMENT_GUIDE_URL = (
+    "https://www.yuque.com/suesun-yb1bi/sspenu/pmg3pix4w4e6g1zd?singleDoc#%20《智能招生》"
+)
+YUQUE_SHARED_AI_CASE_URL = (
+    "https://www.yuque.com/suesun-yb1bi/sspenu/pynfez9lydaxq7gg?singleDoc#%20《人工智能通识课程》"
+)
+YUQUE_SHARED_PBL_CASE_URL = (
+    "https://www.yuque.com/suesun-yb1bi/sspenu/ztzk0v4ggl934d86?singleDoc#%20《跨学科项目式学习》"
+)
+YUQUE_SHARED_CERTIFICATION_CASE_URL = (
+    "https://www.yuque.com/suesun-yb1bi/sspenu/kfuc54vihosyzlvo?singleDoc#%20《相关赛事及认证》"
+)
+
 
 @dataclass
 class _FakeProfile:
     display_name: str = ""
     org_name: str = ""
+    visitor_type: str = ""
     interests: dict[str, Any] | None = None
 
 
@@ -45,6 +66,7 @@ class _FakeProfileRepo:
         self.profile = _FakeProfile(
             display_name=kwargs.get("display_name") or self.profile.display_name,
             org_name=kwargs.get("org_name") or self.profile.org_name,
+            visitor_type=kwargs.get("visitor_type") or self.profile.visitor_type,
             interests=kwargs.get("interests") or self.profile.interests,
         )
 
@@ -190,6 +212,31 @@ class _FakeAdminVideoRepo:
         return [_Row()]
 
 
+class _FakeAdminSceneIntroRepo:
+    def __init__(
+        self,
+        *,
+        intro_text: str = "这是后台维护的场景介绍。",
+        decision_intro_text: str = "",
+        user_intro_text: str = "",
+    ) -> None:
+        self.calls: list[str] = []
+        self.intro_text = intro_text
+        self.decision_intro_text = decision_intro_text
+        self.user_intro_text = user_intro_text
+
+    async def get_intro(self, *, scene_key: str):
+        self.calls.append(scene_key)
+
+        class _Row:
+            def __init__(self, intro_text: str, decision_intro_text: str, user_intro_text: str) -> None:
+                self.intro_text = intro_text
+                self.decision_intro_text = decision_intro_text
+                self.user_intro_text = user_intro_text
+
+        return _Row(self.intro_text, self.decision_intro_text, self.user_intro_text)
+
+
 @dataclass
 class _FakeTocNode:
     uuid: str
@@ -275,6 +322,34 @@ _FAKE_CASE_TOC_NODES = [
     {"uuid": "case-pbl", "title": "跨学科项目式学习", "level": 3, "parent_uuid": "case-library", "node_type": "doc"},
     {"uuid": "case-representative", "title": "代表性案例", "level": 3, "parent_uuid": "case-library", "node_type": "doc"},
 ]
+
+
+def test_public_yuque_share_url_uses_directory_and_doc_title_mapping() -> None:
+    assert (
+        _public_yuque_share_url_for_focus({"path": ["使用指南", "人工智能通识课程"]})
+        == YUQUE_SHARED_AI_COURSE_URL
+    )
+    assert (
+        _public_yuque_share_url_for_focus({"path": ["使用指南", "跨学科项目式学习"]})
+        == YUQUE_SHARED_PBL_GUIDE_URL
+    )
+    assert (
+        _public_yuque_share_url_for_focus({"path": ["使用指南", "智能招生"]})
+        == YUQUE_SHARED_SMART_ENROLLMENT_GUIDE_URL
+    )
+    assert (
+        _public_yuque_share_url_for_focus({"path": ["案例与社区", "优秀案例库", "人工智能通识课程"]})
+        == YUQUE_SHARED_AI_CASE_URL
+    )
+    assert (
+        _public_yuque_share_url_for_focus({"path": ["案例与社区", "优秀案例库", "跨学科项目式学习"]})
+        == YUQUE_SHARED_PBL_CASE_URL
+    )
+    assert (
+        _public_yuque_share_url_for_focus({"path": ["案例与社区", "优秀案例库", "相关赛事及认证"]})
+        == YUQUE_SHARED_CERTIFICATION_CASE_URL
+    )
+    assert _public_yuque_share_url_for_focus({"path": ["使用指南", "学校AI场景定制"]}) == ""
 
 
 @pytest.mark.asyncio
@@ -734,6 +809,9 @@ async def test_product_case_tag_switches_to_case_library_not_platform_or_guide()
     assert done["debug"]["case_branch_used"] is True
     assert done["debug"]["catalog_focus_node"]["path"] == ["案例与社区", "优秀案例库", "人工智能通识课程"]
     assert done["debug"]["doc_deep_read_used"] is True
+    yuque_sources = [source for source in done["sources"] if source["source_type"] == "yuque"]
+    assert yuque_sources
+    assert {source["url"] for source in yuque_sources} == {YUQUE_SHARED_AI_CASE_URL}
     assert done["media"]["images"][0]["url"] == "/yuque/asset?t=abc"
     assert "平台介绍" not in done["debug"]["catalog_focus_node"]["path"]
     assert "使用指南" not in done["debug"]["catalog_focus_node"]["path"]
@@ -837,7 +915,7 @@ async def test_tag_trigger_queries_yuque_url_without_document_body() -> None:
     ]
 
     assert yuque.calls == ["乐高人工智能课程"]
-    assert "语雀正文" not in generator.user_prompt
+    assert "【语雀文档深读】" not in generator.user_prompt
     done = [item for item in events if item["event"] == "done"][0]["data"]
     assert [source["source_type"] for source in done["sources"]] == ["web", "yuque"]
 
@@ -907,6 +985,40 @@ async def test_scene_trigger_returns_uploaded_admin_video_even_with_history() ->
     assert admin_videos.calls == ["school_ai_custom"]
     assert done["media"]["videos"][0]["url"] == "/admin-media/videos/school_ai_custom/20260615120000_school.mp4"
     assert done["debug"]["admin_scene_video_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_admin_scene_intro_is_injected_into_system_prompt() -> None:
+    generator = _FakeGenerator()
+    scene_intro_repo = _FakeAdminSceneIntroRepo(
+        intro_text="IDEAS-PBL 强调项目生成、过程数据留存和智能评价闭环。",
+        decision_intro_text="决策者更关注学校级落地与数据分析。",
+        user_intro_text="使用者更关注备课效率和课堂组织。",
+    )
+    profile_repo = _FakeProfileRepo()
+    profile_repo.profile = _FakeProfile(visitor_type="institution_decision_maker")
+    orch = FriendDialogOrchestratorV5(
+        generator=generator,
+        profile_repo=profile_repo,
+        yuque_search=_FakeYuqueSearch(),
+        profile_extractor=_FakeProfileExtractor(),
+        admin_scene_intro_repository=scene_intro_repo,
+    )
+
+    await _collect_v5_events(
+        orch,
+        question="跨学科项目化学习",
+        session_id="sess_v5_admin_scene_intro",
+        scene="跨学科项目化学习",
+        trigger_type="scene",
+        history=[],
+    )
+
+    assert scene_intro_repo.calls == ["project_based_learning"]
+    assert "【后台维护的当前场景产品介绍】" in generator.system_prompt
+    assert "IDEAS-PBL 强调项目生成、过程数据留存和智能评价闭环。" in generator.system_prompt
+    assert "当前识别到的访客身份：决策者（校长/负责人）" in generator.system_prompt
+    assert "【本轮优先采用口径】\n决策者更关注学校级落地与数据分析。" in generator.system_prompt
 
 
 @pytest.mark.asyncio
@@ -1292,41 +1404,46 @@ async def test_scene_trigger_without_case_history_keeps_platform_intro_route() -
 
 @pytest.mark.asyncio
 async def test_web_search_fallback_enabled_only_when_deep_read_missing() -> None:
-    gen_with_deep_read = _FakeGenerator()
-    orch_with = FriendDialogOrchestratorV5(
-        generator=gen_with_deep_read,
-        profile_repo=_FakeProfileRepo(),
-        yuque_deep_reader=_FakeDeepReader(),
-        profile_extractor=_FakeProfileExtractor(),
-        toc_nodes=_FAKE_TOC_NODES,
-    )
-    await _collect_v5_events(
-        orch_with,
-        question="人工智能通识教育",
-        session_id="sess_v5_search_off",
-        scene="人工智能通识教育",
-        trigger_type="scene",
-        history=[],
-    )
-    assert gen_with_deep_read.enable_search is False
+    original = settings.chat_v5_web_search_enabled
+    object.__setattr__(settings, "chat_v5_web_search_enabled", True)
+    try:
+        gen_with_deep_read = _FakeGenerator()
+        orch_with = FriendDialogOrchestratorV5(
+            generator=gen_with_deep_read,
+            profile_repo=_FakeProfileRepo(),
+            yuque_deep_reader=_FakeDeepReader(),
+            profile_extractor=_FakeProfileExtractor(),
+            toc_nodes=_FAKE_TOC_NODES,
+        )
+        await _collect_v5_events(
+            orch_with,
+            question="人工智能通识教育",
+            session_id="sess_v5_search_off",
+            scene="人工智能通识教育",
+            trigger_type="scene",
+            history=[],
+        )
+        assert gen_with_deep_read.enable_search is False
 
-    gen_without_deep_read = _FakeGenerator()
-    orch_without = FriendDialogOrchestratorV5(
-        generator=gen_without_deep_read,
-        profile_repo=_FakeProfileRepo(),
-        profile_extractor=_FakeProfileExtractor(),
-    )
-    events = await _collect_v5_events(
-        orch_without,
-        question="智能招生怎么做？",
-        session_id="sess_v5_search_on",
-        scene="智能招生",
-        trigger_type="manual",
-        history=[],
-    )
-    assert gen_without_deep_read.enable_search is True
-    done = [item for item in events if item["event"] == "done"][0]["data"]
-    assert done["debug"]["web_search_fallback_enabled"] is True
+        gen_without_deep_read = _FakeGenerator()
+        orch_without = FriendDialogOrchestratorV5(
+            generator=gen_without_deep_read,
+            profile_repo=_FakeProfileRepo(),
+            profile_extractor=_FakeProfileExtractor(),
+        )
+        events = await _collect_v5_events(
+            orch_without,
+            question="智能招生怎么做？",
+            session_id="sess_v5_search_on",
+            scene="智能招生",
+            trigger_type="manual",
+            history=[],
+        )
+        assert gen_without_deep_read.enable_search is True
+        done = [item for item in events if item["event"] == "done"][0]["data"]
+        assert done["debug"]["web_search_fallback_enabled"] is True
+    finally:
+        object.__setattr__(settings, "chat_v5_web_search_enabled", original)
 
 
 @pytest.mark.asyncio
@@ -1350,10 +1467,11 @@ async def test_guide_answer_strips_inline_links_and_appends_friendly_hint() -> N
     )
 
     done = [item for item in events if item["event"] == "done"][0]["data"]
-    assert "www.yuque.com/example/lego-ai" in done["answer"]
-    assert "[人工智能通识课程使用指南](https://www.yuque.com/example/lego-ai)" in done["answer"]
-    assert "www.yuque.com/suesun-yb1bi" not in done["answer"]
-    assert any(source["source_type"] == "yuque" for source in done["sources"])
+    assert "www.yuque.com/example/lego-ai" not in done["answer"]
+    assert f"[人工智能通识课程使用指南]({YUQUE_SHARED_AI_COURSE_URL})" in done["answer"]
+    yuque_sources = [source for source in done["sources"] if source["source_type"] == "yuque"]
+    assert yuque_sources
+    assert {source["url"] for source in yuque_sources} == {YUQUE_SHARED_AI_COURSE_URL}
 
 
 @pytest.mark.asyncio
@@ -1389,7 +1507,7 @@ async def test_followup_question_skips_discussed_child_and_mentions_sibling() ->
     done = [item for item in events if item["event"] == "done"][0]["data"]
     assert done["debug"]["next_followup_topic"] == "苹果STEAM课程"
 
-    # 聚焦叶子节点时：文末追加同级目录横向引导
+    # 聚焦叶子节点时：仍会算出同级推荐方向，但不再硬拼固定尾巴
     events = await _collect_v5_events(
         orch,
         question="乐高人工智能课程",
@@ -1400,8 +1518,265 @@ async def test_followup_question_skips_discussed_child_and_mentions_sibling() ->
     )
     done = [item for item in events if item["event"] == "done"][0]["data"]
     assert done["debug"]["followup_sibling_topic"] == "苹果STEAM课程"
-    assert "如果您对苹果STEAM课程也感兴趣，也可以为您介绍。" in done["answer"]
+    assert "如果您对苹果STEAM课程也感兴趣，也可以为您介绍。" not in done["answer"]
     assert "跨学科项目式学习也感兴趣" not in done["answer"]
+
+
+@pytest.mark.asyncio
+async def test_repeated_identity_question_is_stripped_when_recent_history_already_asked() -> None:
+    class _IdentityRepeatingGenerator:
+        async def stream(self, *, system_prompt: str, user_prompt: str, enable_search: bool = False):
+            yield FriendV5StreamEvent.token("先简单说一下。\n您这边是校长/负责人，还是老师、家长、学生呢？我按您的关注点来介绍。")
+            yield FriendV5StreamEvent.token("[SOURCES]\n[/SOURCES]\n[TAGS][END_TAGS]")
+
+    orch = FriendDialogOrchestratorV5(
+        generator=_IdentityRepeatingGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=_FakeDeepReader(),
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=_FAKE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="想看看人工智能通识课程的产品的使用指南？",
+        session_id="sess_v5_identity_repeat",
+        scene="人工智能通识教育",
+        trigger_type="tag",
+        history=[
+            ChatMessageRow(role="assistant", content="您这边是校长/负责人，还是老师、家长、学生呢？我按您的关注点来介绍。", created_at=""),
+        ],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["answer"].startswith("先简单说一下。")
+    assert "您这边是校长/负责人，还是老师、家长、学生呢？我按您的关注点来介绍。" not in done["answer"]
+
+
+@pytest.mark.asyncio
+async def test_inline_repeated_identity_question_is_also_stripped() -> None:
+    class _InlineIdentityRepeatingGenerator:
+        async def stream(self, *, system_prompt: str, user_prompt: str, enable_search: bool = False):
+            yield FriendV5StreamEvent.token(
+                "目前提供的资料里暂时没有具体的操作使用指南细节。您这边是校长/负责人，还是老师、家长、学生呢？我按您的关注点来介绍。"
+            )
+            yield FriendV5StreamEvent.token("[SOURCES]\n[/SOURCES]\n[TAGS][END_TAGS]")
+
+    orch = FriendDialogOrchestratorV5(
+        generator=_InlineIdentityRepeatingGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=_FakeDeepReader(),
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=_FAKE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="想看看人工智能通识课程的产品的使用指南？",
+        session_id="sess_v5_identity_repeat_inline",
+        scene="人工智能通识教育",
+        trigger_type="tag",
+        history=[
+            ChatMessageRow(role="assistant", content="您这边是校长/负责人，还是老师、家长、学生呢？我按您的关注点来介绍。", created_at=""),
+        ],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert "您这边是校长/负责人，还是老师、家长、学生呢？我按您的关注点来介绍。" not in done["answer"]
+    assert "具体操作我把指南放下面，您可以先看。" in done["answer"]
+
+
+@pytest.mark.asyncio
+async def test_tag_followup_strips_identity_reask_variant_after_identity_already_asked() -> None:
+    class _IdentityVariantRepeatingGenerator:
+        async def stream(self, *, system_prompt: str, user_prompt: str, enable_search: bool = False):
+            yield FriendV5StreamEvent.token(
+                "目前提供的资料中暂无具体的操作使用指南细节。不过我可以先为您梳理一下智能招生的核心功能亮点，或者您方便告知一下您的身份（如校长或老师）吗？这样我能更针对性地介绍它如何帮您减轻招生咨询的负担。"
+            )
+            yield FriendV5StreamEvent.token("[SOURCES]\n[/SOURCES]\n[TAGS][END_TAGS]")
+
+    orch = FriendDialogOrchestratorV5(
+        generator=_IdentityVariantRepeatingGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=_FakeDeepReader(),
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=_FAKE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="想看看人工智能通识课程的产品的使用指南？",
+        session_id="sess_v5_identity_repeat_variant",
+        scene="人工智能通识教育",
+        trigger_type="tag",
+        history=[
+            ChatMessageRow(role="assistant", content="您这边是校长/负责人，还是老师、家长、学生呢？我按您的关注点来介绍。", created_at=""),
+        ],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert "您方便告知一下您的身份" not in done["answer"]
+    assert "具体操作我把指南放下面，您可以先看。" in done["answer"]
+
+
+@pytest.mark.asyncio
+async def test_guide_link_only_answer_avoids_detail_missing_phrase_and_repeated_identity_reask() -> None:
+    class _GuideLinkOnlyGenerator:
+        async def stream(self, *, system_prompt: str, user_prompt: str, enable_search: bool = False):
+            yield FriendV5StreamEvent.token(
+                "您好，我是小为。您好，我是小为。目前资料里没包含具体的操作指南细节，这块通常是根据学校实际招生流程来配置的。"
+                "您这边是校长/负责人，还是负责招生的老师呢？我按您的角色看看怎么介绍更合适。\n"
+                "[SOURCES]\n"
+                "https://www.yuque.com/suesun-yb1bi/sspenu/pmg3pix4w4e6g1zd?singleDoc#%20《智能招生》\n"
+                "[/SOURCES]\n"
+                "[TAGS][END_TAGS]"
+            )
+
+    orch = FriendDialogOrchestratorV5(
+        generator=_GuideLinkOnlyGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=_FAKE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="想看看使用指南？",
+        session_id="sess_v5_guide_link_only",
+        scene="智能招生",
+        trigger_type="tag",
+        history=[
+            ChatMessageRow(role="assistant", content="您这边是校长/负责人，还是老师、家长、学生呢？我按您的关注点来介绍。", created_at=""),
+        ],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert "目前资料里没包含具体的操作指南细节" not in done["answer"]
+    assert "负责招生的老师呢" not in done["answer"]
+    assert done["answer"].count("您好，我是小为") <= 1
+    assert "具体操作我把指南放下面，您可以先看" in done["answer"]
+
+
+@pytest.mark.asyncio
+async def test_internal_timeout_status_line_is_stripped_from_answer() -> None:
+    class _TimeoutLeakGenerator:
+        async def stream(self, *, system_prompt: str, user_prompt: str, enable_search: bool = False):
+            yield FriendV5StreamEvent.token(
+                "刚才文档读取超时，没法直接调出详细案例页。\n"
+                "不过这块落地很广，像上海宝山世外也有相关实践。[SOURCES]\n[/SOURCES]\n[TAGS][END_TAGS]"
+            )
+
+    orch = FriendDialogOrchestratorV5(
+        generator=_TimeoutLeakGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=_FAKE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="想看人工智能通识教育案例",
+        session_id="sess_v5_timeout_leak",
+        scene="人工智能通识教育",
+        trigger_type="manual",
+        history=[],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert "刚才文档读取超时" not in done["answer"]
+    assert "详细案例页" not in done["answer"]
+    assert "这块落地很广，像上海宝山世外也有相关实践。" in done["answer"]
+
+
+@pytest.mark.asyncio
+async def test_generic_fallback_line_and_assumptive_school_wording_are_softened() -> None:
+    class _FallbackLeakGenerator:
+        async def stream(self, *, system_prompt: str, user_prompt: str, enable_search: bool = False):
+            yield FriendV5StreamEvent.token(
+                "这块我先按目前能确认的信息和您讲。\n"
+                "咱们学校大概有多少老师专门负责这块接待工作？[SOURCES]\n[/SOURCES]\n[TAGS][END_TAGS]"
+            )
+
+    orch = FriendDialogOrchestratorV5(
+        generator=_FallbackLeakGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=_FAKE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="招生接待压力很大",
+        session_id="sess_v5_fallback_soften",
+        scene="智能招生",
+        trigger_type="manual",
+        history=[],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert "这块我先按目前能确认的信息和您讲" not in done["answer"]
+    assert "咱们学校" not in done["answer"]
+    assert "您这边更想先看试点怎么跑，还是先看老师要配合到什么程度" in done["answer"]
+
+
+@pytest.mark.asyncio
+async def test_smart_enrollment_teacher_count_question_is_softened_into_choice_style_followup() -> None:
+    class _TeacherCountQuestionGenerator:
+        async def stream(self, *, system_prompt: str, user_prompt: str, enable_search: bool = False):
+            yield FriendV5StreamEvent.token(
+                "明白，这块确实最耗精力。智能招生能自动承接大部分基础咨询，像作息、费用这些常见问题它都能秒回，把您从重复劳动里解放出来。"
+                "您平时晚上大概要处理多少条这类消息？[SOURCES]\n[/SOURCES]\n[TAGS][END_TAGS]"
+            )
+
+    orch = FriendDialogOrchestratorV5(
+        generator=_TeacherCountQuestionGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=_FAKE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="我是招生老师，晚上家长咨询很多",
+        session_id="sess_v5_teacher_count_soften",
+        scene="智能招生",
+        trigger_type="manual",
+        history=[],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert "多少条这类消息" not in done["answer"]
+    assert "更想先看它能替老师省下哪些重复回复，还是先看怎么试用" in done["answer"]
+
+
+@pytest.mark.asyncio
+async def test_smart_enrollment_decision_maker_staff_count_question_is_softened_into_trial_path_followup() -> None:
+    class _DecisionMakerCountQuestionGenerator:
+        async def stream(self, *, system_prompt: str, user_prompt: str, enable_search: bool = False):
+            yield FriendV5StreamEvent.token(
+                "这类系统通常适合咨询量大、重复问题多的学校，能显著减轻招生办压力。落地一般不需复杂开发，主要是把学校常见的问答资料整理好导入即可，前期准备比较轻。"
+                "您学校目前大概有多少老师专门负责接待家长咨询呢？[SOURCES]\n[/SOURCES]\n[TAGS][END_TAGS]"
+            )
+
+    orch = FriendDialogOrchestratorV5(
+        generator=_DecisionMakerCountQuestionGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=_FAKE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="我是校长，想了解智能招生前期落地麻烦吗",
+        session_id="sess_v5_decision_count_soften",
+        scene="智能招生",
+        trigger_type="manual",
+        history=[],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert "多少老师专门负责接待家长咨询" not in done["answer"]
+    assert "更想先看试点怎么跑，还是先看老师要配合到什么程度" in done["answer"]
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,16 @@ from typing import List
 from pydantic import BaseModel, Field
 
 
+class AdminLoginRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=80)
+    password: str = Field(..., min_length=1, max_length=200)
+
+
+class AdminAuthStatusResponse(BaseModel):
+    authenticated: bool
+    username: str = ""
+
+
 class AdminVideoAssetResponse(BaseModel):
     id: int
     scene_key: str
@@ -22,6 +32,26 @@ class AdminVideoAssetResponse(BaseModel):
 
 class AdminVideoAssetListResponse(BaseModel):
     items: List[AdminVideoAssetResponse]
+
+
+class AdminSceneIntroResponse(BaseModel):
+    scene_key: str
+    scene_name: str
+    intro_text: str = ""
+    decision_intro_text: str = ""
+    user_intro_text: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class AdminSceneIntroListResponse(BaseModel):
+    items: List[AdminSceneIntroResponse]
+
+
+class AdminSceneIntroUpdateRequest(BaseModel):
+    intro_text: str = Field(default="", max_length=4000)
+    decision_intro_text: str = Field(default="", max_length=4000)
+    user_intro_text: str = Field(default="", max_length=4000)
 
 
 class AdminCustomerResponse(BaseModel):

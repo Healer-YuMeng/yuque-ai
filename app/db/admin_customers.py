@@ -11,19 +11,6 @@ TEST_ACCOUNT_OPTIONS = ("待发放", "已发放")
 DEFAULT_PAGE_SIZE = 10
 MAX_PAGE_SIZE = 50
 
-# 仅展示访客在「测试账号申请」弹窗中点击「提交申请」后的记录
-_TRIAL_APPLY_FILTER = """(
-    COALESCE(json_extract(p.interests_json, '$._session.trial_apply_submitted'), 0) = 1
-    OR (
-        COALESCE(json_extract(p.interests_json, '$._lead.wants_trial'), 0) = 1
-        AND trim(coalesce(p.display_name, '')) != ''
-        AND trim(coalesce(p.org_name, '')) != ''
-        AND COALESCE(json_extract(p.interests_json, '$._session.trial_account_issued'), 0) = 1
-    )
-)"""
-_NOT_DELETED_FILTER = "COALESCE(json_extract(p.interests_json, '$._admin.deleted'), 0) != 1"
-_VISIBLE_CUSTOMER_WHERE = f"({_TRIAL_APPLY_FILTER}) AND {_NOT_DELETED_FILTER}"
-
 
 @dataclass(frozen=True)
 class AdminCustomerRow:
@@ -40,6 +27,37 @@ class AdminCustomerRepository:
     def __init__(self, session_factory: DatabaseSessionFactory) -> None:
         self._session_factory = session_factory
 
+    def _updated_at_select_expr(self) -> str:
+        if self._session_factory.is_postgres:
+            return "COALESCE(p.updated_at, l.latest_lead_at)::text"
+        return "CAST(COALESCE(p.updated_at, l.latest_lead_at) AS TEXT)"
+
+    def _order_by_sql(self) -> str:
+        if self._session_factory.is_postgres:
+            return """
+                ORDER BY COALESCE(p.updated_at, l.latest_lead_at) DESC NULLS LAST,
+                         COALESCE(p.session_id, l.session_id) DESC
+            """
+        return """
+            ORDER BY COALESCE(p.updated_at, l.latest_lead_at) DESC,
+                     COALESCE(p.session_id, l.session_id) DESC
+        """
+
+    def _not_deleted_filter(self) -> str:
+        if self._session_factory.is_postgres:
+            return "LOWER(COALESCE(p.interests_json::jsonb #>> '{_admin,deleted}', 'false')) NOT IN ('1', 'true')"
+        return "LOWER(COALESCE(CAST(json_extract(p.interests_json, '$._admin.deleted') AS TEXT), '0')) NOT IN ('1', 'true')"
+
+    def _customer_base_from(self) -> str:
+        return """
+            FROM (
+                SELECT session_id, MAX(created_at) AS latest_lead_at
+                FROM lead_captures
+                GROUP BY session_id
+            ) l
+            LEFT JOIN chat_session_profiles p ON p.session_id = l.session_id
+        """
+
     async def list_customers(
         self,
         *,
@@ -51,37 +69,39 @@ class AdminCustomerRepository:
         page_num = max(1, int(page))
         size = max(1, min(int(page_size), MAX_PAGE_SIZE))
         offset = (page_num - 1) * size
-        search_sql, search_params = _search_params(q)
+        search_sql, search_params = _search_params(q, is_postgres=self._session_factory.is_postgres)
+        not_deleted_filter = self._not_deleted_filter()
+        customer_from = self._customer_base_from()
+        updated_at_expr = self._updated_at_select_expr()
+        order_by_sql = self._order_by_sql()
         conn = await self._session_factory.connect()
         try:
-            count_cur = await conn.execute(
+            count_row = await conn.fetchone(
                 f"""
                 SELECT COUNT(*)
-                FROM chat_session_profiles p
-                WHERE {_VISIBLE_CUSTOMER_WHERE}
+                {customer_from}
+                WHERE {not_deleted_filter}
                 {search_sql}
                 """,
                 tuple(search_params),
             )
-            count_row = await count_cur.fetchone()
             total = int(count_row[0] if count_row else 0)
 
-            cur = await conn.execute(
+            rows = await conn.fetchall(
                 f"""
-                SELECT p.session_id,
+                SELECT COALESCE(p.session_id, l.session_id) AS session_id,
                        p.display_name,
                        p.org_name,
                        p.interests_json,
-                       COALESCE(p.updated_at, '') AS updated_at
-                FROM chat_session_profiles p
-                WHERE {_VISIBLE_CUSTOMER_WHERE}
+                       {updated_at_expr} AS updated_at
+                {customer_from}
+                WHERE {not_deleted_filter}
                 {search_sql}
-                ORDER BY COALESCE(p.updated_at, p.session_id) DESC
+                {order_by_sql}
                 LIMIT ? OFFSET ?
                 """,
                 tuple(search_params + [size, offset]),
             )
-            rows = await cur.fetchall()
             leads = await self._load_leads_by_session(conn, [str(row["session_id"]) for row in rows])
             items = [_customer_row_from_db(row, leads.get(str(row["session_id"]), [])) for row in rows]
             return items, total
@@ -90,19 +110,20 @@ class AdminCustomerRepository:
 
     async def count_customers(self, *, query: str = "") -> int:
         q = (query or "").strip()
-        search_sql, search_params = _search_params(q)
+        search_sql, search_params = _search_params(q, is_postgres=self._session_factory.is_postgres)
+        not_deleted_filter = self._not_deleted_filter()
+        customer_from = self._customer_base_from()
         conn = await self._session_factory.connect()
         try:
-            cur = await conn.execute(
+            row = await conn.fetchone(
                 f"""
                 SELECT COUNT(*)
-                FROM chat_session_profiles p
-                WHERE {_VISIBLE_CUSTOMER_WHERE}
+                {customer_from}
+                WHERE {not_deleted_filter}
                 {search_sql}
                 """,
                 tuple(search_params),
             )
-            row = await cur.fetchone()
             return int(row[0] if row else 0)
         finally:
             await conn.close()
@@ -110,14 +131,13 @@ class AdminCustomerRepository:
     async def count_trial_issued(self) -> int:
         conn = await self._session_factory.connect()
         try:
-            cur = await conn.execute(
+            rows = await conn.fetchall(
                 f"""
                 SELECT p.interests_json
-                FROM chat_session_profiles p
-                WHERE {_VISIBLE_CUSTOMER_WHERE}
+                {self._customer_base_from()}
+                WHERE {self._not_deleted_filter()}
                 """
             )
-            rows = await cur.fetchall()
             total = 0
             for row in rows:
                 interests = _safe_json_obj(row["interests_json"])
@@ -131,23 +151,23 @@ class AdminCustomerRepository:
         sid = (session_id or "").strip()
         if not sid:
             return None
+        updated_at_expr = self._updated_at_select_expr()
         conn = await self._session_factory.connect()
         try:
-            cur = await conn.execute(
+            row = await conn.fetchone(
                 f"""
-                SELECT p.session_id,
+                SELECT COALESCE(p.session_id, l.session_id) AS session_id,
                        p.display_name,
                        p.org_name,
                        p.interests_json,
-                       COALESCE(p.updated_at, '') AS updated_at
-                FROM chat_session_profiles p
-                WHERE p.session_id = ?
-                  AND {_VISIBLE_CUSTOMER_WHERE}
+                       {updated_at_expr} AS updated_at
+                {self._customer_base_from()}
+                WHERE l.session_id = ?
+                  AND {self._not_deleted_filter()}
                 LIMIT 1
                 """,
                 (sid,),
             )
-            row = await cur.fetchone()
             if not row:
                 return None
             leads = await self._load_leads_by_session(conn, [sid])
@@ -162,23 +182,23 @@ class AdminCustomerRepository:
         status = _normalize_follow_up(follow_up_status)
         conn = await self._session_factory.connect()
         try:
-            cur = await conn.execute(
+            row = await conn.fetchone(
                 f"""
                 SELECT interests_json
-                FROM chat_session_profiles p
-                WHERE p.session_id = ?
-                  AND {_VISIBLE_CUSTOMER_WHERE}
+                {self._customer_base_from()}
+                WHERE l.session_id = ?
+                  AND {self._not_deleted_filter()}
                 LIMIT 1
                 """,
                 (sid,),
             )
-            row = await cur.fetchone()
             if not row:
                 return None
             interests = _safe_json_obj(row["interests_json"])
             admin_meta = dict(interests.get("_admin") or {})
             admin_meta["follow_up_status"] = status
             interests["_admin"] = admin_meta
+            await self._ensure_profile_row(conn, session_id=sid)
             await conn.execute(
                 "UPDATE chat_session_profiles SET interests_json=?, updated_at=CURRENT_TIMESTAMP WHERE session_id=?",
                 (json.dumps(interests, ensure_ascii=False), sid),
@@ -195,23 +215,23 @@ class AdminCustomerRepository:
         status = _normalize_test_account(test_account_status)
         conn = await self._session_factory.connect()
         try:
-            cur = await conn.execute(
+            row = await conn.fetchone(
                 f"""
                 SELECT interests_json
-                FROM chat_session_profiles p
-                WHERE p.session_id = ?
-                  AND {_VISIBLE_CUSTOMER_WHERE}
+                {self._customer_base_from()}
+                WHERE l.session_id = ?
+                  AND {self._not_deleted_filter()}
                 LIMIT 1
                 """,
                 (sid,),
             )
-            row = await cur.fetchone()
             if not row:
                 return None
             interests = _safe_json_obj(row["interests_json"])
             admin_meta = dict(interests.get("_admin") or {})
             admin_meta["test_account_status"] = status
             interests["_admin"] = admin_meta
+            await self._ensure_profile_row(conn, session_id=sid)
             await conn.execute(
                 "UPDATE chat_session_profiles SET interests_json=?, updated_at=CURRENT_TIMESTAMP WHERE session_id=?",
                 (json.dumps(interests, ensure_ascii=False), sid),
@@ -227,41 +247,51 @@ class AdminCustomerRepository:
             return False
         conn = await self._session_factory.connect()
         try:
-            cur = await conn.execute(
+            row = await conn.fetchone(
                 f"""
                 SELECT interests_json
-                FROM chat_session_profiles p
-                WHERE p.session_id = ?
-                  AND {_VISIBLE_CUSTOMER_WHERE}
+                {self._customer_base_from()}
+                WHERE l.session_id = ?
+                  AND {self._not_deleted_filter()}
                 LIMIT 1
                 """,
                 (sid,),
             )
-            row = await cur.fetchone()
             if not row:
                 return False
-            interests = _safe_json_obj(row["interests_json"])
-            admin_meta = dict(interests.get("_admin") or {})
-            admin_meta["deleted"] = True
-            interests["_admin"] = admin_meta
-            await conn.execute(
-                "UPDATE chat_session_profiles SET interests_json=?, updated_at=CURRENT_TIMESTAMP WHERE session_id=?",
-                (json.dumps(interests, ensure_ascii=False), sid),
-            )
+            await conn.execute("DELETE FROM lead_captures WHERE session_id=?", (sid,))
+            await conn.execute("DELETE FROM chat_messages WHERE session_id=?", (sid,))
+            await conn.execute("DELETE FROM chat_session_profiles WHERE session_id=?", (sid,))
+            await conn.execute("DELETE FROM chat_sessions WHERE session_id=?", (sid,))
             await conn.commit()
             return True
         finally:
             await conn.close()
 
+    async def _ensure_profile_row(self, conn: Any, *, session_id: str) -> None:
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        if self._session_factory.is_postgres:
+            await conn.execute(
+                "INSERT INTO chat_session_profiles(session_id) VALUES (?) "
+                "ON CONFLICT(session_id) DO NOTHING",
+                (sid,),
+            )
+        else:
+            await conn.execute(
+                "INSERT OR IGNORE INTO chat_session_profiles(session_id) VALUES (?)",
+                (sid,),
+            )
+
     async def _load_leads_by_session(self, conn: Any, session_ids: List[str]) -> dict[str, List[tuple[str, str]]]:
         if not session_ids:
             return {}
         placeholders = ",".join("?" for _ in session_ids)
-        cur = await conn.execute(
+        rows = await conn.fetchall(
             f"SELECT session_id, contact_type, contact_value FROM lead_captures WHERE session_id IN ({placeholders})",
             tuple(session_ids),
         )
-        rows = await cur.fetchall()
         out: dict[str, List[tuple[str, str]]] = {}
         for row in rows:
             sid = str(row["session_id"])
@@ -269,20 +299,21 @@ class AdminCustomerRepository:
         return out
 
 
-def _search_params(query: str) -> tuple[str, list[Any]]:
+def _search_params(query: str, *, is_postgres: bool) -> tuple[str, list[Any]]:
     q = (query or "").strip()
     if not q:
         return "", []
     like = f"%{q}%"
+    ilike_op = "ILIKE" if is_postgres else "LIKE"
     return (
         """
         AND (
-            COALESCE(p.display_name, '') LIKE ?
-            OR COALESCE(p.org_name, '') LIKE ?
+            COALESCE(p.display_name, '') """ + ilike_op + """ ?
+            OR COALESCE(p.org_name, '') """ + ilike_op + """ ?
             OR EXISTS (
-                SELECT 1 FROM lead_captures l
-                WHERE l.session_id = p.session_id
-                  AND l.contact_value LIKE ?
+                SELECT 1 FROM lead_captures lc
+                WHERE lc.session_id = l.session_id
+                  AND lc.contact_value """ + ilike_op + """ ?
             )
         )
         """,

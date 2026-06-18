@@ -5,9 +5,11 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, List, Optional, Sequence
 
 from app.conversation.contact_extractor import extract_contact
-from app.conversation.friend_persona_v5 import build_friend_v5_system_prompt, scene_description
+from app.conversation.friend_persona_v5 import build_friend_v5_system_prompt_with_scene_intro, scene_description
+from app.conversation.friend_product_playbook_v5 import scene_name_to_admin_key
 from app.conversation.skill_catalog import SKILL_CATALOG, SkillRoute
 from app.conversation.profile_extractor import ProfileExtractor
+from app.core.config import settings
 from app.core.logger import get_logger
 from app.db.repositories import ChatMessageRow
 
@@ -41,10 +43,33 @@ _MANUAL_YUQUE_HINT_RE = re.compile(
 )
 _FOLLOWUP_CONFIRM_RE = re.compile(r"^(需要|继续|好|好的|可以|想了解|详细说说|展开|讲讲|要|嗯|行)(?:[，。,.!！?？\s].*)?$")
 _FOLLOWUP_TOPIC_RE = re.compile(r"需要我(?:和你|帮你)?详细介绍(.+?)的内容吗")
+_IDENTITY_FOLLOWUP_LINE = "您这边是校长/负责人，还是老师、家长、学生呢？我按您的关注点来介绍。"
+_IDENTITY_REPEAT_RE = re.compile(
+    r"(?:您这边是校长/负责人，还是老师、家长、学生呢？我按您的关注点来介绍。?"
+    r"|您方便告知一下您的身份（如校长或老师）吗？这样我能更针对性地介绍(?:它如何帮您减轻招生咨询的负担)?。?"
+    r"|您这边是负责招生的老师，还是学校管理者呢？我可以根据您的角色，说说一般怎么配合使用会更顺手。?"
+    r"|您这边是校长/负责人，还是负责招生的老师呢？我按您的角色看看怎么介绍更合适。?)"
+)
+_INTERNAL_STATUS_LINE_RE = re.compile(
+    r"(?:文档读取超时|读取超时|没法直接调出详细案例页|无法直接调出详细案例页|"
+    r"没读到文档页|没读到案例页|未命中|检索失败|拉取失败|调用失败|读取失败|调不出详细案例页)"
+)
+_GENERIC_FALLBACK_LINE_RE = re.compile(
+    r"(?:这块我先按目前能确认的信息和您讲|这块我先说已经明确的部分|"
+    r"我先按目前能确认的信息和您讲|我先说已经明确的部分)"
+)
 _CASE_SECTION_TITLE = "案例与社区"
 _CASE_LIBRARY_TITLE = "优秀案例库"
 _PLATFORM_SECTION_TITLE = "平台介绍"
 _GUIDE_SOURCES_HINT = "使用指南中的详细操作链接已整理在下方参考资料，您可点击查阅。"
+_PUBLIC_YUQUE_SHARE_URLS: dict[tuple[str, str], str] = {
+    ("guide", "人工智能通识课程"): "https://www.yuque.com/suesun-yb1bi/sspenu/sbdx665n47rz9rt5?singleDoc#%20《人工智能通识课程》",
+    ("guide", "跨学科项目式学习"): "https://www.yuque.com/suesun-yb1bi/sspenu/dl4rxzdb0ahgq42n?singleDoc#%20《跨学科项目式学习》",
+    ("guide", "智能招生"): "https://www.yuque.com/suesun-yb1bi/sspenu/pmg3pix4w4e6g1zd?singleDoc#%20《智能招生》",
+    ("case", "人工智能通识课程"): "https://www.yuque.com/suesun-yb1bi/sspenu/pynfez9lydaxq7gg?singleDoc#%20《人工智能通识课程》",
+    ("case", "跨学科项目式学习"): "https://www.yuque.com/suesun-yb1bi/sspenu/ztzk0v4ggl934d86?singleDoc#%20《跨学科项目式学习》",
+    ("case", "相关赛事及认证"): "https://www.yuque.com/suesun-yb1bi/sspenu/kfuc54vihosyzlvo?singleDoc#%20《相关赛事及认证》",
+}
 _CASE_KB_FALLBACK_ANSWER = (
     "目前在上海、江苏、成都多所K12学校均有落地实施的具体案例，"
     "需了解更为具体的案例介绍，方便的话可以留下您的联系方式。"
@@ -84,6 +109,7 @@ class FriendDialogOrchestratorV5:
         yuque_url_limit: int = 3,
         require_web_sources: bool = True,
         admin_video_repository: Optional[Any] = None,
+        admin_scene_intro_repository: Optional[Any] = None,
     ) -> None:
         self._generator = generator
         self._profile_repo = profile_repo
@@ -95,6 +121,7 @@ class FriendDialogOrchestratorV5:
         self._yuque_url_limit = max(0, int(yuque_url_limit or 0))
         self._require_web_sources = bool(require_web_sources)
         self._admin_video_repository = admin_video_repository
+        self._admin_scene_intro_repository = admin_scene_intro_repository
 
     async def answer_stream(
         self,
@@ -534,7 +561,16 @@ class FriendDialogOrchestratorV5:
             }
 
         yield _stage("searching", "小为正在结合语雀资料整理回答...")
-        system_prompt = build_friend_v5_system_prompt()
+        admin_scene_intro = await _load_admin_scene_intro(
+            repository=self._admin_scene_intro_repository,
+            scene=effective_scene,
+        )
+        system_prompt = build_friend_v5_system_prompt_with_scene_intro(
+            scene_intro=admin_scene_intro.get("intro_text", ""),
+            decision_intro=admin_scene_intro.get("decision_intro_text", ""),
+            user_intro=admin_scene_intro.get("user_intro_text", ""),
+            visitor_type=str(getattr(profile, "visitor_type", "") or ""),
+        )
         case_answer_mode = case_intent and deep_read.used
         user_prompt = self._build_user_prompt(
             question=question,
@@ -554,8 +590,8 @@ class FriendDialogOrchestratorV5:
         web_sources: List[FriendV5SourceItem] = []
         search_keywords: List[str] = []
 
-        # 语雀深读未命中时，开启模型联网搜索作为兜底
-        enable_web_search = not deep_read.used
+        # 语雀深读未命中时，是否开启模型联网搜索兜底（可由开关控制）
+        enable_web_search = (not deep_read.used) and settings.chat_v5_web_search_enabled
         try:
             stream_iter = self._generator.stream(
                 system_prompt=system_prompt,
@@ -580,6 +616,8 @@ class FriendDialogOrchestratorV5:
         parsed = parser.finish()
         answer = parsed.answer or "".join(answer_parts).strip()
         answer = _strip_inline_urls(answer)
+        answer = _strip_internal_status_leaks(answer)
+        answer = _soften_assumptive_phrasing(answer)
 
         source_items = _dedupe_sources(_source_urls_to_items(parsed.source_urls), existing=web_sources)
         if source_items:
@@ -587,6 +625,10 @@ class FriendDialogOrchestratorV5:
         if web_sources:
             logger.info("V5 从联网搜索响应解析到 %d 个来源链接", len(web_sources))
         merged_sources = _dedupe_sources([*web_sources, *source_items, *yuque_sources], existing=[])
+        merged_sources = _rewrite_public_yuque_sources(
+            merged_sources,
+            focus=catalog_focus,
+        )
         merged_keywords = search_keywords or _derive_search_keywords(question)
 
         if (tag_route.kind == "guide" or scene_guide_continuation) and answer:
@@ -612,10 +654,10 @@ class FriendDialogOrchestratorV5:
             history=history,
             exclude=(next_followup_topic,),
         )
-        answer = _append_followup_question(
+        answer = _strip_redundant_identity_question(
             _strip_existing_followup_questions(answer),
-            next_followup_topic,
-            sibling_topic=followup_sibling_topic,
+            history=history,
+            trigger_type=trigger_type,
         )
         rhythm_tags = _apply_recommendation_tag_rhythm(
             content_tags=catalog_tags.tags,
@@ -707,12 +749,15 @@ class FriendDialogOrchestratorV5:
             product_hint = (product_focus or scene).strip()
             yuque_instruction = (
                 f"语雀「优秀案例库」中未找到「{product_hint}」的同名案例文档。"
-                "请联网搜索该产品/方向的落地案例或应用场景后回答，并如实说明资料来自联网检索；"
-                "不要编造语雀里已有的其他产品案例，也不要展示无关产品的图片。"
+                "本轮请严格基于已提供的语雀知识库信息回答；若当前资料没有更细的案例正文，就直接基于已确认的信息自然回答，"
+                "直接讲已经明确的部分，不要提超时、未命中、读取失败、案例页没调出来等内部过程，也不要说固定兜底句。"
+                "如有可公开访问的语雀链接，可自然补充给用户。不要联网搜索，也不要编造语雀里不存在的其他产品案例或图片。"
             )
         else:
             yuque_instruction = (
-                "请联网搜索后回答。你可以把语雀链接作为补充阅读入口，但不要声称已经读过链接里的全文。"
+                "本轮请严格基于已提供的语雀知识库信息回答；若当前资料没有更细的公开内容，就直接基于已确认的信息自然回答，"
+                "直接讲已经明确的部分，不要提超时、未命中、读取失败、没读到文档页等内部过程，也不要说固定兜底句。"
+                "如有可公开访问的语雀链接，可自然补充给用户。不要联网搜索，也不要声称读过链接里的全文。"
             )
         skill_block = (
             f"【本轮 Skill】\n{skill_route.skill_id}\n{skill_route.generation_instruction}\n\n"
@@ -795,7 +840,7 @@ def _profile_fields(profile: Any) -> dict[str, Any]:
     if profile is None:
         return {}
     out: dict[str, Any] = {}
-    for key in ("display_name", "org_name", "interests"):
+    for key in ("display_name", "visitor_type", "org_name", "interests"):
         value = getattr(profile, key, None)
         if value:
             out[key] = value
@@ -809,6 +854,8 @@ def _profile_block(profile: Any) -> str:
     lines: List[str] = []
     if fields.get("display_name"):
         lines.append(f"称呼：{fields['display_name']}")
+    if fields.get("visitor_type"):
+        lines.append(f"身份：{_visitor_type_label(str(fields['visitor_type']))}")
     if fields.get("org_name"):
         lines.append(f"单位：{fields['org_name']}")
     interests = fields.get("interests")
@@ -868,6 +915,62 @@ def _dedupe_sources(
         out.append(item.model_copy(update={"index": next_index}))
         next_index += 1
     return out
+
+
+def _rewrite_public_yuque_sources(
+    sources: Sequence[FriendV5SourceItem],
+    *,
+    focus: Optional[dict[str, Any]],
+) -> List[FriendV5SourceItem]:
+    public_url = _public_yuque_share_url_for_focus(focus)
+    if not public_url:
+        return list(sources)
+    rewritten: List[FriendV5SourceItem] = []
+    for item in sources:
+        url = (item.url or "").strip()
+        is_yuque_source = item.source_type == "yuque" or "yuque.com/" in url
+        if not is_yuque_source:
+            rewritten.append(item)
+            continue
+        rewritten.append(
+            item.model_copy(
+                update={
+                    "source_type": "yuque",
+                    "title": _public_yuque_share_title_for_focus(focus) or item.title,
+                    "url": public_url,
+                }
+            )
+        )
+    return _dedupe_sources(rewritten, existing=[])
+
+
+def _public_yuque_share_url_for_focus(focus: Optional[dict[str, Any]]) -> str:
+    path = [str(item or "").strip() for item in (focus or {}).get("path") or [] if str(item or "").strip()]
+    directory = _public_yuque_share_directory(path)
+    title = _public_yuque_share_title(path)
+    if not directory or not title:
+        return ""
+    return _PUBLIC_YUQUE_SHARE_URLS.get((directory, title), "")
+
+
+def _public_yuque_share_title_for_focus(focus: Optional[dict[str, Any]]) -> str:
+    path = [str(item or "").strip() for item in (focus or {}).get("path") or [] if str(item or "").strip()]
+    return _public_yuque_share_title(path)
+
+
+def _public_yuque_share_directory(path: Sequence[str]) -> str:
+    if "使用指南" in path:
+        return "guide"
+    if _CASE_SECTION_TITLE in path or _CASE_LIBRARY_TITLE in path:
+        return "case"
+    return ""
+
+
+def _public_yuque_share_title(path: Sequence[str]) -> str:
+    for title in reversed([str(item or "").strip() for item in path]):
+        if title and title not in {"使用指南", _CASE_SECTION_TITLE, _CASE_LIBRARY_TITLE}:
+            return title
+    return ""
 
 
 def _source_dedupe_key(item: FriendV5SourceItem) -> str:
@@ -1054,6 +1157,36 @@ async def _load_admin_scene_media(
         if str(getattr(row, "file_url", "") or "").strip()
     ]
     return ChatMediaBundle(videos=videos)
+
+
+async def _load_admin_scene_intro(*, repository: Optional[Any], scene: str) -> dict[str, str]:
+    if repository is None:
+        return {}
+    scene_key = scene_name_to_admin_key(scene)
+    if not scene_key:
+        return {}
+    try:
+        row = await repository.get_intro(scene_key=scene_key)
+    except Exception:
+        logger.exception("friend_v5_admin_scene_intro_load_failed")
+        return {}
+    if row is None:
+        return {}
+    return {
+        "intro_text": str(getattr(row, "intro_text", "") or "").strip(),
+        "decision_intro_text": str(getattr(row, "decision_intro_text", "") or "").strip(),
+        "user_intro_text": str(getattr(row, "user_intro_text", "") or "").strip(),
+    }
+
+
+def _visitor_type_label(visitor_type: str) -> str:
+    vt = (visitor_type or "").strip()
+    return {
+        "institution_decision_maker": "校长/负责人",
+        "teacher": "老师",
+        "parent": "家长",
+        "student": "学生",
+    }.get(vt, vt or "未识别")
 
 
 def _admin_scene_key(scene: str) -> str:
@@ -1489,16 +1622,39 @@ def _strip_existing_followup_questions(text: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _append_followup_question(answer: str, topic: str, *, sibling_topic: str = "") -> str:
+def _strip_redundant_identity_question(
+    answer: str,
+    *,
+    history: Sequence[ChatMessageRow],
+    trigger_type: str,
+) -> str:
     text = (answer or "").strip()
-    clean_topic = (topic or "").strip()
-    if not text or not clean_topic:
+    if not text:
         return text
-    line = f"需要我和你详细介绍{clean_topic}的内容吗？"
-    clean_sibling = (sibling_topic or "").strip()
-    if clean_sibling and clean_sibling != clean_topic:
-        line += f"如果您对{clean_sibling}也感兴趣，也可以为您介绍。"
-    return f"{text}\n\n{line}"
+    if trigger_type != "tag":
+        return text
+    recent_assistant_texts = [
+        str(getattr(row, "content", "") or "").strip()
+        for row in history[-6:]
+        if getattr(row, "role", "") == "assistant"
+    ]
+    if not any(_IDENTITY_FOLLOWUP_LINE in item for item in recent_assistant_texts):
+        return text
+    text = _IDENTITY_REPEAT_RE.sub("", text)
+    kept_lines: List[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == _IDENTITY_FOLLOWUP_LINE:
+            continue
+        if stripped == "您好，我是小为。":
+            continue
+        line = line.strip()
+        if not line:
+            continue
+        if not line.endswith(("。", "！", "？")):
+            line = f"{line}。"
+        kept_lines.append(line)
+    return "\n".join(kept_lines).strip()
 
 
 def _strip_inline_urls(text: str) -> str:
@@ -1507,6 +1663,54 @@ def _strip_inline_urls(text: str) -> str:
     out = re.sub(r"(?:https?://|www\.)[^\s)\]}>\"'，。、；;：]+", "", out)
     out = re.sub(r"[ \t]+\n", "\n", out)
     out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
+def _strip_internal_status_leaks(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return raw
+    kept_lines: List[str] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if _INTERNAL_STATUS_LINE_RE.search(stripped):
+            continue
+        if _GENERIC_FALLBACK_LINE_RE.search(stripped):
+            continue
+        kept_lines.append(stripped)
+    out = "\n".join(kept_lines).strip()
+    out = re.sub(r"^(不过|只是|只是说)[，,\s]*", "", out)
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    return out or "这块我先说比较明确的部分。"
+
+
+def _soften_assumptive_phrasing(text: str) -> str:
+    out = (text or "").strip()
+    if not out:
+        return out
+    out = re.sub(r"^(您好，我是小为。)\s*\1+", r"\1", out)
+    out = out.replace("咱们学校", "您学校")
+    out = out.replace("咱们这边学校", "您学校")
+    out = out.replace("咱们这边", "您这边")
+    out = out.replace("您学校大概有多少老师专门负责这块接待工作", "您这边目前大概有多少位老师在负责这块接待")
+    out = out.replace("目前资料里没包含具体的操作指南细节", "具体操作我把指南放下面，您可以先看")
+    out = out.replace("目前提供的资料里暂时没有具体的操作使用指南细节", "具体操作我把指南放下面，您可以先看")
+    out = out.replace("目前提供的资料中暂无具体的操作使用指南细节", "具体操作我把指南放下面，您可以先看")
+    out = out.replace(
+        "您平时晚上大概要处理多少条这类消息？",
+        "您这边更想先看它能替老师省下哪些重复回复，还是先看怎么试用？",
+    )
+    out = out.replace(
+        "您学校目前大概有多少老师专门负责接待家长咨询呢？",
+        "您这边更想先看试点怎么跑，还是先看老师要配合到什么程度？",
+    )
+    out = out.replace(
+        "您这边目前大概有多少位老师在负责这块接待",
+        "您这边更想先看试点怎么跑，还是先看老师要配合到什么程度",
+    )
+    out = re.sub(r"[ ]{2,}", " ", out)
     return out.strip()
 
 

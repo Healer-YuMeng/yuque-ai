@@ -14,7 +14,7 @@ from app.core.config import settings
 from app.core.logger import setup_logging
 from app.data.yuque_loader import YuqueLoader
 from app.db.admin_customers import AdminCustomerRepository
-from app.db.repositories import AdminVideoAssetRepository, ChatSessionRepository, DocumentRepository, LeadCaptureRepository, QALogRepository
+from app.db.repositories import AdminSceneIntroRepository, AdminVideoAssetRepository, ChatSessionRepository, DocumentRepository, LeadCaptureRepository, QALogRepository
 from app.db.session import DatabaseSessionFactory
 from app.db.profile_repository import ChatSessionProfileRepository
 from app.service.qa_service import QAService
@@ -24,8 +24,9 @@ from app.storage.vector_store import VectorStore
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     setup_logging()
-    session_factory = DatabaseSessionFactory(str(settings.sqlite_path))
+    session_factory = DatabaseSessionFactory(settings.database_url)
     admin_video_repository = AdminVideoAssetRepository(session_factory)
+    admin_scene_intro_repository = AdminSceneIntroRepository(session_factory)
     admin_customer_repository = AdminCustomerRepository(session_factory)
     qa_service = QAService(
         yuque_loader=YuqueLoader(
@@ -41,15 +42,19 @@ async def lifespan(application: FastAPI):
         chat_session_repository=ChatSessionRepository(session_factory),
         chat_session_profile_repository=ChatSessionProfileRepository(session_factory),
         admin_video_asset_repository=admin_video_repository,
+        admin_scene_intro_repository=admin_scene_intro_repository,
     )
     await qa_service.startup()
     await admin_video_repository.init_db()
+    await admin_scene_intro_repository.init_db()
     application.state.qa_service = qa_service
     application.state.admin_video_repository = admin_video_repository
+    application.state.admin_scene_intro_repository = admin_scene_intro_repository
     application.state.admin_customer_repository = admin_customer_repository
     application.state.admin_upload_dir = settings.admin_upload_dir
     yield
     await qa_service.shutdown()
+    await session_factory.close()
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)

@@ -38,7 +38,9 @@ def _build_client(tmp_path: Path) -> TestClient:
     app.dependency_overrides[get_qa_service] = lambda: service
     app.include_router(chat_router)
     app.include_router(admin_router)
-    return TestClient(app)
+    client = TestClient(app)
+    client.post("/admin-api/auth/login", json={"username": "admin", "password": "admin123456"})
+    return client
 
 
 def test_visitor_trial_apply_persists_customer_for_admin(tmp_path: Path) -> None:

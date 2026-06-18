@@ -6,19 +6,7 @@ from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
 from app.data.splitter import TextChunk
-from app.db.models import (
-    ADMIN_VIDEO_ASSETS_DDL,
-    ADMIN_VIDEO_ASSETS_SCENE_INDEX,
-    CHAT_MESSAGES_DDL,
-    CHAT_MESSAGES_SESSION_CREATED_INDEX,
-    CHAT_SESSION_PROFILES_DDL,
-    CHAT_SESSIONS_DDL,
-    CHUNKS_DDL,
-    DOCUMENTS_DDL,
-    LEAD_CAPTURES_DDL,
-    LEAD_CAPTURES_UNIQUE_INDEX,
-    QA_LOGS_DDL,
-)
+from app.db.models import schema_statements
 from app.db.session import DatabaseSessionFactory
 from app.schemas.chat import ChatResponse
 
@@ -30,17 +18,8 @@ class DocumentRepository:
     async def init_db(self) -> None:
         conn = await self._session_factory.connect()
         try:
-            await conn.execute(DOCUMENTS_DDL)
-            await conn.execute(CHUNKS_DDL)
-            await conn.execute(QA_LOGS_DDL)
-            await conn.execute(LEAD_CAPTURES_DDL)
-            await conn.execute(LEAD_CAPTURES_UNIQUE_INDEX)
-            await conn.execute(CHAT_SESSIONS_DDL)
-            await conn.execute(CHAT_MESSAGES_DDL)
-            await conn.execute(CHAT_MESSAGES_SESSION_CREATED_INDEX)
-            await conn.execute(CHAT_SESSION_PROFILES_DDL)
-            await conn.execute(ADMIN_VIDEO_ASSETS_DDL)
-            await conn.execute(ADMIN_VIDEO_ASSETS_SCENE_INDEX)
+            for stmt in schema_statements(dialect=self._session_factory.dialect):
+                await conn.execute(stmt)
             await conn.commit()
         finally:
             await conn.close()
@@ -94,6 +73,17 @@ class AdminVideoAssetRow:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class AdminSceneIntroRow:
+    scene_key: str
+    scene_name: str
+    intro_text: str
+    decision_intro_text: str
+    user_intro_text: str
+    created_at: str
+    updated_at: str
+
+
 class AdminVideoAssetRepository:
     def __init__(self, session_factory: DatabaseSessionFactory) -> None:
         self._session_factory = session_factory
@@ -101,8 +91,8 @@ class AdminVideoAssetRepository:
     async def init_db(self) -> None:
         conn = await self._session_factory.connect()
         try:
-            await conn.execute(ADMIN_VIDEO_ASSETS_DDL)
-            await conn.execute(ADMIN_VIDEO_ASSETS_SCENE_INDEX)
+            for stmt in schema_statements(dialect=self._session_factory.dialect)[9:11]:
+                await conn.execute(stmt)
             await conn.commit()
         finally:
             await conn.close()
@@ -123,11 +113,11 @@ class AdminVideoAssetRepository:
     ) -> AdminVideoAssetRow:
         conn = await self._session_factory.connect()
         try:
-            cur = await conn.execute(
+            asset_id = await conn.fetchval(
                 "INSERT INTO admin_video_assets("
                 "scene_key, scene_name, title, original_filename, stored_filename, file_path, file_url, "
                 "mime_type, file_size, duration_seconds"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
                 (
                     scene_key,
                     scene_name,
@@ -142,7 +132,6 @@ class AdminVideoAssetRepository:
                 ),
             )
             await conn.commit()
-            asset_id = int(cur.lastrowid)
             row = await self.get_video(asset_id=asset_id)
             if row is None:
                 raise RuntimeError("inserted admin video asset not found")
@@ -153,11 +142,10 @@ class AdminVideoAssetRepository:
     async def get_video(self, *, asset_id: int) -> AdminVideoAssetRow | None:
         conn = await self._session_factory.connect()
         try:
-            cur = await conn.execute(
+            row = await conn.fetchone(
                 "SELECT * FROM admin_video_assets WHERE id=? AND status='active'",
                 (int(asset_id),),
             )
-            row = await cur.fetchone()
             return _admin_video_asset_from_row(row) if row else None
         finally:
             await conn.close()
@@ -166,15 +154,14 @@ class AdminVideoAssetRepository:
         conn = await self._session_factory.connect()
         try:
             if scene_key:
-                cur = await conn.execute(
+                rows = await conn.fetchall(
                     "SELECT * FROM admin_video_assets WHERE scene_key=? AND status='active' ORDER BY id DESC",
                     (scene_key,),
                 )
             else:
-                cur = await conn.execute(
+                rows = await conn.fetchall(
                     "SELECT * FROM admin_video_assets WHERE status='active' ORDER BY id DESC",
                 )
-            rows = await cur.fetchall()
             return [_admin_video_asset_from_row(row) for row in rows]
         finally:
             await conn.close()
@@ -196,6 +183,122 @@ class AdminVideoAssetRepository:
         return row
 
 
+class AdminSceneIntroRepository:
+    def __init__(self, session_factory: DatabaseSessionFactory) -> None:
+        self._session_factory = session_factory
+
+    async def _ensure_columns(self, conn) -> None:
+        if self._session_factory.is_postgres:
+            await conn.execute(
+                "ALTER TABLE admin_scene_intros ADD COLUMN IF NOT EXISTS decision_intro_text TEXT NOT NULL DEFAULT ''"
+            )
+            await conn.execute(
+                "ALTER TABLE admin_scene_intros ADD COLUMN IF NOT EXISTS user_intro_text TEXT NOT NULL DEFAULT ''"
+            )
+            return
+        try:
+            await conn.execute(
+                "ALTER TABLE admin_scene_intros ADD COLUMN decision_intro_text TEXT NOT NULL DEFAULT ''"
+            )
+        except Exception:
+            pass
+        try:
+            await conn.execute(
+                "ALTER TABLE admin_scene_intros ADD COLUMN user_intro_text TEXT NOT NULL DEFAULT ''"
+            )
+        except Exception:
+            pass
+
+    async def init_db(self) -> None:
+        conn = await self._session_factory.connect()
+        try:
+            await conn.execute(schema_statements(dialect=self._session_factory.dialect)[11])
+            await self._ensure_columns(conn)
+            await conn.commit()
+        finally:
+            await conn.close()
+
+    async def get_intro(self, *, scene_key: str) -> AdminSceneIntroRow | None:
+        conn = await self._session_factory.connect()
+        try:
+            await self._ensure_columns(conn)
+            row = await conn.fetchone(
+                "SELECT * FROM admin_scene_intros WHERE scene_key=?",
+                ((scene_key or "").strip(),),
+            )
+            return _admin_scene_intro_from_row(row) if row else None
+        finally:
+            await conn.close()
+
+    async def list_intros(self) -> List[AdminSceneIntroRow]:
+        conn = await self._session_factory.connect()
+        try:
+            await self._ensure_columns(conn)
+            rows = await conn.fetchall("SELECT * FROM admin_scene_intros ORDER BY scene_key ASC")
+            return [_admin_scene_intro_from_row(row) for row in rows]
+        finally:
+            await conn.close()
+
+    async def upsert_intro(
+        self,
+        *,
+        scene_key: str,
+        scene_name: str,
+        intro_text: str,
+        decision_intro_text: str,
+        user_intro_text: str,
+    ) -> AdminSceneIntroRow:
+        key = (scene_key or "").strip()
+        conn = await self._session_factory.connect()
+        try:
+            await self._ensure_columns(conn)
+            if self._session_factory.is_postgres:
+                await conn.execute(
+                    "INSERT INTO admin_scene_intros("
+                    "scene_key, scene_name, intro_text, decision_intro_text, user_intro_text"
+                    ") VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(scene_key) DO UPDATE SET "
+                    "scene_name=excluded.scene_name, "
+                    "intro_text=excluded.intro_text, "
+                    "decision_intro_text=excluded.decision_intro_text, "
+                    "user_intro_text=excluded.user_intro_text, "
+                    "updated_at=CURRENT_TIMESTAMP",
+                    (
+                        key,
+                        (scene_name or "").strip(),
+                        (intro_text or "").strip(),
+                        (decision_intro_text or "").strip(),
+                        (user_intro_text or "").strip(),
+                    ),
+                )
+            else:
+                await conn.execute(
+                    "INSERT INTO admin_scene_intros("
+                    "scene_key, scene_name, intro_text, decision_intro_text, user_intro_text"
+                    ") VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(scene_key) DO UPDATE SET "
+                    "scene_name=excluded.scene_name, "
+                    "intro_text=excluded.intro_text, "
+                    "decision_intro_text=excluded.decision_intro_text, "
+                    "user_intro_text=excluded.user_intro_text, "
+                    "updated_at=CURRENT_TIMESTAMP",
+                    (
+                        key,
+                        (scene_name or "").strip(),
+                        (intro_text or "").strip(),
+                        (decision_intro_text or "").strip(),
+                        (user_intro_text or "").strip(),
+                    ),
+                )
+            await conn.commit()
+        finally:
+            await conn.close()
+        row = await self.get_intro(scene_key=key)
+        if row is None:
+            raise RuntimeError("upserted admin scene intro not found")
+        return row
+
+
 def _admin_video_asset_from_row(row) -> AdminVideoAssetRow:
     return AdminVideoAssetRow(
         id=int(row["id"]),
@@ -210,6 +313,18 @@ def _admin_video_asset_from_row(row) -> AdminVideoAssetRow:
         file_size=int(row["file_size"] or 0),
         duration_seconds=int(row["duration_seconds"]) if row["duration_seconds"] is not None else None,
         status=str(row["status"] or ""),
+        created_at=str(row["created_at"] or ""),
+        updated_at=str(row["updated_at"] or ""),
+    )
+
+
+def _admin_scene_intro_from_row(row) -> AdminSceneIntroRow:
+    return AdminSceneIntroRow(
+        scene_key=str(row["scene_key"] or ""),
+        scene_name=str(row["scene_name"] or ""),
+        intro_text=str(row["intro_text"] or ""),
+        decision_intro_text=str(row["decision_intro_text"] or ""),
+        user_intro_text=str(row["user_intro_text"] or ""),
         created_at=str(row["created_at"] or ""),
         updated_at=str(row["updated_at"] or ""),
     )
@@ -237,14 +352,23 @@ class LeadCaptureRepository:
             return False
         conn = await self._session_factory.connect()
         try:
+            if self._session_factory.is_postgres:
+                inserted = await conn.fetchval(
+                    "INSERT INTO lead_captures(session_id, contact_type, contact_value, visitor_type) "
+                    "VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(session_id, contact_type, contact_value) DO NOTHING "
+                    "RETURNING id",
+                    (sid, ct, cv, visitor_type),
+                )
+                await conn.commit()
+                return inserted is not None
             await conn.execute(
                 "INSERT OR IGNORE INTO lead_captures(session_id, contact_type, contact_value, visitor_type) "
                 "VALUES (?, ?, ?, ?)",
                 (sid, ct, cv, visitor_type),
             )
             await conn.commit()
-            cur2 = await conn.execute("SELECT changes()")
-            row = await cur2.fetchone()
+            row = await conn.fetchone("SELECT changes()")
             n = int(row[0]) if row and row[0] is not None else 0
             return n > 0
         finally:
@@ -256,11 +380,10 @@ class LeadCaptureRepository:
             return False
         conn = await self._session_factory.connect()
         try:
-            cur = await conn.execute(
+            row = await conn.fetchone(
                 "SELECT 1 FROM lead_captures WHERE session_id=? LIMIT 1",
                 (sid,),
             )
-            row = await cur.fetchone()
             return row is not None
         finally:
             await conn.close()
@@ -312,10 +435,17 @@ class ChatSessionRepository:
             return
         conn = await self._session_factory.connect()
         try:
-            await conn.execute(
-                "INSERT OR IGNORE INTO chat_sessions(session_id, chat_mode, advisor_role) VALUES (?, ?, ?)",
-                (sid, (chat_mode or "visitor_sales"), (advisor_role or "sales")),
-            )
+            if self._session_factory.is_postgres:
+                await conn.execute(
+                    "INSERT INTO chat_sessions(session_id, chat_mode, advisor_role) VALUES (?, ?, ?) "
+                    "ON CONFLICT(session_id) DO NOTHING",
+                    (sid, (chat_mode or "visitor_sales"), (advisor_role or "sales")),
+                )
+            else:
+                await conn.execute(
+                    "INSERT OR IGNORE INTO chat_sessions(session_id, chat_mode, advisor_role) VALUES (?, ?, ?)",
+                    (sid, (chat_mode or "visitor_sales"), (advisor_role or "sales")),
+                )
             await conn.execute(
                 "UPDATE chat_sessions SET updated_at=CURRENT_TIMESTAMP WHERE session_id=?",
                 (sid,),
@@ -367,11 +497,21 @@ class ChatSessionRepository:
         conn = await self._session_factory.connect()
         try:
             await conn.execute("DELETE FROM chat_messages WHERE session_id=?", (sid,))
-            await conn.execute(
-                "INSERT OR REPLACE INTO chat_sessions(session_id, chat_mode, advisor_role, visitor_type, created_at, updated_at) "
-                "VALUES (?, ?, ?, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-                (sid, (chat_mode or "visitor_sales"), (advisor_role or "sales")),
-            )
+            if self._session_factory.is_postgres:
+                await conn.execute(
+                    "INSERT INTO chat_sessions(session_id, chat_mode, advisor_role, visitor_type, created_at, updated_at) "
+                    "VALUES (?, ?, ?, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(session_id) DO UPDATE SET "
+                    "chat_mode=excluded.chat_mode, advisor_role=excluded.advisor_role, "
+                    "visitor_type=NULL, created_at=excluded.created_at, updated_at=excluded.updated_at",
+                    (sid, (chat_mode or "visitor_sales"), (advisor_role or "sales")),
+                )
+            else:
+                await conn.execute(
+                    "INSERT OR REPLACE INTO chat_sessions(session_id, chat_mode, advisor_role, visitor_type, created_at, updated_at) "
+                    "VALUES (?, ?, ?, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                    (sid, (chat_mode or "visitor_sales"), (advisor_role or "sales")),
+                )
             await conn.commit()
         finally:
             await conn.close()
@@ -382,12 +522,11 @@ class ChatSessionRepository:
             return []
         conn = await self._session_factory.connect()
         try:
-            cur = await conn.execute(
+            rows = await conn.fetchall(
                 "SELECT role, content, created_at FROM chat_messages "
                 "WHERE session_id=? ORDER BY id DESC LIMIT ?",
                 (sid, int(limit)),
             )
-            rows = await cur.fetchall()
             out = [
                 ChatMessageRow(
                     role=str(r["role"] or ""),
@@ -408,21 +547,41 @@ class ChatSessionRepository:
             return 0
         conn = await self._session_factory.connect()
         try:
-            cur = await conn.execute(
-                "DELETE FROM chat_messages WHERE created_at < datetime('now', ?)",
-                (f"-{days} days",),
-            )
-            await conn.commit()
-            cur2 = await conn.execute("SELECT changes()")
-            row = await cur2.fetchone()
-            deleted = int(row[0]) if row and row[0] is not None else 0
+            if self._session_factory.is_postgres:
+                deleted = int(
+                    await conn.fetchval(
+                        "WITH deleted AS ("
+                        "DELETE FROM chat_messages "
+                        "WHERE created_at < CURRENT_TIMESTAMP - (? || ' days')::interval "
+                        "RETURNING 1"
+                        ") SELECT COUNT(*) FROM deleted",
+                        (str(days),),
+                    )
+                    or 0
+                )
+            else:
+                await conn.execute(
+                    "DELETE FROM chat_messages WHERE created_at < datetime('now', ?)",
+                    (f"-{days} days",),
+                )
+                await conn.commit()
+                row = await conn.fetchone("SELECT changes()")
+                deleted = int(row[0]) if row and row[0] is not None else 0
             # 清掉已无消息且也过期的会话（updated_at 作为近似）
-            await conn.execute(
-                "DELETE FROM chat_sessions "
-                "WHERE updated_at < datetime('now', ?) "
-                "AND session_id NOT IN (SELECT DISTINCT session_id FROM chat_messages)",
-                (f"-{days} days",),
-            )
+            if self._session_factory.is_postgres:
+                await conn.execute(
+                    "DELETE FROM chat_sessions "
+                    "WHERE updated_at < CURRENT_TIMESTAMP - (? || ' days')::interval "
+                    "AND session_id NOT IN (SELECT DISTINCT session_id FROM chat_messages)",
+                    (str(days),),
+                )
+            else:
+                await conn.execute(
+                    "DELETE FROM chat_sessions "
+                    "WHERE updated_at < datetime('now', ?) "
+                    "AND session_id NOT IN (SELECT DISTINCT session_id FROM chat_messages)",
+                    (f"-{days} days",),
+                )
             await conn.commit()
             return deleted
         finally:

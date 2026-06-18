@@ -23,7 +23,51 @@ def build_admin_test_client(tmp_path: Path) -> TestClient:
         app.state.admin_upload_dir = upload_dir
 
     app.include_router(router)
-    return TestClient(app)
+    client = TestClient(app)
+    client.post("/admin-api/auth/login", json={"username": "admin", "password": "admin123456"})
+    return client
+
+
+def test_admin_video_upload_requires_login(tmp_path: Path) -> None:
+    app = FastAPI()
+    db_path = tmp_path / "admin.db"
+    upload_dir = tmp_path / "uploads"
+    repo = AdminVideoAssetRepository(DatabaseSessionFactory(str(db_path)))
+
+    @app.on_event("startup")
+    async def _startup() -> None:
+        await repo.init_db()
+        app.state.admin_video_repository = repo
+        app.state.admin_upload_dir = upload_dir
+
+    app.include_router(router)
+    client = TestClient(app)
+
+    with client:
+        response = client.post(
+            "/admin-api/videos/upload",
+            data={"scene_key": "school_ai_custom", "title": "学校演示"},
+            files={"file": ("demo.mp4", b"demo", "video/mp4")},
+        )
+
+    assert response.status_code == 401
+
+
+def test_admin_login_sets_session_cookie(tmp_path: Path) -> None:
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    bad = client.post("/admin-api/auth/login", json={"username": "admin", "password": "wrong"})
+    assert bad.status_code == 401
+
+    ok = client.post("/admin-api/auth/login", json={"username": "admin", "password": "admin123456"})
+    assert ok.status_code == 200
+    assert ok.json()["authenticated"] is True
+
+    status = client.get("/admin-api/auth/status")
+    assert status.status_code == 200
+    assert status.json()["authenticated"] is True
 
 
 def test_upload_video_saves_file_and_returns_public_url(tmp_path: Path) -> None:
