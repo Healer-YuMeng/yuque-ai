@@ -6102,11 +6102,41 @@ button:disabled {
   }
 
   .visitor-dialog-card {
-    width: min(420px, calc(100vw - 24px));
+    width: min(360px, calc(100vw - 24px));
     max-height: min(88dvh, 640px);
     overflow-y: auto;
     border-radius: 18px;
-    padding: 18px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+    padding: 16px 14px calc(14px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .app-shell--visitor .visitor-dialog-title {
+    font-size: 18px;
+  }
+
+  .app-shell--visitor .visitor-dialog-field {
+    gap: 4px;
+    font-size: 11px;
+  }
+
+  .app-shell--visitor .visitor-dialog-field input,
+  .app-shell--visitor .visitor-dialog-field textarea,
+  .app-shell--visitor .visitor-dialog-error {
+    font-size: 14px;
+  }
+
+  .app-shell--visitor .visitor-dialog-field input {
+    height: 44px;
+  }
+
+  .app-shell--visitor .visitor-dialog-actions {
+    gap: 6px;
+    margin-top: 2px;
+  }
+
+  .app-shell--visitor .visitor-dialog-btn {
+    min-width: 80px;
+    height: 34px;
+    font-size: 14px;
   }
 
   .visitor-workspace-drawer {

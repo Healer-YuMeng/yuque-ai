@@ -69,8 +69,20 @@ def test_mobile_trial_apply_dialog_keeps_side_margins() -> None:
     mobile_section = css.split(".visitor-dialog-mask {", 2)[2]
     mobile_section = mobile_section.split(".visitor-workspace-drawer {", 1)[0]
     assert "padding: 12px;" in mobile_section
-    assert "width: min(420px, calc(100vw - 24px));" in mobile_section
+    assert "width: min(360px, calc(100vw - 24px));" in mobile_section
     assert "width: 100%;" not in mobile_section
+
+
+def test_mobile_trial_apply_dialog_uses_compact_spacing() -> None:
+    css = (ROOT / "frontend/src/index.css").read_text(encoding="utf-8")
+    mobile_card = css.split(".visitor-dialog-card {", 2)[2].split(".visitor-workspace-drawer {", 1)[0]
+    assert "padding: 16px 14px calc(14px + env(safe-area-inset-bottom, 0px));" in mobile_card
+    mobile_form = css.split(".app-shell--visitor .visitor-dialog-field input,", 1)[1].split(
+        ".app-shell--visitor .visitor-dialog-btn {",
+        1,
+    )[0]
+    assert "font-size: 14px;" in mobile_form
+    assert "height: 44px;" in mobile_form
 
 
 def test_trial_apply_dialog_includes_optional_email_field() -> None:
