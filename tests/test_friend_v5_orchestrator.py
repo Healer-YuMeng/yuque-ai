@@ -315,41 +315,44 @@ _FAKE_CASE_TOC_NODES = [
     {"uuid": "platform", "title": "平台介绍", "level": 1, "parent_uuid": "", "node_type": "title"},
     {"uuid": "platform-ai", "title": "人工智能通识课程", "level": 2, "parent_uuid": "platform", "node_type": "doc"},
     {"uuid": "guide", "title": "使用指南", "level": 1, "parent_uuid": "", "node_type": "title"},
-    {"uuid": "guide-ai", "title": "人工智能通识课程", "level": 2, "parent_uuid": "guide", "node_type": "doc"},
+    {"uuid": "guide-ai", "title": "人工智能通识课程", "level": 2, "parent_uuid": "guide", "node_type": "doc", "url": YUQUE_SHARED_AI_COURSE_URL},
     {"uuid": "case-root", "title": "案例与社区", "level": 1, "parent_uuid": "", "node_type": "title"},
     {"uuid": "case-library", "title": "优秀案例库", "level": 2, "parent_uuid": "case-root", "node_type": "title"},
-    {"uuid": "case-ai", "title": "人工智能通识课程", "level": 3, "parent_uuid": "case-library", "node_type": "doc"},
+    {"uuid": "case-ai", "title": "人工智能通识课程", "level": 3, "parent_uuid": "case-library", "node_type": "doc", "url": YUQUE_SHARED_AI_CASE_URL},
     {"uuid": "case-pbl", "title": "跨学科项目式学习", "level": 3, "parent_uuid": "case-library", "node_type": "doc"},
     {"uuid": "case-representative", "title": "代表性案例", "level": 3, "parent_uuid": "case-library", "node_type": "doc"},
 ]
 
 
-def test_public_yuque_share_url_uses_directory_and_doc_title_mapping() -> None:
+def test_public_yuque_share_url_uses_focus_node_url_dynamically() -> None:
+    # 使用指南 / 优秀案例库 命中的聚焦节点：直接取其语雀 TOC 链接（目录更新自动跟随）
     assert (
-        _public_yuque_share_url_for_focus({"path": ["使用指南", "人工智能通识课程"]})
+        _public_yuque_share_url_for_focus(
+            {"path": ["使用指南", "人工智能通识课程"], "url": YUQUE_SHARED_AI_COURSE_URL}
+        )
         == YUQUE_SHARED_AI_COURSE_URL
     )
     assert (
-        _public_yuque_share_url_for_focus({"path": ["使用指南", "跨学科项目式学习"]})
-        == YUQUE_SHARED_PBL_GUIDE_URL
-    )
-    assert (
-        _public_yuque_share_url_for_focus({"path": ["使用指南", "智能招生"]})
-        == YUQUE_SHARED_SMART_ENROLLMENT_GUIDE_URL
-    )
-    assert (
-        _public_yuque_share_url_for_focus({"path": ["案例与社区", "优秀案例库", "人工智能通识课程"]})
+        _public_yuque_share_url_for_focus(
+            {"path": ["案例与社区", "优秀案例库", "人工智能通识课程"], "url": YUQUE_SHARED_AI_CASE_URL}
+        )
         == YUQUE_SHARED_AI_CASE_URL
     )
+    # 未带 singleDoc 的链接会自动补上单文档读取参数
     assert (
-        _public_yuque_share_url_for_focus({"path": ["案例与社区", "优秀案例库", "跨学科项目式学习"]})
-        == YUQUE_SHARED_PBL_CASE_URL
+        _public_yuque_share_url_for_focus(
+            {"path": ["使用指南", "学校AI场景定制"], "url": "https://www.yuque.com/suesun-yb1bi/sspenu/abcd1234"}
+        )
+        == "https://www.yuque.com/suesun-yb1bi/sspenu/abcd1234?singleDoc"
     )
+    # 非「使用指南/优秀案例库」目录，或缺少链接时，不强制改写
     assert (
-        _public_yuque_share_url_for_focus({"path": ["案例与社区", "优秀案例库", "相关赛事及认证"]})
-        == YUQUE_SHARED_CERTIFICATION_CASE_URL
+        _public_yuque_share_url_for_focus(
+            {"path": ["平台介绍", "人工智能通识课程"], "url": YUQUE_SHARED_AI_COURSE_URL}
+        )
+        == ""
     )
-    assert _public_yuque_share_url_for_focus({"path": ["使用指南", "学校AI场景定制"]}) == ""
+    assert _public_yuque_share_url_for_focus({"path": ["使用指南", "人工智能通识课程"]}) == ""
 
 
 @pytest.mark.asyncio
@@ -383,8 +386,10 @@ async def test_scene_trigger_uses_fixed_toc_mapping_and_reads_yuque_doc() -> Non
     assert deep_reader.node_calls[0]["question"] == "人工智能通识课程"
     assert deep_reader.node_calls[0]["node"]["title"] == "乐高人工智能课程介绍"
     assert yuque.calls == []
-    assert not any("CatalogStateMachine" in str(item) or "trial" in str(item) for item in events)
+    assert not any("CatalogStateMachine" in str(item) for item in events)
     done = [item for item in events if item["event"] == "done"][0]["data"]
+    # 首轮（T1）转化型标签受闸门拦截，不应出现「申请测试账号」
+    assert trial_tag_for_scene("人工智能通识教育") not in done["tags"]
     assert done["answer"].startswith("我是小为")
     assert len(done["tags"]) == 3
     assert done["profile_fields"]["display_name"] == "赵老师"
@@ -420,10 +425,11 @@ async def test_tags_are_picked_from_yuque_toc_not_llm_random_tags() -> None:
     ]
 
     done = [item for item in events if item["event"] == "done"][0]["data"]
+    # 首轮：使用指南 + 当前聚焦文档的同级子目录探索（动态 TOC，统一问句风格），转化型标签受闸门拦截
     assert done["tags"] == [
         "想看看人工智能通识课程的产品的使用指南？",
-        "想看看人工智能通识课程的产品的优秀案例库？",
-        "想申请测试账号，试一试人工智能通识课程的产品？",
+        "想看看课堂流程与作品展示？",
+        "想看看适合年级与课时安排？",
     ]
     assert "想看课程例子？" not in done["tags"]
     assert done["debug"]["catalog_tag_source"] == "fixed_v5_navigation"
@@ -435,7 +441,7 @@ async def test_tags_are_picked_from_yuque_toc_not_llm_random_tags() -> None:
 
 
 @pytest.mark.asyncio
-async def test_first_turn_keeps_fixed_three_entry_tags() -> None:
+async def test_first_turn_gates_conversion_tags_and_shows_subdir_exploration() -> None:
     orch = FriendDialogOrchestratorV5(
         generator=_FakeGenerator(),
         profile_repo=_FakeProfileRepo(),
@@ -453,12 +459,15 @@ async def test_first_turn_keeps_fixed_three_entry_tags() -> None:
     )
 
     done = [item for item in events if item["event"] == "done"][0]["data"]
+    # T1：使用指南 + 子目录探索（统一问句）；案例库（≥T3）与测试账号（≥T4）被闸门拦截
     assert done["tags"] == [
         "想看看人工智能通识课程的产品的使用指南？",
-        "想看看人工智能通识课程的产品的优秀案例库？",
-        "想申请测试账号，试一试人工智能通识课程的产品？",
+        "想看看课堂流程与作品展示？",
+        "想看看适合年级与课时安排？",
     ]
     assert done["debug"]["conversion_state"]["turn_index"] == 1
+    assert done["debug"]["conversion_state"]["case_allowed"] is False
+    assert done["debug"]["conversion_state"]["trial_allowed"] is False
 
 
 @pytest.mark.asyncio
@@ -614,11 +623,80 @@ async def test_scene_rewrite_maps_frontend_scene_alias_to_real_toc_node() -> Non
         "title": "人工智能通识课程",
         "path": ["平台介绍", "人工智能通识课程"],
     }
+    # T1：使用指南 + 聚焦文档下的子目录探索（动态 TOC 子节点，统一问句）
     assert done["tags"] == [
         "想看看人工智能通识课程的产品的使用指南？",
-        "想看看人工智能通识课程的产品的优秀案例库？",
-        "想申请测试账号，试一试人工智能通识课程的产品？",
+        "想看看乐高人工智能课程？",
+        "想看看苹果STEAM课程？",
     ]
+
+
+@pytest.mark.asyncio
+async def test_scene_entry_recommends_own_subdir_not_sibling_scenes() -> None:
+    # 平台介绍下有 4 个平级场景；进入「人工智能通识教育」时只推荐它自己目录下的子目录
+    toc_nodes = [
+        {"uuid": "platform", "title": "平台介绍", "level": 1, "parent_uuid": "", "node_type": "title"},
+        {"uuid": "p-ai", "title": "人工智能通识课程", "level": 2, "parent_uuid": "platform", "node_type": "title"},
+        {"uuid": "p-ai-tencent", "title": "腾讯青少年人工智能课程", "level": 3, "parent_uuid": "p-ai", "node_type": "doc"},
+        {"uuid": "p-ai-ext", "title": "拓展课程", "level": 3, "parent_uuid": "p-ai", "node_type": "doc"},
+        {"uuid": "p-pbl", "title": "跨学科项目式学习", "level": 2, "parent_uuid": "platform", "node_type": "doc"},
+        {"uuid": "p-enroll", "title": "智能招生", "level": 2, "parent_uuid": "platform", "node_type": "doc"},
+        {"uuid": "p-custom", "title": "学校AI场景定制", "level": 2, "parent_uuid": "platform", "node_type": "doc"},
+    ]
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=toc_nodes,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="人工智能通识教育",
+        session_id="sess_v5_own_subdir",
+        scene="人工智能通识教育",
+        trigger_type="scene",
+        history=[],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["tags"] == [
+        "想看看人工智能通识课程的产品的使用指南？",
+        "想看看腾讯青少年人工智能课程？",
+        "想看看拓展课程？",
+    ]
+    # 关键：平级场景绝不出现在推荐标签中（含包装成问句的形式）
+    for sibling in ("跨学科项目式学习", "智能招生", "学校AI场景定制"):
+        assert not any(sibling in tag for tag in done["tags"])
+
+
+@pytest.mark.asyncio
+async def test_clicking_wrapped_subdir_tag_resolves_to_correct_toc_node() -> None:
+    # 子目录标签统一为问句「想看看{标题}？」，点击后仍能定位回对应语雀目录节点并深读
+    toc_nodes = [
+        {"uuid": "platform", "title": "平台介绍", "level": 1, "parent_uuid": "", "node_type": "title"},
+        {"uuid": "p-ai", "title": "人工智能通识课程", "level": 2, "parent_uuid": "platform", "node_type": "title"},
+        {"uuid": "p-ai-ext", "title": "拓展课程", "level": 3, "parent_uuid": "p-ai", "node_type": "doc", "doc_id": "9001"},
+    ]
+    deep_reader = _FakeDeepReader()
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=deep_reader,
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=toc_nodes,
+    )
+
+    await _collect_v5_events(
+        orch,
+        question="想看看拓展课程？",
+        session_id="sess_v5_wrapped_subdir_click",
+        scene="人工智能通识教育",
+        trigger_type="tag",
+        history=[ChatMessageRow(role="user", content="人工智能通识教育", created_at="")],
+    )
+
+    assert deep_reader.node_calls[0]["node"]["title"] == "拓展课程"
 
 
 @pytest.mark.asyncio
@@ -656,12 +734,13 @@ async def test_leaf_focus_falls_back_to_three_strong_sibling_tags_without_far_ju
         "title": "苹果STEAM课程",
         "path": ["人工智能通识教育", "苹果STEAM课程"],
     }
+    # T1：使用指南 + 同级强相关产品（子目录探索，统一问句），不跨到「使用指南」下的远节点
     assert done["tags"] == [
         "想看看人工智能通识课程的产品的使用指南？",
-        "想看看人工智能通识课程的产品的优秀案例库？",
-        "想申请测试账号，试一试人工智能通识课程的产品？",
+        "想看看乐高人工智能课程？",
+        "想看看索尼人工智能课程？",
     ]
-    assert "智能招生操作说明" not in done["tags"]
+    assert not any("智能招生操作说明" in tag for tag in done["tags"])
 
 
 @pytest.mark.asyncio
@@ -1359,11 +1438,16 @@ async def test_after_explore_product_tag_restores_normal_rhythm() -> None:
     )
 
     done = [item for item in events if item["event"] == "done"][0]["data"]
+    # 探索产品后恢复常规漏斗节奏（指南/案例为主），而非案例库分支的横向探索列表
     assert done["tags"][0] == guide_tag_for_scene("学校AI场景定制")
     assert done["tags"][1] == case_tag_for_scene("学校AI场景定制")
+    # 学校AI场景定制在该 TOC 下无自有子目录，兜底用转化型标签补齐（真实库有子目录时走闸门节奏）
     assert done["tags"][2] == trial_tag_for_scene("学校AI场景定制")
+    # 关键：绝不把平级场景（如「跨学科项目式学习」）当作子目录推荐
+    assert "跨学科项目式学习" not in done["tags"]
     assert explore_product_tag_for_title("跨学科项目式学习") not in done["tags"]
-    assert done["debug"]["conversion_state"]["stage"] == "fixed_entry"
+    assert done["debug"]["conversion_state"]["stage"] == "conversion_unlocked"
+    assert done["debug"]["conversion_state"]["turn_index"] == 3
     assert done["debug"]["doc_deep_read_used"] is True
     assert done["debug"]["media_suppressed"] is True
     assert done["media"]["images"] == []

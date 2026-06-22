@@ -55,6 +55,12 @@ def explore_product_tag_for_title(title: str) -> str:
     return f"想了解一下{clean}产品？" if clean else ""
 
 
+def subdir_explore_tag_for_title(title: str) -> str:
+    """把语雀子目录标题包装成统一问句风格的推荐标签。"""
+    clean = (title or "").strip()
+    return f"想看看{clean}？" if clean else ""
+
+
 _EXPLORE_PRODUCT_TAG_RE = re.compile(r"^想了解一下(.+?)产品？$")
 _PRODUCT_FROM_TAG_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^想看看(.+?)的产品的使用指南？$"),

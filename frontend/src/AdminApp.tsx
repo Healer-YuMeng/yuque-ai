@@ -75,6 +75,7 @@ const KNOWLEDGE_SCENES: KnowledgeSceneItem[] = [
 const FOLLOW_UP_OPTIONS = ["待跟进", "跟进中", "已发放测试账号", "已完成"] as const;
 const TEST_ACCOUNT_OPTIONS = ["待发放", "已发放"] as const;
 const CUSTOMER_PAGE_SIZE = 10;
+const CUSTOMER_AUTO_REFRESH_MS = 8000;
 
 function AdminStatIcon({ icon }: { icon: DashboardCard["icon"] }) {
   if (icon === "users") {
@@ -384,10 +385,11 @@ function AdminApp() {
   useEffect(() => {
     if (!adminAuthenticated || activeSection !== "customers") return;
     let cancelled = false;
+    const showLoading = customers.length === 0;
     const timer = window.setTimeout(() => {
       queueMicrotask(() => {
         if (cancelled) return;
-        setCustomersLoading(true);
+        if (showLoading) setCustomersLoading(true);
         setCustomerError("");
       });
       fetch(
@@ -423,7 +425,15 @@ function AdminApp() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [adminAuthenticated, activeSection, customerQuery, customerPage, customerListVersion]);
+  }, [adminAuthenticated, activeSection, customerQuery, customerPage, customerListVersion, customers.length]);
+
+  useEffect(() => {
+    if (!adminAuthenticated || activeSection !== "customers") return;
+    const interval = window.setInterval(() => {
+      setCustomerListVersion((version) => version + 1);
+    }, CUSTOMER_AUTO_REFRESH_MS);
+    return () => window.clearInterval(interval);
+  }, [adminAuthenticated, activeSection]);
 
   const handleUploadClick = () => {
     fileInputRef.current?.click();

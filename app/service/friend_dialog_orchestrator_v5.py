@@ -21,10 +21,12 @@ from app.schemas.chat_v5 import ChatV5DonePayload, FriendV5SourceItem
 from app.service.friend_v5_tags import (
     SCENE_TO_TOC_TITLE,
     FriendV5TagStreamFilter,
+    case_tag_for_scene,
     classify_friend_v5_tag,
     explore_product_tag_for_title,
     explore_product_title_from_tag,
-    fallback_tags_for_scene,
+    guide_tag_for_scene,
+    subdir_explore_tag_for_title,
     scene_for_toc_title,
     price_tag_for_scene,
     product_title_from_tag,
@@ -62,14 +64,9 @@ _CASE_SECTION_TITLE = "案例与社区"
 _CASE_LIBRARY_TITLE = "优秀案例库"
 _PLATFORM_SECTION_TITLE = "平台介绍"
 _GUIDE_SOURCES_HINT = "使用指南中的详细操作链接已整理在下方参考资料，您可点击查阅。"
-_PUBLIC_YUQUE_SHARE_URLS: dict[tuple[str, str], str] = {
-    ("guide", "人工智能通识课程"): "https://www.yuque.com/suesun-yb1bi/sspenu/sbdx665n47rz9rt5?singleDoc#%20《人工智能通识课程》",
-    ("guide", "跨学科项目式学习"): "https://www.yuque.com/suesun-yb1bi/sspenu/dl4rxzdb0ahgq42n?singleDoc#%20《跨学科项目式学习》",
-    ("guide", "智能招生"): "https://www.yuque.com/suesun-yb1bi/sspenu/pmg3pix4w4e6g1zd?singleDoc#%20《智能招生》",
-    ("case", "人工智能通识课程"): "https://www.yuque.com/suesun-yb1bi/sspenu/pynfez9lydaxq7gg?singleDoc#%20《人工智能通识课程》",
-    ("case", "跨学科项目式学习"): "https://www.yuque.com/suesun-yb1bi/sspenu/ztzk0v4ggl934d86?singleDoc#%20《跨学科项目式学习》",
-    ("case", "相关赛事及认证"): "https://www.yuque.com/suesun-yb1bi/sspenu/kfuc54vihosyzlvo?singleDoc#%20《相关赛事及认证》",
-}
+# 推荐标签节奏：转化型标签按对话轮次设最早出现闸门，避免每轮都重复出现
+_CASE_TAG_MIN_TURN = 3
+_TRIAL_TAG_MIN_TURN = 4
 _CASE_KB_FALLBACK_ANSWER = (
     "目前在上海、江苏、成都多所K12学校均有落地实施的具体案例，"
     "需了解更为具体的案例介绍，方便的话可以留下您的联系方式。"
@@ -945,12 +942,28 @@ def _rewrite_public_yuque_sources(
 
 
 def _public_yuque_share_url_for_focus(focus: Optional[dict[str, Any]]) -> str:
+    """使用指南 / 优秀案例库 命中的聚焦节点，直接用其语雀 TOC 链接生成对外分享地址。
+
+    整库已公开分享，故无需维护写死的 URL 白名单——目录更新后链接自动跟随。
+    """
+    if not focus:
+        return ""
     path = [str(item or "").strip() for item in (focus or {}).get("path") or [] if str(item or "").strip()]
     directory = _public_yuque_share_directory(path)
-    title = _public_yuque_share_title(path)
-    if not directory or not title:
+    if not directory:
         return ""
-    return _PUBLIC_YUQUE_SHARE_URLS.get((directory, title), "")
+    url = str((focus or {}).get("url") or "").strip()
+    if not url or "yuque.com/" not in url:
+        return ""
+    return _ensure_yuque_single_doc(url)
+
+
+def _ensure_yuque_single_doc(url: str) -> str:
+    value = (url or "").strip()
+    if not value or "singleDoc" in value:
+        return value
+    sep = "&" if "?" in value else "?"
+    return f"{value}{sep}singleDoc"
 
 
 def _public_yuque_share_title_for_focus(focus: Optional[dict[str, Any]]) -> str:
@@ -1019,48 +1032,112 @@ def _apply_recommendation_tag_rhythm(
         mapped_scene = scene_for_toc_title(explored)
         if mapped_scene:
             effective_scene = mapped_scene
-    tags = fallback_tags_for_scene(effective_scene)
     seen_guide = route_kind == "guide" or _history_has_tag_kind(history=history, scene=effective_scene, kind="guide")
     seen_case = route_kind == "case" or _history_has_tag_kind(history=history, scene=effective_scene, kind="case")
-    stage = "fixed_entry"
 
-    if seen_guide:
-        tags[0] = price_tag_for_scene(effective_scene)
-        stage = "guide_to_price"
-
-    used_explore_products = False
-    # 仅在「刚看完优秀案例库」这一轮展示其他产品的探索标签；后续恢复常规节奏
+    # 刚看完优秀案例库这一轮：横向推荐平台介绍下的其他产品，引导发现更多场景
     if route_kind == "case":
         explore_tags = _platform_intro_explore_tags(scene=effective_scene, toc_nodes=toc_nodes, limit=3)
         if explore_tags:
-            tags = explore_tags
-            used_explore_products = True
-            stage = "case_to_explore_products"
-        else:
-            tags[0] = price_tag_for_scene(effective_scene)
-            stage = "case_to_price"
+            return _TagRhythmResult(
+                tags=_dedupe_tag_list(explore_tags)[:3],
+                conversion_state=_conversion_state(
+                    turn_index=turn_index,
+                    stage="case_to_explore_products",
+                    trigger_type=trigger_type,
+                    route_kind=route_kind,
+                    seen_guide=seen_guide,
+                    seen_case=seen_case,
+                    case_allowed=True,
+                    trial_allowed=turn_index >= _TRIAL_TAG_MIN_TURN,
+                ),
+            )
 
-    if not used_explore_products:
-        tags[2] = trial_tag_for_scene(effective_scene)
-    tags = _dedupe_tag_list(tags)[:3]
-    if len(tags) < 3 and not used_explore_products:
-        for fallback in fallback_tags_for_scene(effective_scene):
+    # 转化型标签的轮次闸门：第 N 轮起才允许进入候选，更早的轮次用目录探索标签顶上
+    case_allowed = turn_index >= _CASE_TAG_MIN_TURN
+    trial_allowed = turn_index >= _TRIAL_TAG_MIN_TURN
+
+    # 第 1 位主导航：看过使用指南后切换为价格，否则为使用指南
+    tags: List[str] = [price_tag_for_scene(effective_scene) if seen_guide else guide_tag_for_scene(effective_scene)]
+    if case_allowed:
+        tags.append(case_tag_for_scene(effective_scene))
+    if trial_allowed:
+        tags.append(trial_tag_for_scene(effective_scene))
+
+    # 闸门未开 / 仍有空位：用「当前目录自己目录下的子目录」补齐（动态 TOC）；
+    # 排除左侧四个平级场景标题，避免把同级场景误当作子目录推荐。
+    exploration = _scene_subdir_explore_tags(
+        scene=effective_scene,
+        focus_node=focus_node,
+        toc_nodes=toc_nodes,
+    )
+    if not exploration:
+        exploration = _clean_content_tags(content_tags)
+    scene_title_norms = _scene_title_norms()
+    for raw_title in exploration:
+        if len(tags) >= 3:
+            break
+        if _norm_for_match(raw_title) in scene_title_norms:
+            continue
+        tag = subdir_explore_tag_for_title(raw_title)
+        if not tag:
+            continue
+        if _norm_for_match(tag) not in {_norm_for_match(item) for item in tags}:
+            tags.append(tag)
+    # 无任何可探索目录时，用转化型标签兜底补齐（第 1 位已是指南/价格，不再重复）
+    if len(tags) < 3:
+        for fallback in (case_tag_for_scene(effective_scene), trial_tag_for_scene(effective_scene)):
             if len(tags) >= 3:
                 break
-            if _norm_for_match(fallback) not in {_norm_for_match(tag) for tag in tags}:
+            if _norm_for_match(fallback) not in {_norm_for_match(item) for item in tags}:
                 tags.append(fallback)
+    tags = _dedupe_tag_list(tags)[:3]
+
+    if seen_guide and case_allowed and trial_allowed:
+        stage = "full_funnel"
+    elif seen_guide:
+        stage = "guide_to_price"
+    elif case_allowed or trial_allowed:
+        stage = "conversion_unlocked"
+    else:
+        stage = "exploration_only"
 
     return _TagRhythmResult(
         tags=tags,
-        conversion_state={
-            "turn_index": turn_index,
-            "stage": stage,
-            "trigger_type": trigger_type,
-            "tag_route_kind": route_kind,
-            "seen_guide": seen_guide,
-            "seen_case": seen_case,
-        },
+        conversion_state=_conversion_state(
+            turn_index=turn_index,
+            stage=stage,
+            trigger_type=trigger_type,
+            route_kind=route_kind,
+            seen_guide=seen_guide,
+            seen_case=seen_case,
+            case_allowed=case_allowed,
+            trial_allowed=trial_allowed,
+        ),
     )
+
+
+def _conversion_state(
+    *,
+    turn_index: int,
+    stage: str,
+    trigger_type: str,
+    route_kind: str,
+    seen_guide: bool,
+    seen_case: bool,
+    case_allowed: bool,
+    trial_allowed: bool,
+) -> dict[str, Any]:
+    return {
+        "turn_index": turn_index,
+        "stage": stage,
+        "trigger_type": trigger_type,
+        "tag_route_kind": route_kind,
+        "seen_guide": seen_guide,
+        "seen_case": seen_case,
+        "case_allowed": case_allowed,
+        "trial_allowed": trial_allowed,
+    }
 
 
 def _v5_turn_index(history: Sequence[ChatMessageRow]) -> int:
@@ -1382,6 +1459,106 @@ def _platform_intro_explore_tags(
         if len(tags) >= limit:
             break
     return tags
+
+
+def _scene_title_norms() -> set[str]:
+    """左侧四个场景对应的目录标题（含别名），它们是平级目录，不应作为子目录推荐。"""
+    norms: set[str] = set()
+    for scene_key, toc_title in SCENE_TO_TOC_TITLE.items():
+        norms.add(_norm_for_match(scene_key))
+        norms.add(_norm_for_match(toc_title))
+    return norms
+
+
+def _scene_container_node(
+    *,
+    scene: str,
+    toc_nodes: Sequence[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """定位当前场景在语雀目录中的容器节点（如「平台介绍 > 人工智能通识课程」）。"""
+    title_norm = _norm_for_match(toc_title_for_scene(scene))
+    if not title_norm:
+        return None
+    platform_uuid = ""
+    for node in toc_nodes:
+        if _norm_for_match(str(node.get("title") or "")) == _norm_for_match(_PLATFORM_SECTION_TITLE):
+            platform_uuid = str(node.get("uuid") or "")
+            break
+    if platform_uuid:
+        for node in toc_nodes:
+            if (
+                str(node.get("parent_uuid") or "") == platform_uuid
+                and _norm_for_match(str(node.get("title") or "")) == title_norm
+            ):
+                return node
+    for node in toc_nodes:
+        if _norm_for_match(str(node.get("title") or "")) == title_norm:
+            return node
+    return None
+
+
+def _direct_child_titles(
+    *,
+    parent_uuid: str,
+    toc_nodes: Sequence[dict[str, Any]],
+    exclude_norms: set[str],
+    limit: int,
+) -> List[str]:
+    parent_uuid = (parent_uuid or "").strip()
+    if not parent_uuid:
+        return []
+    titles: List[str] = []
+    seen: set[str] = set()
+    for node in toc_nodes:
+        if str(node.get("parent_uuid") or "") != parent_uuid:
+            continue
+        title = str(node.get("title") or "").strip()
+        if not title:
+            continue
+        norm = _norm_for_match(title)
+        if norm in exclude_norms or norm in seen:
+            continue
+        seen.add(norm)
+        titles.append(title[:60])
+        if len(titles) >= limit:
+            break
+    return titles
+
+
+def _scene_subdir_explore_tags(
+    *,
+    scene: str,
+    focus_node: Optional[dict[str, Any]],
+    toc_nodes: Sequence[dict[str, Any]],
+    limit: int = 3,
+) -> List[str]:
+    """当前所在目录「自己目录下的子目录」探索标签，排除四个平级场景标题。
+
+    优先取当前聚焦节点的直接子目录（对话深入后逐层展开），其次回退到当前场景
+    容器节点的直接子目录（场景刚进入时展示场景顶层子目录）。
+    """
+    if not toc_nodes:
+        return []
+    exclude = _scene_title_norms()
+    exclude.add(_norm_for_match(toc_title_for_scene(scene)))
+    focus_uuid = str((focus_node or {}).get("uuid") or "")
+    tags = _direct_child_titles(
+        parent_uuid=focus_uuid,
+        toc_nodes=toc_nodes,
+        exclude_norms=exclude,
+        limit=limit,
+    )
+    if tags:
+        return tags
+    container = _scene_container_node(scene=scene, toc_nodes=toc_nodes)
+    if container:
+        return _direct_child_titles(
+            parent_uuid=str(container.get("uuid") or ""),
+            toc_nodes=toc_nodes,
+            exclude_norms=exclude,
+            limit=limit,
+        )
+    return []
 
 
 def _scene_mcp_mode(*, scene_case_continuation: bool, scene_guide_continuation: bool) -> str:
