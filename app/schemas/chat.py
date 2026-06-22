@@ -116,6 +116,7 @@ class VisitorTrialApplyRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=80)
     org_name: str = Field(..., min_length=1, max_length=160)
     contact: str = Field(..., min_length=1, max_length=120)
+    email: str = Field(default="", max_length=160)
     interested_product: str = Field(default="", max_length=160)
     concern: str = Field(default="", max_length=500)
 
@@ -125,6 +126,7 @@ class VisitorProfileResponse(BaseModel):
     name: str = ""
     org_name: str = ""
     contact: str = ""
+    email: str = ""
     interested_product: str = ""
     concern: str = ""
     module_scope: str = ""

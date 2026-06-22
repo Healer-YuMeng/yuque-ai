@@ -54,6 +54,7 @@ def test_visitor_trial_apply_persists_customer_for_admin(tmp_path: Path) -> None
                 "name": "赵老师",
                 "org_name": "培训机构",
                 "contact": "18273648765",
+                "email": "zhao@example.com",
                 "interested_product": "人工智能通识教育",
             },
         )
@@ -72,6 +73,10 @@ def test_visitor_trial_apply_persists_customer_for_admin(tmp_path: Path) -> None
         assert items[0]["follow_up_status"] == "待跟进"
         assert items[0]["trial_account"] == "待发放"
 
+        profile_resp = client.get("/visitor/profile", params={"session_id": "sess_visitor_apply_1"})
+        assert profile_resp.status_code == 200
+        assert profile_resp.json()["email"] == "zhao@example.com"
+
 
 @pytest.mark.asyncio
 async def test_apply_visitor_trial_account_sets_admin_defaults(tmp_path: Path) -> None:
@@ -83,6 +88,7 @@ async def test_apply_visitor_trial_account_sets_admin_defaults(tmp_path: Path) -
         name="李老师",
         org_name="实验小学",
         contact="13800138000",
+        email="li@example.com",
     )
 
     assert result.ok is True
@@ -93,5 +99,40 @@ async def test_apply_visitor_trial_account_sets_admin_defaults(tmp_path: Path) -
     admin_meta = (profile.interests or {}).get("_admin") or {}
     assert admin_meta.get("follow_up_status") == "待跟进"
     assert admin_meta.get("test_account_status") == "待发放"
+    lead_meta = (profile.interests or {}).get("_lead") or {}
+    assert lead_meta.get("email") == "li@example.com"
     session_meta = (profile.interests or {}).get("_session") or {}
     assert session_meta.get("trial_apply_submitted") is True
+
+
+@pytest.mark.asyncio
+async def test_v5_chat_contact_persists_customer_for_admin(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    await service._document_repository.init_db()
+    await service._chat_session_profile_repository.upsert_profile(
+        session_id="sess_v5_chat_lead",
+        display_name="赵老师",
+        org_name="",
+        interests={
+            "_lead": {
+                "contact_type": "phone",
+                "contact_value": "13423445679",
+                "interested_product": "智能招生",
+            }
+        },
+    )
+
+    saved = await service._persist_v5_chat_lead_for_admin(
+        session_id="sess_v5_chat_lead",
+        question="我是赵老师，联系方式是13423445679",
+        scene="智能招生",
+    )
+
+    assert saved is True
+    customer_repo = AdminCustomerRepository(DatabaseSessionFactory(str(tmp_path / "visitor_trial.db")))
+    items, total = await customer_repo.list_customers()
+    assert total == 1
+    assert items[0].display_name == "赵老师"
+    assert items[0].contact == "13423445679"
+    assert items[0].follow_up_status == "待跟进"
+    assert items[0].trial_account == "待发放"

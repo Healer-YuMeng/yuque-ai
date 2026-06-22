@@ -58,7 +58,9 @@ class AdminCustomerResponse(BaseModel):
     session_id: str
     display_name: str = ""
     org_name: str = ""
+    role_category: str = ""
     contact: str = ""
+    email: str = ""
     follow_up_status: str = "待跟进"
     trial_account: str = "待发放"
     updated_at: str = ""

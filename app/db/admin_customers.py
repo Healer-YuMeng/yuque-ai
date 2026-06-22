@@ -17,7 +17,9 @@ class AdminCustomerRow:
     session_id: str
     display_name: str
     org_name: str
+    role_category: str
     contact: str
+    email: str
     follow_up_status: str
     trial_account: str
     updated_at: str
@@ -92,6 +94,7 @@ class AdminCustomerRepository:
                 SELECT COALESCE(p.session_id, l.session_id) AS session_id,
                        p.display_name,
                        p.org_name,
+                       p.visitor_type,
                        p.interests_json,
                        {updated_at_expr} AS updated_at
                 {customer_from}
@@ -159,6 +162,7 @@ class AdminCustomerRepository:
                 SELECT COALESCE(p.session_id, l.session_id) AS session_id,
                        p.display_name,
                        p.org_name,
+                       p.visitor_type,
                        p.interests_json,
                        {updated_at_expr} AS updated_at
                 {self._customer_base_from()}
@@ -284,18 +288,22 @@ class AdminCustomerRepository:
                 (sid,),
             )
 
-    async def _load_leads_by_session(self, conn: Any, session_ids: List[str]) -> dict[str, List[tuple[str, str]]]:
+    async def _load_leads_by_session(self, conn: Any, session_ids: List[str]) -> dict[str, List[tuple[str, str, str]]]:
         if not session_ids:
             return {}
         placeholders = ",".join("?" for _ in session_ids)
         rows = await conn.fetchall(
-            f"SELECT session_id, contact_type, contact_value FROM lead_captures WHERE session_id IN ({placeholders})",
+            f"SELECT session_id, contact_type, contact_value, visitor_type FROM lead_captures WHERE session_id IN ({placeholders})",
             tuple(session_ids),
         )
-        out: dict[str, List[tuple[str, str]]] = {}
+        out: dict[str, List[tuple[str, str, str]]] = {}
         for row in rows:
             sid = str(row["session_id"])
-            out.setdefault(sid, []).append((str(row["contact_type"] or ""), str(row["contact_value"] or "")))
+            out.setdefault(sid, []).append((
+                str(row["contact_type"] or ""),
+                str(row["contact_value"] or ""),
+                str(row["visitor_type"] or ""),
+            ))
         return out
 
 
@@ -315,29 +323,35 @@ def _search_params(query: str, *, is_postgres: bool) -> tuple[str, list[Any]]:
                 WHERE lc.session_id = l.session_id
                   AND lc.contact_value """ + ilike_op + """ ?
             )
+            OR COALESCE(
+                """ + ("p.interests_json::jsonb #>> '{_lead,email}'" if is_postgres else "CAST(json_extract(p.interests_json, '$._lead.email') AS TEXT)") + """,
+                ''
+            ) """ + ilike_op + """ ?
         )
         """,
-        [like, like, like],
+        [like, like, like, like],
     )
 
 
-def _customer_row_from_db(row: Any, leads: List[tuple[str, str]]) -> AdminCustomerRow:
+def _customer_row_from_db(row: Any, leads: List[tuple[str, str, str]]) -> AdminCustomerRow:
     interests = _safe_json_obj(row["interests_json"])
     contact = _format_contact(leads, interests)
     return AdminCustomerRow(
         session_id=str(row["session_id"] or ""),
         display_name=str(row["display_name"] or "").strip(),
         org_name=str(row["org_name"] or "").strip(),
+        role_category=_role_category(row, leads, interests),
         contact=contact,
+        email=_lead_email(interests),
         follow_up_status=_follow_up_status(interests),
         trial_account=_test_account_status(interests),
         updated_at=str(row["updated_at"] or ""),
     )
 
 
-def _format_contact(leads: List[tuple[str, str]], interests: dict[str, Any]) -> str:
+def _format_contact(leads: List[tuple[str, str, str]], interests: dict[str, Any]) -> str:
     parts: List[str] = []
-    for contact_type, contact_value in leads:
+    for contact_type, contact_value, _visitor_type in leads:
         value = (contact_value or "").strip()
         if not value:
             continue
@@ -359,6 +373,39 @@ def _contact_type_label(contact_type: str) -> str:
     if ct in {"phone", "mobile", "tel"}:
         return ""
     return ""
+
+
+def _role_category(row: Any, leads: List[tuple[str, str, str]], interests: dict[str, Any]) -> str:
+    raw = str(row["visitor_type"] or "").strip()
+    if not raw:
+        for _contact_type, _contact_value, visitor_type in leads:
+            raw = (visitor_type or "").strip()
+            if raw:
+                break
+    if not raw:
+        lead = interests.get("_lead") if isinstance(interests.get("_lead"), dict) else {}
+        raw = str(lead.get("visitor_type") or lead.get("role_category") or "").strip()
+    return _visitor_type_label(raw)
+
+
+def _visitor_type_label(visitor_type: str) -> str:
+    vt = (visitor_type or "").strip()
+    if vt == "institution_decision_maker":
+        return "机构/学校负责人"
+    if vt == "teacher":
+        return "老师"
+    if vt == "parent":
+        return "家长"
+    if vt == "student":
+        return "学生"
+    if vt == "other":
+        return "其他"
+    return ""
+
+
+def _lead_email(interests: dict[str, Any]) -> str:
+    lead = interests.get("_lead") if isinstance(interests.get("_lead"), dict) else {}
+    return str(lead.get("email") or "").strip()
 
 
 def _follow_up_status(interests: dict[str, Any]) -> str:

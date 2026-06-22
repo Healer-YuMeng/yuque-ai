@@ -5668,19 +5668,24 @@ button:disabled {
   font-size: 1.1em;
 }
 
+.app-shell--visitor .msg.assistant.msg--inactivity .bubble {
+  font-size: 16px;
+  line-height: 1.65;
+}
+
 .app-shell--visitor .msg.assistant .stream-stage--pending {
   font-size: 19px;
 }
 
 .app-shell--visitor .friend-v5-tag-chip {
-  font-size: 17px;
+  font-size: 15px;
   padding: 12px 16px;
   border-radius: 10px;
   gap: 18px;
 }
 
 .app-shell--visitor .friend-v5-tag-chip::after {
-  font-size: 17px;
+  font-size: 15px;
   margin-left: 10px;
 }
 
@@ -6093,14 +6098,14 @@ button:disabled {
 
   .visitor-dialog-mask {
     align-items: flex-end;
-    padding: 0;
+    padding: 12px;
   }
 
   .visitor-dialog-card {
-    width: 100%;
+    width: min(420px, calc(100vw - 24px));
     max-height: min(88dvh, 640px);
     overflow-y: auto;
-    border-radius: 18px 18px 0 0;
+    border-radius: 18px;
     padding: 18px 16px calc(16px + env(safe-area-inset-bottom, 0px));
   }
 

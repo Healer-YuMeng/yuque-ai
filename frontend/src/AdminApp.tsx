@@ -47,7 +47,9 @@ type AdminCustomer = {
   session_id: string;
   display_name: string;
   org_name: string;
+  role_category: string;
   contact: string;
+  email: string;
   follow_up_status: string;
   trial_account: string;
   updated_at: string;
@@ -894,7 +896,7 @@ function AdminApp() {
               <input
                 type="search"
                 className="admin-customers-search"
-                placeholder="搜索客户名称或单位..."
+                placeholder="搜索客户名称、单位、联系方式或邮箱..."
                 value={customerQuery}
                 onChange={(event) => {
                   setCustomerQuery(event.target.value);
@@ -908,7 +910,9 @@ function AdminApp() {
                     <tr>
                       <th>称呼</th>
                       <th>单位</th>
+                      <th>角色类别</th>
                       <th>联系方式</th>
+                      <th>邮箱</th>
                       <th>跟进进度</th>
                       <th>测试账号</th>
                       <th className="admin-customers-col-actions">操作</th>
@@ -918,18 +922,20 @@ function AdminApp() {
                   <tbody>
                     {customersLoading ? (
                       <tr>
-                        <td colSpan={7} className="admin-customers-empty">正在加载客户数据...</td>
+                        <td colSpan={9} className="admin-customers-empty">正在加载客户数据...</td>
                       </tr>
                     ) : customers.length === 0 ? (
                       <tr>
-                        <td colSpan={7} className="admin-customers-empty">暂无客户数据</td>
+                        <td colSpan={9} className="admin-customers-empty">暂无客户数据</td>
                       </tr>
                     ) : (
                       customers.map((customer) => (
                         <tr key={customer.session_id}>
                           <td>{customer.display_name || "—"}</td>
                           <td>{customer.org_name || "—"}</td>
+                          <td>{customer.role_category || "—"}</td>
                           <td>{customer.contact || "—"}</td>
+                          <td>{customer.email || "—"}</td>
                           <td>
                             <select
                               className="admin-follow-select"

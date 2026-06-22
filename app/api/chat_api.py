@@ -447,6 +447,7 @@ async def visitor_trial_apply(
         name=request.name,
         org_name=request.org_name,
         contact=request.contact,
+        email=request.email,
         interested_product=request.interested_product,
         concern=request.concern,
     )

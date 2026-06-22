@@ -48,21 +48,33 @@ async def _seed_trial_customer(
     display_name: str,
     org_name: str,
     contact: str = "13800138000",
+    email: str = "",
+    visitor_type: str = "",
 ) -> None:
     conn = await session_factory.connect()
     try:
         await conn.execute(
-            "INSERT INTO chat_session_profiles(session_id, display_name, org_name, interests_json) VALUES (?, ?, ?, ?)",
+            "INSERT INTO chat_session_profiles(session_id, display_name, org_name, visitor_type, interests_json) VALUES (?, ?, ?, ?, ?)",
             (
                 session_id,
                 display_name,
                 org_name,
-                json.dumps(_trial_apply_interests(), ensure_ascii=False),
+                visitor_type,
+                json.dumps(
+                    {
+                        **_trial_apply_interests(),
+                        "_lead": {
+                            **_trial_apply_interests()["_lead"],
+                            "email": email,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
             ),
         )
         await conn.execute(
             "INSERT INTO lead_captures(session_id, contact_type, contact_value, visitor_type) VALUES (?, ?, ?, ?)",
-            (session_id, "phone", contact, None),
+            (session_id, "phone", contact, visitor_type or None),
         )
         await conn.commit()
     finally:
@@ -95,6 +107,7 @@ def test_list_customers_only_shows_trial_apply_submissions(tmp_path: Path) -> No
         assert payload["total"] == 1
         assert len(payload["items"]) == 1
         assert payload["items"][0]["display_name"] == "张老师"
+        assert payload["items"][0]["role_category"] == ""
         assert payload["page"] == 1
         assert payload["page_size"] == 10
 
@@ -113,7 +126,7 @@ def test_list_customers_includes_leads_even_without_trial_apply(tmp_path: Path) 
                 )
                 await conn.execute(
                     "INSERT INTO lead_captures(session_id, contact_type, contact_value, visitor_type) VALUES (?, ?, ?, ?)",
-                    ("sess_lead_only", "phone", "13900001111", None),
+                    ("sess_lead_only", "phone", "13900001111", "teacher"),
                 )
                 await conn.commit()
             finally:
@@ -126,7 +139,50 @@ def test_list_customers_includes_leads_even_without_trial_apply(tmp_path: Path) 
         payload = list_resp.json()
         assert payload["total"] == 1
         assert payload["items"][0]["display_name"] == "王老师"
+        assert payload["items"][0]["role_category"] == "老师"
         assert payload["items"][0]["contact"] == "13900001111"
+
+
+def test_list_customers_includes_role_category_from_profile(tmp_path: Path) -> None:
+    client = build_admin_customer_test_client(tmp_path)
+    session_factory = DatabaseSessionFactory(str(tmp_path / "admin_customers.db"))
+
+    with client:
+        asyncio.run(
+            _seed_trial_customer(
+                session_factory,
+                session_id="sess_role_1",
+                display_name="刘校长",
+                org_name="未来学校",
+                visitor_type="institution_decision_maker",
+            )
+        )
+
+        list_resp = client.get("/admin-api/customers")
+        assert list_resp.status_code == 200
+        payload = list_resp.json()
+        assert payload["items"][0]["role_category"] == "机构/学校负责人"
+
+
+def test_list_customers_includes_email_when_present(tmp_path: Path) -> None:
+    client = build_admin_customer_test_client(tmp_path)
+    session_factory = DatabaseSessionFactory(str(tmp_path / "admin_customers.db"))
+
+    with client:
+        asyncio.run(
+            _seed_trial_customer(
+                session_factory,
+                session_id="sess_email_1",
+                display_name="赵老师",
+                org_name="实验小学",
+                email="zhao@example.com",
+            )
+        )
+
+        list_resp = client.get("/admin-api/customers")
+        assert list_resp.status_code == 200
+        item = list_resp.json()["items"][0]
+        assert item["email"] == "zhao@example.com"
 
 
 def test_list_customers_pagination(tmp_path: Path) -> None:

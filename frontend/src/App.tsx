@@ -130,7 +130,7 @@ function isFriendV5TrialApplyTag(tag: string) {
 }
 
 function friendV5TagDisplayText(tag: string): string {
-  const normalized = tag.replace(/[\s「」『』《》【】\[\]（）()、，,。！!？?:：;；\-_\\/|]/g, "");
+  const normalized = tag.replace(/[[\s「」『』《》【】\]（）()、，,。！!？?:：;；\-_\\/|]/g, "");
   let label = tag.trim();
   if (normalized.includes("价格") || normalized.includes("报价") || normalized.includes("费用")) {
     label = "想了解一下价格？";
@@ -415,6 +415,7 @@ type VisitorProfileResponse = {
   name?: string;
   org_name?: string;
   contact?: string;
+  email?: string;
   interested_product?: string;
   concern?: string;
   module_scope?: string;
@@ -554,6 +555,8 @@ function parseFriendV5SearchKeywords(input: unknown): string[] {
 function normalizeFriendV5SourceUrl(input: string): string | null {
   const value = (input || "").trim();
   if (!value) return null;
+  const yuqueRelative = normalizeYuqueRelativeUrl(value);
+  if (yuqueRelative) return yuqueRelative;
   const match = value.match(
     /(?:https?:\/\/|www\.)[^\s\][<>{}"'，。；;：]+|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,24}(?::\d+)?(?:\/[^\s\][<>{}"'，。；;：]*)?/,
   );
@@ -574,6 +577,14 @@ function normalizeFriendV5SourceUrl(input: string): string | null {
   } catch {
     return null;
   }
+}
+
+function normalizeYuqueRelativeUrl(input: string): string | null {
+  const value = (input || "").trim();
+  if (!value) return null;
+  const match = value.match(/^\/?([a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/[^\s)\]}>，。、；;："'`]+)/);
+  if (!match) return null;
+  return `https://www.yuque.com/${match[1]}`;
 }
 
 function countFriendV5SearchKeywords(input: string[] | undefined): number {
@@ -615,12 +626,15 @@ function sanitizeFriendV5AnswerText(text: string): string {
   out = out.replace(/\[SOURCES\][\s\S]*?\[\/SOURCES\]/g, "");
   out = out.replace(/\[TAGS\][\s\S]*?\[END_TAGS\]/g, "");
   out = stripHiddenMarkerFragments(out);
-  out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, (_match, label: string, url: string) => {
+  out = out.replace(/\[([^\]]+)\]\(((?:https?:\/\/|www\.)[^)]+|\/?[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/[^)\s]+)\)/g, (_match, label: string, url: string) => {
+    const normalized = normalizeFriendV5SourceUrl(url);
+    if (!normalized) return label;
     const key = `__FRIEND_V5_MD_LINK_${preservedLinks.length}__`;
-    preservedLinks.push(`[${label}](${url})`);
+    preservedLinks.push(`[${label}](${normalized})`);
     return key;
   });
   out = out.replace(/(?:https?:\/\/|www\.)[^\s)\]}>"'，。、；;：]+/g, "");
+  out = out.replace(/(?<!\()\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/[^\s)\]}>"'，。、；;：]+/g, "");
   preservedLinks.forEach((link, index) => {
     out = out.replace(`__FRIEND_V5_MD_LINK_${index}__`, link);
   });
@@ -845,6 +859,7 @@ function extractTrialApplyDraft(session: SessionState | null, fallbackProduct: s
     name,
     org_name: org,
     contact: phone,
+    email: "",
     interested_product: fallbackProduct,
     concern,
   };
@@ -1159,6 +1174,7 @@ function App() {
   const [trialApplyName, setTrialApplyName] = useState("");
   const [trialApplyOrg, setTrialApplyOrg] = useState("");
   const [trialApplyContact, setTrialApplyContact] = useState("");
+  const [trialApplyEmail, setTrialApplyEmail] = useState("");
   const [trialApplySuccess, setTrialApplySuccess] = useState(false);
   const [visitorMobileSceneOpen, setVisitorMobileSceneOpen] = useState(false);
   const [welcomeHeroTitle, setWelcomeHeroTitle] = useState("");
@@ -1713,6 +1729,7 @@ function App() {
             name: data.name || fallback.name,
             org_name: data.org_name || fallback.org_name,
             contact: data.contact || fallback.contact,
+            email: data.email || fallback.email,
             interested_product: data.interested_product || fallback.interested_product,
             concern: data.concern || fallback.concern,
           };
@@ -1725,6 +1742,7 @@ function App() {
     setTrialApplyName((prev) => prev || safeName || "");
     setTrialApplyOrg((prev) => prev || profile.org_name || "");
     setTrialApplyContact((prev) => prev || profile.contact || "");
+    setTrialApplyEmail((prev) => prev || profile.email || "");
     setTrialApplyError("");
     setTrialApplySuccess(false);
     setTrialApplyDialogOpen(true);
@@ -1746,6 +1764,7 @@ function App() {
           name: trialApplyName.trim(),
           org_name: trialApplyOrg.trim(),
           contact: trialApplyContact.trim(),
+          email: trialApplyEmail.trim(),
           interested_product: draft.interested_product || activeFocusScene || "",
         }),
       });
@@ -1772,6 +1791,7 @@ function App() {
       setTrialApplyName("");
       setTrialApplyOrg("");
       setTrialApplyContact("");
+      setTrialApplyEmail("");
       window.setTimeout(() => {
         setTrialApplyDialogOpen(false);
         setTrialApplySuccess(false);
@@ -1787,6 +1807,7 @@ function App() {
     activeFocusScene,
     activeSession,
     trialApplyContact,
+    trialApplyEmail,
     trialApplyName,
     trialApplyOrg,
   ]);
@@ -3445,7 +3466,10 @@ function App() {
                         hasInlineMedia;
                       if (item.hidden) return null;
                       return (
-                      <div className={`msg ${item.role}`} key={item.id}>
+                      <div
+                        className={`msg ${item.role}${isInactivityReminderMessage(item) ? " msg--inactivity" : ""}`}
+                        key={item.id}
+                      >
                         <div style={{ width: "100%" }}>
                           {item.role === "assistant" && item.isFriendV5 ? renderFriendV5Sources(item.sources, item.searchKeywords) : null}
                           {item.role === "assistant" &&
@@ -3674,6 +3698,16 @@ function App() {
                     value={trialApplyContact}
                     onChange={(e) => setTrialApplyContact(e.target.value)}
                     placeholder="手机号或微信号"
+                    disabled={trialApplySubmitting}
+                  />
+                </label>
+                <label className="visitor-dialog-field">
+                  <span>邮箱（选填）</span>
+                  <input
+                    type="email"
+                    value={trialApplyEmail}
+                    onChange={(e) => setTrialApplyEmail(e.target.value)}
+                    placeholder="请输入邮箱"
                     disabled={trialApplySubmitting}
                   />
                 </label>

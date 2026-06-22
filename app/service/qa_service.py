@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import time
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
@@ -57,6 +58,8 @@ from app.storage.vector_store import StoredChunk, VectorStore
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
+
+_EMAIL_RE = re.compile(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$", re.IGNORECASE)
 
 
 def _doc_anchor_pairs(selected: Optional[List[SelectedYuqueDocRef]]) -> Optional[List[Tuple[int, Optional[str]]]]:
@@ -132,7 +135,7 @@ def _is_v4_memory_only_question(question: str) -> bool:
 
 def _visitor_profile_parts(profile: Any) -> dict[str, str]:
     if not profile:
-        return {"name": "", "org_name": "", "contact": "", "interested_product": "", "concern": "", "module_scope": ""}
+        return {"name": "", "org_name": "", "contact": "", "email": "", "interested_product": "", "concern": "", "module_scope": ""}
     interests = profile.interests if isinstance(profile.interests, dict) else {}
     lead = interests.get("_lead") if isinstance(interests.get("_lead"), dict) else {}
     session_meta = interests.get("_session") if isinstance(interests.get("_session"), dict) else {}
@@ -142,6 +145,7 @@ def _visitor_profile_parts(profile: Any) -> dict[str, str]:
         "name": display_name_for_chat(profile) or fallback_name,
         "org_name": org_name,
         "contact": str(lead.get("contact_value") or ""),
+        "email": str(lead.get("email") or ""),
         "interested_product": str(lead.get("interested_product") or ""),
         "concern": str(lead.get("concern") or ""),
         "module_scope": str(session_meta.get("module_scope") or ""),
@@ -823,6 +827,14 @@ class QAService:
                                 role="assistant",
                                 content=answer,
                             )
+                        lead_saved = await self._persist_v5_chat_lead_for_admin(
+                            session_id=sid,
+                            question=question,
+                            scene=scene,
+                        )
+                        debug = dict(data.get("debug") or {})
+                        debug["v5_lead_admin"] = {"lead_saved": lead_saved}
+                        data["debug"] = debug
                     yield event
                     continue
                 yield event
@@ -874,6 +886,7 @@ class QAService:
         name: str,
         org_name: str,
         contact: str,
+        email: str = "",
         interested_product: str = "",
         concern: str = "",
     ) -> TrialCredentialsResponse:
@@ -881,6 +894,7 @@ class QAService:
         display_name = (name or "").strip()
         org = (org_name or "").strip()
         contact_text = (contact or "").strip()
+        email_text = (email or "").strip()
         product = (interested_product or "").strip()
         concern_text = (concern or "").strip()
         if not sid:
@@ -890,6 +904,8 @@ class QAService:
         contact_hit = extract_contact(contact_text)
         if not contact_hit:
             return TrialCredentialsResponse(ok=False, message="联系方式校验失败，请填写手机号或微信号。")
+        if email_text and not _EMAIL_RE.match(email_text):
+            return TrialCredentialsResponse(ok=False, message="邮箱格式校验失败，请检查后重试。")
 
         await self._lead_capture_repository.try_insert_lead(
             session_id=sid,
@@ -915,6 +931,7 @@ class QAService:
                 "org_name": org,
                 "contact_type": contact_hit.contact_type,
                 "contact_value": contact_hit.value,
+                "email": email_text,
                 "interested_product": product,
                 "concern": concern_text,
             }
@@ -953,11 +970,69 @@ class QAService:
             name=parts["name"],
             org_name=parts["org_name"],
             contact=parts["contact"],
+            email=parts["email"],
             interested_product=parts["interested_product"],
             concern=parts.get("concern", ""),
             module_scope=parts["module_scope"],
             trial_account_issued=bool(session_meta.get("trial_account_issued")),
         )
+
+    async def _persist_v5_chat_lead_for_admin(
+        self,
+        *,
+        session_id: str,
+        question: str,
+        scene: str,
+    ) -> bool:
+        """把 V5 普通对话中留下的联系方式同步到后台客户管理。"""
+        sid = (session_id or "").strip()
+        if not sid:
+            return False
+        profile = await self._chat_session_profile_repository.get_profile(session_id=sid)
+        interests = dict(profile.interests) if profile and isinstance(profile.interests, dict) else {}
+        lead = dict(interests.get("_lead") or {})
+        contact_hit = extract_contact(question)
+        contact_type = contact_hit.contact_type if contact_hit else str(lead.get("contact_type") or "").strip()
+        contact_value = contact_hit.value if contact_hit else str(lead.get("contact_value") or "").strip()
+        if not contact_type or not contact_value:
+            return False
+
+        visitor_type = str(getattr(profile, "visitor_type", "") or "").strip()
+        if not visitor_type:
+            detected = detect_visitor_type(question)
+            visitor_type = detected if detected != "unknown" else ""
+        saved = await self._lead_capture_repository.try_insert_lead(
+            session_id=sid,
+            contact_type=contact_type,
+            contact_value=contact_value,
+            visitor_type=visitor_type or None,
+        )
+
+        display_name = str(lead.get("name") or getattr(profile, "display_name", "") or "").strip()
+        org_name = str(lead.get("org_name") or getattr(profile, "org_name", "") or "").strip()
+        lead.update(
+            {
+                "contact_type": contact_type,
+                "contact_value": contact_value,
+                "interested_product": str(lead.get("interested_product") or scene or "").strip(),
+            }
+        )
+        if display_name:
+            lead["name"] = display_name
+        if org_name:
+            lead["org_name"] = org_name
+        interests["_lead"] = lead
+        admin_meta = dict(interests.get("_admin") or {})
+        admin_meta.setdefault("follow_up_status", "待跟进")
+        admin_meta.setdefault("test_account_status", "待发放")
+        interests["_admin"] = admin_meta
+        await self._chat_session_profile_repository.upsert_profile(
+            session_id=sid,
+            display_name=display_name or None,
+            org_name=org_name or None,
+            interests=interests,
+        )
+        return saved
 
     @staticmethod
     def _auto_skill_instruction_for_v2(question: str) -> str:
