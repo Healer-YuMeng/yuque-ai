@@ -233,9 +233,21 @@ body {
   border: 1px solid #9cb7ff;
   background: #ffffff;
   color: #5d677a;
-  font-size: 26px;
+  border-radius: 12px;
+  font-size: 34px;
+  font-weight: 700;
   line-height: 1;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.18s ease, color 0.18s ease, background 0.18s ease;
+}
+
+.admin-sidebar-close:hover {
+  border-color: #2d6cff;
+  color: #1f56d9;
+  background: #eef4ff;
 }
 
 .admin-nav {
@@ -279,6 +291,7 @@ body {
   border: none;
   padding: 0;
   z-index: 10;
+  pointer-events: none;
 }
 
 .admin-main {
@@ -686,6 +699,151 @@ body {
   margin-top: 8px;
   font-size: 16px;
   font-weight: 600;
+}
+
+.admin-empty-state--compact {
+  min-height: 180px;
+}
+
+.admin-yuque-panel {
+  max-width: 1680px;
+  margin-top: 38px;
+}
+
+.admin-yuque-toolbar,
+.admin-yuque-grid,
+.admin-yuque-toc,
+.admin-yuque-doc {
+  box-sizing: border-box;
+}
+
+.admin-yuque-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 24px 28px;
+  background: #ffffff;
+  border: 1px solid #d7dfeb;
+  border-radius: 22px;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+}
+
+.admin-yuque-toolbar h2 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 800;
+  color: #192132;
+}
+
+.admin-yuque-toolbar p {
+  margin: 8px 0 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: #768299;
+}
+
+.admin-yuque-grid {
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.admin-yuque-toc,
+.admin-yuque-doc {
+  background: #ffffff;
+  border: 1px solid #d7dfeb;
+  border-radius: 22px;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+}
+
+.admin-yuque-toc {
+  padding: 12px;
+  max-height: 720px;
+  overflow: auto;
+}
+
+.admin-yuque-node {
+  width: 100%;
+  min-height: 42px;
+  border: none;
+  border-radius: 12px;
+  background: transparent;
+  color: #293244;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  font-size: 15px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.admin-yuque-node:hover:not(:disabled),
+.admin-yuque-node--active {
+  background: #eef4ff;
+  color: #245ee8;
+}
+
+.admin-yuque-node--disabled {
+  color: #7b879a;
+  cursor: default;
+  font-weight: 800;
+}
+
+.admin-yuque-node-mark {
+  width: 14px;
+  flex: 0 0 auto;
+  color: currentColor;
+  opacity: 0.74;
+}
+
+.admin-yuque-doc {
+  min-height: 720px;
+  padding: 28px;
+  overflow: hidden;
+}
+
+.admin-yuque-doc-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid #e3e9f3;
+}
+
+.admin-yuque-doc-head h2 {
+  margin: 0;
+  color: #182132;
+  font-size: 22px;
+  font-weight: 850;
+}
+
+.admin-yuque-doc-head a {
+  color: #245ee8;
+  font-size: 14px;
+  font-weight: 800;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.admin-yuque-doc-body {
+  margin: 20px 0 0;
+  max-height: 620px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #263244;
+  font-size: 15px;
+  line-height: 1.75;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  background: #f8fafd;
+  border: 1px solid #e4ebf5;
+  border-radius: 16px;
+  padding: 18px;
 }
 
 .admin-page-head--toolbar {
@@ -2626,6 +2784,12 @@ body {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.msg-inline-action {
+  margin-top: 8px;
+  display: flex;
+  justify-content: flex-start;
 }
 
 .trial-apply-button {
@@ -6218,6 +6382,21 @@ button:disabled {
 
   .admin-customers-table {
     min-width: 720px;
+  }
+
+  .admin-yuque-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .admin-yuque-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-yuque-toc,
+  .admin-yuque-doc {
+    max-height: none;
+    min-height: auto;
   }
 }
 

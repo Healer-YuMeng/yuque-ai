@@ -700,6 +700,148 @@ async def test_clicking_wrapped_subdir_tag_resolves_to_correct_toc_node() -> Non
 
 
 @pytest.mark.asyncio
+async def test_topical_container_tag_prefers_three_child_course_tags() -> None:
+    toc_nodes = [
+        {"uuid": "platform", "title": "平台介绍", "level": 1, "parent_uuid": "", "node_type": "title"},
+        {"uuid": "p-ai", "title": "人工智能通识课程", "level": 2, "parent_uuid": "platform", "node_type": "title"},
+        {"uuid": "p-ai-ext", "title": "拓展课程", "level": 3, "parent_uuid": "p-ai", "node_type": "doc"},
+        {"uuid": "lego", "title": "乐高人工智能课程", "level": 4, "parent_uuid": "p-ai-ext", "node_type": "doc"},
+        {"uuid": "apple", "title": "苹果STEAM课程", "level": 4, "parent_uuid": "p-ai-ext", "node_type": "doc"},
+        {"uuid": "sony", "title": "索尼人工智能课程", "level": 4, "parent_uuid": "p-ai-ext", "node_type": "doc"},
+    ]
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=toc_nodes,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="想看看拓展课程？",
+        session_id="sess_v5_expand_courses",
+        scene="人工智能通识教育",
+        trigger_type="tag",
+        history=[ChatMessageRow(role="user", content="人工智能通识教育", created_at="")],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["debug"]["catalog_focus_node"]["title"] == "拓展课程"
+    assert done["tags"] == [
+        "想看看乐高人工智能课程？",
+        "想看看苹果STEAM课程？",
+        "想看看索尼人工智能课程？",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_topical_container_tag_does_not_auto_descend_to_first_course() -> None:
+    class _RecordingDeepReader:
+        def __init__(self) -> None:
+            self.node_calls: list[dict[str, Any]] = []
+            self.read_calls: list[str] = []
+
+        async def read(self, *, question: str) -> FriendV5YuqueDeepReadResult:
+            self.read_calls.append(question)
+            return FriendV5YuqueDeepReadResult(debug={"mode": "search_fallback"})
+
+        async def read_toc_node(self, *, node: dict[str, Any], question: str) -> FriendV5YuqueDeepReadResult:
+            self.node_calls.append({"node": node, "question": question})
+            return FriendV5YuqueDeepReadResult(debug={"mode": "toc_focus_read_miss"})
+
+    toc_nodes = [
+        {"uuid": "platform", "title": "平台介绍", "level": 1, "parent_uuid": "", "node_type": "title"},
+        {"uuid": "p-ai", "title": "人工智能通识课程", "level": 2, "parent_uuid": "platform", "node_type": "title"},
+        {"uuid": "p-ai-ext", "title": "拓展课程", "level": 3, "parent_uuid": "p-ai", "node_type": "doc"},
+        {"uuid": "lego", "title": "乐高人工智能课程", "level": 4, "parent_uuid": "p-ai-ext", "node_type": "doc", "doc_id": "9001"},
+        {"uuid": "apple", "title": "苹果STEAM课程", "level": 4, "parent_uuid": "p-ai-ext", "node_type": "doc", "doc_id": "9002"},
+        {"uuid": "sony", "title": "索尼人工智能课程", "level": 4, "parent_uuid": "p-ai-ext", "node_type": "doc", "doc_id": "9003"},
+    ]
+    generator = _FakeGenerator()
+    deep_reader = _RecordingDeepReader()
+    orch = FriendDialogOrchestratorV5(
+        generator=generator,
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=deep_reader,
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=toc_nodes,
+    )
+
+    await _collect_v5_events(
+        orch,
+        question="想看看拓展课程？",
+        session_id="sess_v5_expand_courses_prompt",
+        scene="人工智能通识教育",
+        trigger_type="tag",
+        history=[ChatMessageRow(role="user", content="人工智能通识教育", created_at="")],
+    )
+
+    assert deep_reader.node_calls == []
+    assert deep_reader.read_calls == []
+    assert "当前命中的是语雀目录「拓展课程」" in generator.user_prompt
+    assert "这不是单个课程文档，不要直接默认展开成其中某一个课程" in generator.user_prompt
+    assert "1. 乐高人工智能课程" in generator.user_prompt
+    assert "2. 苹果STEAM课程" in generator.user_prompt
+    assert "3. 索尼人工智能课程" in generator.user_prompt
+
+
+@pytest.mark.asyncio
+async def test_clicking_wrapped_long_subdir_tag_descends_to_readable_doc() -> None:
+    class _DescendAwareDeepReader:
+        def __init__(self) -> None:
+            self.node_calls: list[dict[str, Any]] = []
+
+        async def read(self, *, question: str) -> FriendV5YuqueDeepReadResult:
+            return FriendV5YuqueDeepReadResult(debug={"mode": "search_fallback"})
+
+        async def read_toc_node(self, *, node: dict[str, Any], question: str) -> FriendV5YuqueDeepReadResult:
+            self.node_calls.append({"node": node, "question": question})
+            if not str(node.get("doc_id") or "").strip():
+                return FriendV5YuqueDeepReadResult(debug={"mode": "toc_focus_read_miss"})
+            return FriendV5YuqueDeepReadResult(
+                used=True,
+                prompt_block="【语雀文档深读】\n标题：腾讯青少年人工智能课程\n正文摘录：课程目标、课时安排、作品示例。",
+                sources=[
+                    FriendV5SourceItem(
+                        source_type="yuque",
+                        title="腾讯青少年人工智能课程",
+                        url="https://www.yuque.com/example/tencent-ai-course",
+                        doc_id=str(node.get("doc_id") or ""),
+                    )
+                ],
+                debug={"mode": "mcp_get_doc", "doc_count": 1},
+            )
+
+    toc_nodes = [
+        {"uuid": "platform", "title": "平台介绍", "level": 1, "parent_uuid": "", "node_type": "title"},
+        {"uuid": "p-ai", "title": "人工智能通识课程", "level": 2, "parent_uuid": "platform", "node_type": "title"},
+        {"uuid": "p-ai-tencent", "title": "腾讯青少年人工智能课程", "level": 3, "parent_uuid": "p-ai", "node_type": "title"},
+        {"uuid": "p-ai-tencent-doc", "title": "腾讯青少年人工智能课程详情", "level": 4, "parent_uuid": "p-ai-tencent", "node_type": "doc", "doc_id": "9002"},
+    ]
+    deep_reader = _DescendAwareDeepReader()
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=deep_reader,
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=toc_nodes,
+    )
+
+    await _collect_v5_events(
+        orch,
+        question="想看看腾讯青少年人工智能课程？",
+        session_id="sess_v5_wrapped_long_subdir_click",
+        scene="人工智能通识教育",
+        trigger_type="tag",
+        history=[ChatMessageRow(role="user", content="人工智能通识教育", created_at="")],
+    )
+
+    assert deep_reader.node_calls
+    assert deep_reader.node_calls[0]["node"]["title"] == "腾讯青少年人工智能课程详情"
+    assert str(deep_reader.node_calls[0]["node"]["doc_id"]) == "9002"
+
+
+@pytest.mark.asyncio
 async def test_leaf_focus_falls_back_to_three_strong_sibling_tags_without_far_jump() -> None:
     toc_nodes = [
         {"uuid": "root-ai", "title": "人工智能通识教育", "level": 1, "parent_uuid": "", "node_type": "title"},

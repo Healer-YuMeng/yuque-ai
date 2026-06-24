@@ -13,6 +13,8 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Resp
 
 from app.core.config import settings
 from app.core.datetime_util import sqlite_utc_to_cst
+from app.core.yuque_credentials import default_yuque_scope_for_profile, yuque_token_for_profile
+from app.data.yuque_loader import YuqueLoader, YuqueLoaderError
 from app.db.admin_customers import DEFAULT_PAGE_SIZE, AdminCustomerRepository, AdminCustomerRow
 from app.db.repositories import AdminSceneIntroRepository, AdminSceneIntroRow, AdminVideoAssetRepository, AdminVideoAssetRow
 from app.schemas.admin import (
@@ -21,6 +23,9 @@ from app.schemas.admin import (
     AdminCustomerListResponse,
     AdminCustomerResponse,
     AdminCustomerSummaryResponse,
+    AdminKnowledgeDocResponse,
+    AdminKnowledgeTocNodeResponse,
+    AdminKnowledgeTocResponse,
     AdminSceneIntroListResponse,
     AdminSceneIntroResponse,
     AdminSceneIntroUpdateRequest,
@@ -242,6 +247,62 @@ async def customer_summary(
     )
 
 
+@router.get("/knowledge/toc", response_model=AdminKnowledgeTocResponse)
+async def admin_knowledge_toc(
+    owner: str = "",
+    token_profile: str = "",
+    _admin_username: str = Depends(require_admin_auth),
+) -> AdminKnowledgeTocResponse:
+    loader, scope = _build_admin_yuque_loader(owner=owner, token_profile=token_profile)
+    try:
+        nodes = await loader.get_book_toc(book=scope)
+        return AdminKnowledgeTocResponse(
+            scope=scope,
+            items=[
+                AdminKnowledgeTocNodeResponse(
+                    uuid=node.uuid,
+                    parent_uuid=node.parent_uuid,
+                    level=node.level,
+                    node_type=node.type,
+                    title=node.title,
+                    url=node.url,
+                    doc_id=str(node.doc_id or "") or _slug_tail_from_url(node.url),
+                    selectable=bool(node.doc_id or _slug_tail_from_url(node.url)),
+                )
+                for node in nodes
+            ],
+        )
+    except YuqueLoaderError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    finally:
+        await loader.close()
+
+
+@router.get("/knowledge/docs/{doc_ref}", response_model=AdminKnowledgeDocResponse)
+async def admin_knowledge_doc(
+    doc_ref: str,
+    owner: str = "",
+    token_profile: str = "",
+    _admin_username: str = Depends(require_admin_auth),
+) -> AdminKnowledgeDocResponse:
+    ref = (doc_ref or "").strip()
+    if not ref:
+        raise HTTPException(status_code=400, detail="缺少文档标识")
+    loader, scope = _build_admin_yuque_loader(owner=owner, token_profile=token_profile)
+    try:
+        doc = await loader.get_doc(book=scope, id_or_slug=ref)
+        return AdminKnowledgeDocResponse(
+            doc_id=doc.doc_id,
+            title=doc.title,
+            url=doc.url,
+            body=doc.body,
+        )
+    except YuqueLoaderError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    finally:
+        await loader.close()
+
+
 @router.get("/customers", response_model=AdminCustomerListResponse)
 async def list_customers(
     q: str = "",
@@ -355,6 +416,44 @@ def _normalize_scene(scene_key: str) -> str:
     if not scene:
         raise HTTPException(status_code=400, detail="未知课程场景")
     return scene
+
+
+def _build_admin_yuque_loader(*, owner: str = "", token_profile: str = "") -> tuple[YuqueLoader, str]:
+    profile = (token_profile or "").strip() or None
+    token = yuque_token_for_profile(profile)
+    if not token:
+        raise HTTPException(status_code=503, detail="未配置语雀 Token，无法读取知识库")
+    scope = _compute_admin_yuque_scope(owner=owner, token_profile=profile)
+    if not scope:
+        raise HTTPException(status_code=503, detail="未配置语雀知识库作用域 YUQUE_SCOPE")
+    return (
+        YuqueLoader(
+            token=token,
+            base_url=settings.yuque_base_url,
+            timeout_s=settings.yuque_timeout_s,
+            scope=scope,
+        ),
+        scope,
+    )
+
+
+def _compute_admin_yuque_scope(*, owner: str = "", token_profile: str | None = None) -> str:
+    default_scope = default_yuque_scope_for_profile(token_profile).strip().strip("/")
+    owner_clean = (owner or "").strip().strip("/")
+    if not owner_clean:
+        return default_scope
+    if not default_scope or "/" not in default_scope:
+        return owner_clean
+    _default_owner, repo = default_scope.split("/", 1)
+    return f"{owner_clean}/{repo}"
+
+
+def _slug_tail_from_url(url: str) -> str:
+    value = (url or "").strip().rstrip("/")
+    if not value:
+        return ""
+    parts = [part for part in value.split("/") if part]
+    return parts[-1] if parts else ""
 
 
 def _safe_original_filename(filename: str) -> str:

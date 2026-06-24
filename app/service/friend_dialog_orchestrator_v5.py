@@ -269,6 +269,13 @@ class FriendDialogOrchestratorV5:
                 parsed_tags=[],
                 toc_nodes=self._toc_nodes,
             )
+        topical_container_titles = _topical_container_child_titles(
+            scene=scene,
+            trigger_type=trigger_type,
+            route_kind=tag_route.kind,
+            focus_node=catalog_focus,
+            toc_nodes=self._toc_nodes,
+        )
         case_branch_used = False
         skill_route: Optional[SkillRoute] = None
 
@@ -414,6 +421,7 @@ class FriendDialogOrchestratorV5:
             and self._yuque_deep_reader
             and catalog_focus
             and tag_route.kind != "case"
+            and not topical_container_titles
         ):
             mcp_route = _mcp_route_debug(f"tag_{tag_route.kind or 'toc'}", scene_query or question, catalog_focus)
             yield _stage("yuque_deep_read", "小为正在读取语雀文档正文和图文视频...")
@@ -581,6 +589,10 @@ class FriendDialogOrchestratorV5:
             case_answer_mode=case_answer_mode,
             case_toc_miss=tag_route.kind == "case" and not deep_read.used,
             product_focus=tag_route.target_title or "",
+            directory_overview=_directory_overview_prompt_block(
+                focus_node=catalog_focus,
+                child_titles=topical_container_titles,
+            ),
         )
         parser = FriendV5TagStreamFilter(scene=scene)
         answer_parts: List[str] = []
@@ -728,6 +740,7 @@ class FriendDialogOrchestratorV5:
         case_answer_mode: bool = False,
         case_toc_miss: bool = False,
         product_focus: str = "",
+        directory_overview: str = "",
     ) -> str:
         hist_lines: List[str] = []
         for row in list(history)[-8:]:
@@ -776,6 +789,7 @@ class FriendDialogOrchestratorV5:
             f"【最近对话】\n{chr(10).join(hist_lines) if hist_lines else '（暂无）'}\n\n"
             f"【语雀补充阅读链接】\n{chr(10).join(yuque_lines) if yuque_lines else '（本轮不提供语雀链接）'}\n\n"
             f"{deep_block + chr(10) + chr(10) if deep_read.used else ''}"
+            f"{directory_overview + chr(10) + chr(10) if directory_overview else ''}"
             f"{skill_block}"
             f"【用户这轮想了解】\n{question}\n\n"
             f"{yuque_instruction}"
@@ -1032,6 +1046,29 @@ def _apply_recommendation_tag_rhythm(
         mapped_scene = scene_for_toc_title(explored)
         if mapped_scene:
             effective_scene = mapped_scene
+
+    topical_exploration = _topical_container_explore_tags(
+        scene=effective_scene,
+        trigger_type=trigger_type,
+        route_kind=route_kind,
+        focus_node=focus_node,
+        toc_nodes=toc_nodes,
+    )
+    if topical_exploration:
+        return _TagRhythmResult(
+            tags=_dedupe_tag_list([subdir_explore_tag_for_title(title) for title in topical_exploration if title])[:3],
+            conversion_state=_conversion_state(
+                turn_index=turn_index,
+                stage="topical_container_exploration",
+                trigger_type=trigger_type,
+                route_kind=route_kind,
+                seen_guide=False,
+                seen_case=False,
+                case_allowed=False,
+                trial_allowed=False,
+            ),
+        )
+
     seen_guide = route_kind == "guide" or _history_has_tag_kind(history=history, scene=effective_scene, kind="guide")
     seen_case = route_kind == "case" or _history_has_tag_kind(history=history, scene=effective_scene, kind="case")
 
@@ -1327,6 +1364,10 @@ def _resolve_tag_route(
     if explore_title:
         focus = _resolve_platform_intro_focus(product_title=explore_title, toc_nodes=toc_nodes)
         return _TagRouteResult(kind="explore_product", target_title=explore_title, focus_node=focus)
+    wrapped_subdir_title = _wrapped_subdir_title_from_tag(question)
+    if wrapped_subdir_title:
+        focus = _focus_by_mapped_tag(question=wrapped_subdir_title, toc_nodes=toc_nodes)
+        return _TagRouteResult(kind="toc", target_title=wrapped_subdir_title, focus_node=focus)
     focus = _best_toc_match(question=question, scene="", parsed_tags=[], toc_nodes=toc_nodes)
     return _TagRouteResult(kind="toc", target_title=(question or "").strip(), focus_node=focus)
 
@@ -1364,6 +1405,19 @@ def _history_has_seen_case(history: Sequence[ChatMessageRow]) -> bool:
 
 def _history_has_seen_guide(history: Sequence[ChatMessageRow]) -> bool:
     return _history_active_content_branch(history) == "guide"
+
+
+def _wrapped_subdir_title_from_tag(tag: str) -> str:
+    raw = (tag or "").strip()
+    match = re.match(r"^想看看(.+?)？$", raw)
+    if not match:
+        return ""
+    title = (match.group(1) or "").strip()
+    if not title:
+        return ""
+    if "的产品的" in title:
+        return ""
+    return title
 
 
 def _history_active_content_branch(history: Sequence[ChatMessageRow]) -> Optional[str]:
@@ -1559,6 +1613,70 @@ def _scene_subdir_explore_tags(
             limit=limit,
         )
     return []
+
+
+def _topical_container_explore_tags(
+    *,
+    scene: str,
+    trigger_type: str,
+    route_kind: str,
+    focus_node: Optional[dict[str, Any]],
+    toc_nodes: Sequence[dict[str, Any]],
+    limit: int = 3,
+) -> List[str]:
+    """当用户已点进某个中间目录时，优先展示该目录下的具体课程子项。"""
+    if trigger_type != "tag" or route_kind != "toc" or not focus_node or not toc_nodes:
+        return []
+    focus_title_norm = _norm_for_match(str(focus_node.get("title") or ""))
+    scene_title_norm = _norm_for_match(toc_title_for_scene(scene))
+    if not focus_title_norm or focus_title_norm == scene_title_norm:
+        return []
+    titles = _direct_child_titles(
+        parent_uuid=str(focus_node.get("uuid") or ""),
+        toc_nodes=toc_nodes,
+        exclude_norms=_scene_title_norms(),
+        limit=limit,
+    )
+    return titles if len(titles) >= 3 else []
+
+
+def _topical_container_child_titles(
+    *,
+    scene: str,
+    trigger_type: str,
+    route_kind: str,
+    focus_node: Optional[dict[str, Any]],
+    toc_nodes: Sequence[dict[str, Any]],
+    limit: int = 3,
+) -> List[str]:
+    return _topical_container_explore_tags(
+        scene=scene,
+        trigger_type=trigger_type,
+        route_kind=route_kind,
+        focus_node=focus_node,
+        toc_nodes=toc_nodes,
+        limit=limit,
+    )
+
+
+def _directory_overview_prompt_block(
+    *,
+    focus_node: Optional[dict[str, Any]],
+    child_titles: Sequence[str],
+) -> str:
+    title = str((focus_node or {}).get("title") or "").strip()
+    items = [str(item or "").strip() for item in child_titles if str(item or "").strip()]
+    if not title or len(items) < 3:
+        return ""
+    lines = [f"{idx}. {name}" for idx, name in enumerate(items[:3], start=1)]
+    return (
+        "【当前命中目录】\n"
+        f"当前命中的是语雀目录「{title}」。\n"
+        "这不是单个课程文档，不要直接默认展开成其中某一个课程。\n"
+        "请先说明这个目录下目前有哪些拓展课程，再轻问用户想先看哪一个。\n"
+        "当前可优先介绍的 3 个课程是：\n"
+        f"{chr(10).join(lines)}"
+    )
 
 
 def _scene_mcp_mode(*, scene_case_continuation: bool, scene_guide_continuation: bool) -> str:
@@ -2229,7 +2347,7 @@ def _focus_by_mapped_tag(
     question: str,
     toc_nodes: Sequence[dict[str, Any]],
 ) -> Optional[dict[str, Any]]:
-    """兼容旧调用：按标题直接定位语雀目录；目录分组无 doc_id 时下钻到首个可读子文档。"""
+    """按标题定位语雀目录；课程集合目录保留容器，普通分组再下钻到首个可读子文档。"""
     title = (question or "").strip()
     if not title or not toc_nodes:
         return None
@@ -2242,6 +2360,14 @@ def _focus_by_mapped_tag(
     if matched is None:
         return None
     if str(matched.get("doc_id") or "").strip():
+        return matched
+    child_titles = _direct_child_titles(
+        parent_uuid=str(matched.get("uuid") or ""),
+        toc_nodes=toc_nodes,
+        exclude_norms=set(),
+        limit=3,
+    )
+    if len(child_titles) >= 3:
         return matched
     # 分组标题（TITLE）没有 doc_id，下钻到第一个带 doc_id 的子文档
     child = _first_readable_descendant(matched, toc_nodes)

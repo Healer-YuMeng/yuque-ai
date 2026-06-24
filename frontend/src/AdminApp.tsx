@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 
-type AdminSection = "dashboard" | "knowledge" | "customers";
+type AdminSection = "dashboard" | "product" | "knowledge" | "customers";
 type KnowledgeSceneKey = "general_ai_course" | "project_based_learning" | "smart_enrollment" | "school_ai_custom";
 
 type DashboardCard = {
@@ -8,7 +8,7 @@ type DashboardCard = {
   value: number;
   accent: "blue" | "green" | "orange" | "emerald";
   icon: "users" | "key" | "video" | "database";
-  target: "customers" | "knowledge";
+  target: "customers" | "product";
 };
 
 type KnowledgeSceneItem = {
@@ -55,6 +55,24 @@ type AdminCustomer = {
   updated_at: string;
 };
 
+type AdminKnowledgeTocNode = {
+  uuid: string;
+  parent_uuid: string;
+  level: number;
+  node_type: string;
+  title: string;
+  url: string;
+  doc_id: string;
+  selectable: boolean;
+};
+
+type AdminKnowledgeDoc = {
+  doc_id: string;
+  title: string;
+  url: string;
+  body: string;
+};
+
 type CustomerSummary = {
   customer_total: number;
   trial_issued_total: number;
@@ -76,6 +94,52 @@ const FOLLOW_UP_OPTIONS = ["待跟进", "跟进中", "已发放测试账号", "�
 const TEST_ACCOUNT_OPTIONS = ["待发放", "已发放"] as const;
 const CUSTOMER_PAGE_SIZE = 10;
 const CUSTOMER_AUTO_REFRESH_MS = 8000;
+
+async function fetchKnowledgeToc(): Promise<{ scope: string; items: AdminKnowledgeTocNode[] }> {
+  const adminResp = await fetch("/admin-api/knowledge/toc");
+  if (adminResp.ok) {
+    return adminResp.json() as Promise<{ scope: string; items: AdminKnowledgeTocNode[] }>;
+  }
+  if (adminResp.status !== 404) {
+    const data = await adminResp.json().catch(() => ({}));
+    throw new Error(data.detail || "语雀目录加载失败");
+  }
+
+  const docsResp = await fetch("/docs/toc");
+  if (!docsResp.ok) {
+    const data = await docsResp.json().catch(() => ({}));
+    throw new Error(data.detail || "语雀目录加载失败");
+  }
+  const data = (await docsResp.json()) as {
+    docs?: Array<{
+      id?: number | null;
+      slug?: string | null;
+      title?: string;
+      url?: string | null;
+      toc_uuid?: string | null;
+      toc_parent_uuid?: string | null;
+      toc_level?: number | null;
+      toc_kind?: string | null;
+      toc_selectable?: boolean | null;
+    }>;
+  };
+  return {
+    scope: "当前项目配置",
+    items: (data.docs ?? []).map((item, index) => {
+      const docId = String(item.id || item.slug || "").trim();
+      return {
+        uuid: item.toc_uuid || item.slug || `doc-${index}`,
+        parent_uuid: item.toc_parent_uuid || "",
+        level: Number(item.toc_level || 1),
+        node_type: item.toc_kind || "",
+        title: item.title || "未命名节点",
+        url: item.url || "",
+        doc_id: docId,
+        selectable: Boolean(item.toc_selectable ?? docId),
+      };
+    }),
+  };
+}
 
 function AdminStatIcon({ icon }: { icon: DashboardCard["icon"] }) {
   if (icon === "users") {
@@ -148,6 +212,15 @@ function AdminApp() {
   const [customerError, setCustomerError] = useState("");
   const [customerListVersion, setCustomerListVersion] = useState(0);
 
+  const [knowledgeScope, setKnowledgeScope] = useState("");
+  const [knowledgeToc, setKnowledgeToc] = useState<AdminKnowledgeTocNode[]>([]);
+  const [knowledgeTocLoading, setKnowledgeTocLoading] = useState(false);
+  const [knowledgeTocError, setKnowledgeTocError] = useState("");
+  const [selectedKnowledgeDocId, setSelectedKnowledgeDocId] = useState("");
+  const [selectedKnowledgeDoc, setSelectedKnowledgeDoc] = useState<AdminKnowledgeDoc | null>(null);
+  const [knowledgeDocLoading, setKnowledgeDocLoading] = useState(false);
+  const [knowledgeDocError, setKnowledgeDocError] = useState("");
+
   const activeScene = useMemo(
     () => KNOWLEDGE_SCENES.find((scene) => scene.key === activeSceneKey) ?? KNOWLEDGE_SCENES[0],
     [activeSceneKey],
@@ -164,17 +237,23 @@ function AdminApp() {
     () => [
       { label: "客户总数", value: customerSummary.customer_total, accent: "blue", icon: "users", target: "customers" },
       { label: "已发放账号", value: customerSummary.trial_issued_total, accent: "green", icon: "key", target: "customers" },
-      { label: "视频素材", value: totalVideoCount, accent: "orange", icon: "video", target: "knowledge" },
-      { label: "课程场景", value: KNOWLEDGE_SCENES.length, accent: "emerald", icon: "database", target: "knowledge" },
+      { label: "视频素材", value: totalVideoCount, accent: "orange", icon: "video", target: "product" },
+      { label: "课程场景", value: KNOWLEDGE_SCENES.length, accent: "emerald", icon: "database", target: "product" },
     ],
     [customerSummary, totalVideoCount],
   );
 
   const pageMeta = useMemo(() => {
+    if (activeSection === "product") {
+      return {
+        title: "产品管理",
+        subtitle: "管理四个 AI 课程场景的视频素材与产品介绍",
+      };
+    }
     if (activeSection === "knowledge") {
       return {
-        title: "知识库素材管理",
-        subtitle: "管理四个 AI 课程场景的视频素材",
+        title: "知识库管理",
+        subtitle: "查看语雀知识库目录和文档内容",
       };
     }
     if (activeSection === "customers") {
@@ -259,7 +338,6 @@ function AdminApp() {
 
   const selectSection = (section: AdminSection) => {
     setActiveSection(section);
-    setMenuOpen(false);
   };
 
   const handleDashboardCardClick = (card: DashboardCard) => {
@@ -310,7 +388,7 @@ function AdminApp() {
   }, [adminAuthenticated]);
 
   useEffect(() => {
-    if (!adminAuthenticated || activeSection !== "knowledge") return;
+    if (!adminAuthenticated || activeSection !== "product") return;
     let cancelled = false;
     queueMicrotask(() => {
       if (!cancelled) setSceneIntroLoading(true);
@@ -351,7 +429,7 @@ function AdminApp() {
   }, [adminAuthenticated, activeSection]);
 
   useEffect(() => {
-    if (!adminAuthenticated || activeSection !== "knowledge") return;
+    if (!adminAuthenticated || activeSection !== "product") return;
     let cancelled = false;
     queueMicrotask(() => {
       if (cancelled) return;
@@ -381,6 +459,66 @@ function AdminApp() {
       cancelled = true;
     };
   }, [adminAuthenticated, activeSection, activeSceneKey]);
+
+  useEffect(() => {
+    if (!adminAuthenticated || activeSection !== "knowledge") return;
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setKnowledgeTocLoading(true);
+      setKnowledgeTocError("");
+    });
+    fetchKnowledgeToc()
+      .then((data) => {
+        if (cancelled) return;
+        const items = data.items ?? [];
+        setKnowledgeScope(data.scope || "");
+        setKnowledgeToc(items);
+        setSelectedKnowledgeDocId((current) => current || items.find((item) => item.selectable)?.doc_id || "");
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setKnowledgeTocError(err instanceof Error ? err.message : "语雀目录加载失败");
+      })
+      .finally(() => {
+        if (!cancelled) setKnowledgeTocLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [adminAuthenticated, activeSection]);
+
+  useEffect(() => {
+    if (!adminAuthenticated || activeSection !== "knowledge" || !selectedKnowledgeDocId) return;
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setKnowledgeDocLoading(true);
+      setKnowledgeDocError("");
+    });
+    fetch(`/admin-api/knowledge/docs/${encodeURIComponent(selectedKnowledgeDocId)}`)
+      .then(async (resp) => {
+        if (!resp.ok) {
+          const data = await resp.json().catch(() => ({}));
+          throw new Error(data.detail || "文档内容加载失败");
+        }
+        return resp.json() as Promise<AdminKnowledgeDoc>;
+      })
+      .then((data) => {
+        if (cancelled) return;
+        setSelectedKnowledgeDoc(data);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setKnowledgeDocError(err instanceof Error ? err.message : "文档内容加载失败");
+      })
+      .finally(() => {
+        if (!cancelled) setKnowledgeDocLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [adminAuthenticated, activeSection, selectedKnowledgeDocId]);
 
   useEffect(() => {
     if (!adminAuthenticated || activeSection !== "customers") return;
@@ -671,9 +809,10 @@ function AdminApp() {
               type="button"
               className="admin-sidebar-close"
               onClick={() => setMenuOpen(false)}
-              aria-label="关闭菜单"
+              aria-label="折叠菜单"
+              title="折叠菜单"
             >
-              ×
+              ‹
             </button>
           </div>
 
@@ -688,10 +827,18 @@ function AdminApp() {
             </button>
             <button
               type="button"
+              className={`admin-nav-item${activeSection === "product" ? " admin-nav-item--active" : ""}`}
+              onClick={() => selectSection("product")}
+            >
+              <span className="admin-nav-icon" aria-hidden="true">▤</span>
+              <span>产品管理</span>
+            </button>
+            <button
+              type="button"
               className={`admin-nav-item${activeSection === "knowledge" ? " admin-nav-item--active" : ""}`}
               onClick={() => selectSection("knowledge")}
             >
-              <span className="admin-nav-icon" aria-hidden="true">▤</span>
+              <span className="admin-nav-icon" aria-hidden="true">☷</span>
               <span>知识库管理</span>
             </button>
             <button
@@ -705,7 +852,7 @@ function AdminApp() {
           </nav>
         </aside>
 
-        {menuOpen ? <button type="button" className="admin-sidebar-mask" onClick={() => setMenuOpen(false)} aria-label="关闭菜单遮罩" /> : null}
+        {menuOpen ? <div className="admin-sidebar-mask" aria-hidden="true" /> : null}
 
         <main className="admin-main">
           <section className="admin-page-head">
@@ -737,9 +884,9 @@ function AdminApp() {
             </section>
           ) : null}
 
-          {activeSection === "knowledge" ? (
+          {activeSection === "product" ? (
             <section className="admin-knowledge-panel">
-              <div className="admin-scene-tabs" role="tablist" aria-label="知识库场景">
+              <div className="admin-scene-tabs" role="tablist" aria-label="产品场景">
                 {KNOWLEDGE_SCENES.map((scene) => (
                   <button
                     key={scene.key}
@@ -898,6 +1045,100 @@ function AdminApp() {
                   </div>
                 )}
               </article>
+            </section>
+          ) : null}
+
+          {activeSection === "knowledge" ? (
+            <section className="admin-yuque-panel" aria-label="语雀知识库管理">
+              <div className="admin-yuque-toolbar">
+                <div>
+                  <h2>语雀知识库目录</h2>
+                  <p>{knowledgeScope ? `当前知识库：${knowledgeScope}` : "读取当前配置的语雀知识库"}</p>
+                </div>
+                <button
+                  type="button"
+                  className="admin-primary-btn"
+                  onClick={() => {
+                    setSelectedKnowledgeDocId("");
+                    setSelectedKnowledgeDoc(null);
+                    setKnowledgeToc([]);
+                    setKnowledgeTocError("");
+                    setKnowledgeDocError("");
+                    setKnowledgeTocLoading(true);
+                    fetchKnowledgeToc()
+                      .then((data) => {
+                        const items = data.items ?? [];
+                        setKnowledgeScope(data.scope || "");
+                        setKnowledgeToc(items);
+                        setSelectedKnowledgeDocId(items.find((item) => item.selectable)?.doc_id || "");
+                      })
+                      .catch((err) => setKnowledgeTocError(err instanceof Error ? err.message : "语雀目录加载失败"))
+                      .finally(() => setKnowledgeTocLoading(false));
+                  }}
+                  disabled={knowledgeTocLoading}
+                >
+                  {knowledgeTocLoading ? "刷新中..." : "刷新目录"}
+                </button>
+              </div>
+
+              {knowledgeTocError ? <div className="admin-video-error" role="alert">{knowledgeTocError}</div> : null}
+
+              <div className="admin-yuque-grid">
+                <aside className="admin-yuque-toc" aria-label="语雀目录树">
+                  {knowledgeTocLoading && knowledgeToc.length === 0 ? (
+                    <div className="admin-empty-state admin-empty-state--compact">
+                      <div className="admin-empty-title">正在加载目录</div>
+                    </div>
+                  ) : knowledgeToc.length > 0 ? (
+                    knowledgeToc.map((node, index) => (
+                      <button
+                        key={node.uuid || `${node.title}-${index}`}
+                        type="button"
+                        className={`admin-yuque-node${selectedKnowledgeDocId === node.doc_id ? " admin-yuque-node--active" : ""}${!node.selectable ? " admin-yuque-node--disabled" : ""}`}
+                        style={{ paddingLeft: `${16 + Math.max(0, node.level - 1) * 18}px` }}
+                        disabled={!node.selectable}
+                        onClick={() => {
+                          if (!node.selectable) return;
+                          setSelectedKnowledgeDocId(node.doc_id);
+                        }}
+                      >
+                        <span className="admin-yuque-node-mark" aria-hidden="true">{node.selectable ? "•" : "▸"}</span>
+                        <span>{node.title || "未命名节点"}</span>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="admin-empty-state admin-empty-state--compact">
+                      <div className="admin-empty-title">暂无目录数据</div>
+                      <div className="admin-empty-subtitle">请检查语雀 Token 和知识库作用域配置</div>
+                    </div>
+                  )}
+                </aside>
+
+                <article className="admin-yuque-doc">
+                  {knowledgeDocLoading ? (
+                    <div className="admin-empty-state admin-empty-state--compact">
+                      <div className="admin-empty-title">正在加载文档内容</div>
+                    </div>
+                  ) : knowledgeDocError ? (
+                    <div className="admin-video-error" role="alert">{knowledgeDocError}</div>
+                  ) : selectedKnowledgeDoc ? (
+                    <>
+                      <div className="admin-yuque-doc-head">
+                        <h2>{selectedKnowledgeDoc.title || "未命名文档"}</h2>
+                        {selectedKnowledgeDoc.url ? (
+                          <a href={selectedKnowledgeDoc.url} target="_blank" rel="noreferrer">打开语雀原文</a>
+                        ) : null}
+                      </div>
+                      <pre className="admin-yuque-doc-body">{selectedKnowledgeDoc.body || "该文档暂无正文内容。"}</pre>
+                    </>
+                  ) : (
+                    <div className="admin-empty-state admin-empty-state--compact">
+                      <div className="admin-empty-title">请选择左侧文档</div>
+                      <div className="admin-empty-subtitle">点击可读取的目录节点后，这里会展示语雀正文。</div>
+                    </div>
+                  )}
+                </article>
+              </div>
             </section>
           ) : null}
 

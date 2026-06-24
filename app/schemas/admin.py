@@ -85,3 +85,26 @@ class AdminCustomerFollowUpUpdateRequest(BaseModel):
 
 class AdminCustomerTestAccountUpdateRequest(BaseModel):
     test_account_status: str = Field(..., min_length=1, max_length=40)
+
+
+class AdminKnowledgeTocNodeResponse(BaseModel):
+    uuid: str = ""
+    parent_uuid: str = ""
+    level: int = 0
+    node_type: str = ""
+    title: str = ""
+    url: str = ""
+    doc_id: str = ""
+    selectable: bool = False
+
+
+class AdminKnowledgeTocResponse(BaseModel):
+    scope: str = ""
+    items: List[AdminKnowledgeTocNodeResponse]
+
+
+class AdminKnowledgeDocResponse(BaseModel):
+    doc_id: str = ""
+    title: str = ""
+    url: str = ""
+    body: str = ""

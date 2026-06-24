@@ -9,6 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_visitor_inactivity_reminder_waits_120_seconds() -> None:
     visitor_sales = (ROOT / "frontend/src/visitorSales.ts").read_text(encoding="utf-8")
     assert "export const INACTIVITY_MS = 120_000;" in visitor_sales
+    assert "也可以先申请测试账号" in visitor_sales
+    assert "我让顾问把测试账号发您" in visitor_sales
 
 
 def test_visitor_inactivity_reminder_requires_no_pending_reply() -> None:
@@ -28,6 +30,7 @@ def test_inactivity_reminder_does_not_replace_friend_v5_tags() -> None:
     assert "isInactivityReminder: true" in app
     assert "item.id === tagDisplayAssistantId" in app
     assert 'msg--inactivity' in app
+    assert "isInactivityReminderMessage(item)" in app
 
 
 def test_friend_v5_tags_render_short_labels() -> None:
@@ -95,6 +98,13 @@ def test_trial_apply_dialog_includes_optional_email_field() -> None:
     assert "邮箱（选填）" in app
     assert "请输入邮箱" in app
     assert "!trialApplyContact.trim()" in app
+
+
+def test_inactivity_reminder_shows_trial_apply_button() -> None:
+    app = (ROOT / "frontend/src/App.tsx").read_text(encoding="utf-8")
+    assert "const showInactivityTrialApplyButton =" in app
+    assert 'className="msg-inline-action"' in app
+    assert "申请测试账号" in app
 
 
 def test_admin_customers_table_includes_email_column() -> None:

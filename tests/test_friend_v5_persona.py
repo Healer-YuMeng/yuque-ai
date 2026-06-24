@@ -45,6 +45,8 @@ def test_friend_v5_prompt_includes_ideas_pbl_product_facts() -> None:
     assert "IDEAS-PBL 是由有为云联合上海师范大学打造的一款 AI 原生应用" in prompt
     assert "沉淀 800+ 优秀模板与成熟项目案例库" in prompt
     assert "支持 PDF、Word、图片、视频、表格、PPT 等多模态数据采集与上传" in prompt
+    assert "不会自动分类，通常按项目阶段分阶段上传和留存资料" in prompt
+    assert "自动化留存和追踪各阶段学习数据与成果" not in prompt
     assert "如果用户问 IDEAS-PBL 的价值、适用对象、优势、痛点、角色收益" in prompt
 
 
@@ -74,3 +76,13 @@ def test_friend_v5_prompt_adds_smart_enrollment_role_specific_guardrails() -> No
     assert "不要一上来追问具体数量" in prompt
     assert "不要连续追问“多少条消息”“多少位老师”“一年多少线索”这类数字问题" in prompt
     assert "如果用户问试用，不要直接只说“把学校名称和联系方式发我”" in prompt
+
+
+def test_friend_v5_prompt_forbids_offline_experience_language() -> None:
+    prompt = build_friend_v5_system_prompt()
+
+    assert "所有产品默认都按在线产品、在线平台、在线服务来介绍" in prompt
+    assert "不要说线下体验点、线下门店、到店体验、带孩子去现场体验" in prompt
+    assert "如果用户追问哪里可以线下体验" in prompt
+    assert "当前这类产品主要是在线使用和在线交付" in prompt
+    assert "是否有实践体验" not in prompt

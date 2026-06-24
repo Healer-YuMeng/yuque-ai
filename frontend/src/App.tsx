@@ -3464,6 +3464,19 @@ function App() {
                         item.isFriendV5 &&
                         item.mediaDisplayMode === "before_answer" &&
                         hasInlineMedia;
+                      const showInactivityTrialApplyButton =
+                        item.role === "assistant" &&
+                        isInactivityReminderMessage(item) &&
+                        !item.isFriendV5 &&
+                        !item.trialCredentialsShown &&
+                        !activeSession?.trialApplicationSubmitted;
+                      const showRegularTrialApplyButton =
+                        item.role === "assistant" &&
+                        item.trialApplyAvailable &&
+                        !isInactivityReminderMessage(item) &&
+                        !item.isFriendV5 &&
+                        !item.trialCredentialsShown &&
+                        !activeSession?.trialApplicationSubmitted;
                       if (item.hidden) return null;
                       return (
                       <div
@@ -3532,6 +3545,17 @@ function App() {
                               ) : null}
                             </div>
                           ) : null}
+                          {showInactivityTrialApplyButton ? (
+                            <div className="msg-inline-action">
+                              <button
+                                type="button"
+                                className="trial-apply-button"
+                                onClick={() => void handleTrialApplyEntryClick()}
+                              >
+                                申请测试账号
+                              </button>
+                            </div>
+                          ) : null}
                           {item.role === "assistant" && item.isFriendV5 && item.id === tagDisplayAssistantId && item.tags && item.tags.length > 0 ? (
                             <div className="friend-v5-tags" aria-label="小为推荐的继续了解方向">
                               {item.tags.map((tag) => (
@@ -3558,11 +3582,7 @@ function App() {
                             </div>
                           ) : null}
                           <div className="msg-footer">
-                            {item.role === "assistant" &&
-                            item.trialApplyAvailable &&
-                            !item.isFriendV5 &&
-                            !item.trialCredentialsShown &&
-                            !activeSession?.trialApplicationSubmitted ? (
+                            {showRegularTrialApplyButton ? (
                               <button
                                 type="button"
                                 className="trial-apply-button"

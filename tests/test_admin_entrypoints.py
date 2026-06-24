@@ -40,3 +40,22 @@ def test_admin_frontend_wires_video_upload_and_listing() -> None:
     assert "admin-upload-progress" in content
     assert 'method: "DELETE"' in content
     assert "/admin-api/videos/" in content
+
+
+def test_admin_sidebar_menu_items_do_not_auto_collapse() -> None:
+    content = (Path(__file__).resolve().parents[1] / "frontend" / "src" / "AdminApp.tsx").read_text(encoding="utf-8")
+
+    start = content.index("const selectSection =")
+    end = content.index("const handleDashboardCardClick", start)
+    select_section_block = content[start:end]
+    assert "setActiveSection(section)" in select_section_block
+    assert "setMenuOpen(false)" not in select_section_block
+    assert 'aria-label="折叠菜单"' in content
+
+
+def test_admin_knowledge_page_falls_back_to_existing_docs_toc() -> None:
+    content = (Path(__file__).resolve().parents[1] / "frontend" / "src" / "AdminApp.tsx").read_text(encoding="utf-8")
+
+    assert 'fetch("/admin-api/knowledge/toc")' in content
+    assert 'fetch("/docs/toc")' in content
+    assert 'scope: "当前项目配置"' in content
