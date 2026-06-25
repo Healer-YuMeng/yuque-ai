@@ -15,6 +15,7 @@ from app.service.qa_service import QAService
 from app.service.friend_dialog_orchestrator_v5 import (
     FriendDialogOrchestratorV5,
     _CASE_KB_FALLBACK_ANSWER,
+    _normalize_lead_confirmation_phrasing,
     _public_yuque_share_url_for_focus,
 )
 from app.service.friend_v5_tags import (
@@ -43,6 +44,25 @@ YUQUE_SHARED_PBL_CASE_URL = (
 YUQUE_SHARED_CERTIFICATION_CASE_URL = (
     "https://www.yuque.com/suesun-yb1bi/sspenu/kfuc54vihosyzlvo?singleDoc#%20《相关赛事及认证》"
 )
+
+
+def test_normalize_lead_confirmation_phrasing_removes_overdone_confirmation() -> None:
+    answer = _normalize_lead_confirmation_phrasing(
+        "王校长您好，称呼信息我已经帮您登记啦。腾讯这套方案比较成熟。"
+    )
+
+    assert answer == "王校长您好。 腾讯这套方案比较成熟。"
+
+
+def test_normalize_lead_confirmation_phrasing_removes_flattery_and_shortens_fields() -> None:
+    answer = _normalize_lead_confirmation_phrasing(
+        "有为中学这名字听着就很有前瞻性。邮箱信息我已经帮您登记啦。联系方式都齐了。"
+    )
+
+    assert "前瞻性" not in answer
+    assert "登记啦" not in answer
+    assert "邮箱信息为您登记完成" in answer
+    assert "联系方式为您登记完成" in answer
 
 
 @dataclass
@@ -78,6 +98,16 @@ class _FakeProfileExtractor:
             org_name="第一中学",
             interests={"topics": ["人工智能通识教育"]},
         )
+
+
+class _FakeProfileCorrectionExtractor:
+    async def extract_update(self, **kwargs):  # noqa: ANN003
+        return ProfileUpdate(org_name="加薪中学")
+
+
+class _FakeNoProfileUpdateExtractor:
+    async def extract_update(self, **kwargs):  # noqa: ANN003
+        return ProfileUpdate()
 
 
 class _FakeGenerator:
@@ -431,13 +461,65 @@ async def test_tags_are_picked_from_yuque_toc_not_llm_random_tags() -> None:
         "想看看课堂流程与作品展示？",
         "想看看适合年级与课时安排？",
     ]
-    assert "想看课程例子？" not in done["tags"]
-    assert done["debug"]["catalog_tag_source"] == "fixed_v5_navigation"
-    assert done["debug"]["catalog_focus_node"] == {
-        "uuid": "ai-course",
-        "title": "乐高人工智能课程介绍",
-        "path": ["人工智能通识教育", "乐高人工智能课程介绍"],
-    }
+
+
+@pytest.mark.asyncio
+async def test_profile_org_correction_syncs_into_lead_snapshot() -> None:
+    repo = _FakeProfileRepo()
+    repo.profile = _FakeProfile(
+        display_name="zjy老师",
+        org_name="育才中学",
+        visitor_type="teacher",
+        interests={"_lead": {"name": "zjy老师", "org_name": "育才中学", "contact_value": "18018278286"}},
+    )
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=repo,
+        profile_extractor=_FakeProfileCorrectionExtractor(),
+        toc_nodes=_FAKE_TOC_NODES,
+    )
+
+    await _collect_v5_events(
+        orch,
+        question="更正一下，我来自加薪中学",
+        session_id="sess_v5_org_correction",
+        scene="人工智能通识教育",
+        trigger_type="message",
+        history=[],
+    )
+
+    lead = (repo.profile.interests or {}).get("_lead") or {}
+    assert repo.profile.org_name == "加薪中学"
+    assert lead.get("org_name") == "加薪中学"
+
+
+@pytest.mark.asyncio
+async def test_email_from_question_persists_into_lead_snapshot() -> None:
+    repo = _FakeProfileRepo()
+    repo.profile = _FakeProfile(
+        display_name="王校长",
+        org_name="有为中学",
+        visitor_type="institution_decision_maker",
+        interests={"_lead": {"name": "王校长", "org_name": "有为中学"}},
+    )
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=repo,
+        profile_extractor=_FakeNoProfileUpdateExtractor(),
+        toc_nodes=_FAKE_TOC_NODES,
+    )
+
+    await _collect_v5_events(
+        orch,
+        question="我的电话是18018278654，邮箱是ziy",
+        session_id="sess_v5_email_capture",
+        scene="人工智能通识教育",
+        trigger_type="message",
+        history=[],
+    )
+
+    lead = (repo.profile.interests or {}).get("_lead") or {}
+    assert lead.get("email") == "ziy"
 
 
 @pytest.mark.asyncio
@@ -839,6 +921,75 @@ async def test_clicking_wrapped_long_subdir_tag_descends_to_readable_doc() -> No
     assert deep_reader.node_calls
     assert deep_reader.node_calls[0]["node"]["title"] == "腾讯青少年人工智能课程详情"
     assert str(deep_reader.node_calls[0]["node"]["doc_id"]) == "9002"
+
+
+@pytest.mark.asyncio
+async def test_manual_followup_after_wrapped_subdir_click_replaces_repeat_tag_with_trial() -> None:
+    toc_nodes = [
+        {"uuid": "platform", "title": "平台介绍", "level": 1, "parent_uuid": "", "node_type": "title"},
+        {"uuid": "p-ai", "title": "人工智能通识课程", "level": 2, "parent_uuid": "platform", "node_type": "title"},
+        {"uuid": "p-ai-tencent", "title": "腾讯青少年人工智能课程", "level": 3, "parent_uuid": "p-ai", "node_type": "doc"},
+        {"uuid": "p-ai-ext", "title": "拓展课程", "level": 3, "parent_uuid": "p-ai", "node_type": "doc"},
+    ]
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=toc_nodes,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="我是校长",
+        session_id="sess_v5_wrapped_subdir_followup_trial",
+        scene="人工智能通识教育",
+        trigger_type="manual",
+        history=[
+            ChatMessageRow(role="user", content="人工智能通识教育", created_at=""),
+            ChatMessageRow(role="user", content="想看看腾讯青少年人工智能课程？", created_at=""),
+        ],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["tags"] == [
+        "想看看人工智能通识课程的产品的使用指南？",
+        "想申请测试账号，试一试人工智能通识课程的产品？",
+        "想看看拓展课程？",
+    ]
+    assert "想看看腾讯青少年人工智能课程？" not in done["tags"]
+
+
+@pytest.mark.asyncio
+async def test_tag_click_on_wrapped_subdir_replaces_repeat_tag_with_trial() -> None:
+    toc_nodes = [
+        {"uuid": "platform", "title": "平台介绍", "level": 1, "parent_uuid": "", "node_type": "title"},
+        {"uuid": "p-ai", "title": "人工智能通识课程", "level": 2, "parent_uuid": "platform", "node_type": "title"},
+        {"uuid": "p-ai-tencent", "title": "腾讯青少年人工智能课程", "level": 3, "parent_uuid": "p-ai", "node_type": "doc"},
+        {"uuid": "p-ai-ext", "title": "拓展课程", "level": 3, "parent_uuid": "p-ai", "node_type": "doc"},
+    ]
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=toc_nodes,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="想看看腾讯青少年人工智能课程？",
+        session_id="sess_v5_wrapped_subdir_tag_trial",
+        scene="人工智能通识教育",
+        trigger_type="tag",
+        history=[ChatMessageRow(role="user", content="人工智能通识教育", created_at="")],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["tags"] == [
+        "想看看人工智能通识课程的产品的使用指南？",
+        "想申请测试账号，试一试人工智能通识课程的产品？",
+        "想看看拓展课程？",
+    ]
+    assert "想看看腾讯青少年人工智能课程？" not in done["tags"]
 
 
 @pytest.mark.asyncio

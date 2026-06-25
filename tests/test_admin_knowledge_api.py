@@ -38,7 +38,11 @@ class _FakeYuqueLoader:
             doc_id="101",
             title="人工智能通识课程",
             url="https://www.yuque.com/demo/book/ai-course",
-            body="这里是语雀正文。",
+            body=(
+                "这里是语雀正文。\n"
+                "![课程图片](https://example.com/course.png)\n"
+                "[演示视频](https://example.com/demo.mp4)"
+            ),
         )
 
     async def close(self) -> None:
@@ -76,4 +80,6 @@ def test_admin_knowledge_doc_returns_body(monkeypatch) -> None:
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["title"] == "人工智能通识课程"
-    assert payload["body"] == "这里是语雀正文。"
+    assert "这里是语雀正文" in payload["body"]
+    assert payload["media"]["images"][0]["url"] == "https://example.com/course.png"
+    assert payload["media"]["videos"][0]["url"] == "https://example.com/demo.mp4"

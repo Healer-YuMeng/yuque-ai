@@ -59,3 +59,7 @@ def test_admin_knowledge_page_falls_back_to_existing_docs_toc() -> None:
     assert 'fetch("/admin-api/knowledge/toc")' in content
     assert 'fetch("/docs/toc")' in content
     assert 'scope: "当前项目配置"' in content
+    assert "plainKnowledgeBody" in content
+    assert "admin-yuque-media" in content
+    assert "admin-yuque-image-card" in content
+    assert "admin-yuque-video-card" in content

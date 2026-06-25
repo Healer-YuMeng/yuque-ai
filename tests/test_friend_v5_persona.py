@@ -38,6 +38,22 @@ def test_friend_v5_prompt_emphasizes_role_specific_human_style_and_boundaries() 
     assert "正文后按系统要求补全 `[SOURCES]` 与 `[TAGS]` 隐藏块" in prompt
 
 
+def test_friend_v5_prompt_handles_user_info_confirmation_naturally() -> None:
+    prompt = build_friend_v5_system_prompt()
+
+    assert "用户刚提供称呼、单位、联系方式时，只需简短确认并继续当前话题" in prompt
+    assert "用户修正称呼、单位、身份、联系方式时，直接按最新信息继续即可" in prompt
+    assert "不要说“我记岔了”“我记错了”“特别备注”这类容易出戏的话" in prompt
+    assert "用户刚补充一个字段后，不要回得像登记表回执" in prompt
+    assert "用户提供名字后，直接用“xxx您好。”开头即可" in prompt
+    assert "单位信息为您登记完成。" in prompt
+    assert "联系方式为您登记完成。" in prompt
+    assert "不要评价用户的学校、单位、城市或名字" in prompt
+    assert "- 我记岔了" in prompt
+    assert "- 我会特别备注" in prompt
+    assert "- 这名字听着就很有前瞻性" in prompt
+
+
 def test_friend_v5_prompt_includes_ideas_pbl_product_facts() -> None:
     prompt = build_friend_v5_system_prompt()
 

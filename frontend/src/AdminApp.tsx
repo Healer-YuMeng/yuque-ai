@@ -71,6 +71,19 @@ type AdminKnowledgeDoc = {
   title: string;
   url: string;
   body: string;
+  media?: AdminKnowledgeMediaBundle;
+};
+
+type AdminKnowledgeMediaItem = {
+  url: string;
+  title?: string;
+  doc_title?: string;
+  summary?: string;
+};
+
+type AdminKnowledgeMediaBundle = {
+  images?: AdminKnowledgeMediaItem[];
+  videos?: AdminKnowledgeMediaItem[];
 };
 
 type CustomerSummary = {
@@ -139,6 +152,27 @@ async function fetchKnowledgeToc(): Promise<{ scope: string; items: AdminKnowled
       };
     }),
   };
+}
+
+function plainKnowledgeBody(body: string): string {
+  return (body || "")
+    .replace(/!\[[^\]]*]\([^)]+\)/g, "")
+    .replace(/<img\b[^>]*>/gi, "")
+    .replace(/<(video|source|iframe)\b[^>]*>.*?<\/\1>/gis, "")
+    .replace(/<(video|source|iframe)\b[^>]*>/gi, "")
+    .replace(/<\/?(font|span|div|p|section|article|br|strong|b|em|i|u|table|thead|tbody|tr|th|td)\b[^>]*>/gi, (match) =>
+      match.toLowerCase().startsWith("<br") || match.toLowerCase().startsWith("</p") || match.toLowerCase().startsWith("</div") ? "\n" : "",
+    )
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function mediaLabel(item: AdminKnowledgeMediaItem, fallback: string): string {
+  return (item.title || item.doc_title || item.summary || fallback).trim();
 }
 
 function AdminStatIcon({ icon }: { icon: DashboardCard["icon"] }) {
@@ -1129,7 +1163,23 @@ function AdminApp() {
                           <a href={selectedKnowledgeDoc.url} target="_blank" rel="noreferrer">打开语雀原文</a>
                         ) : null}
                       </div>
-                      <pre className="admin-yuque-doc-body">{selectedKnowledgeDoc.body || "该文档暂无正文内容。"}</pre>
+                      {((selectedKnowledgeDoc.media?.videos?.length ?? 0) > 0 || (selectedKnowledgeDoc.media?.images?.length ?? 0) > 0) ? (
+                        <div className="admin-yuque-media">
+                          {(selectedKnowledgeDoc.media?.videos ?? []).map((video, index) => (
+                            <div className="admin-yuque-video-card" key={`${video.url}-${index}`}>
+                              <video src={video.url} controls playsInline preload="metadata" />
+                              <div>{mediaLabel(video, `视频 ${index + 1}`)}</div>
+                            </div>
+                          ))}
+                          {(selectedKnowledgeDoc.media?.images ?? []).map((image, index) => (
+                            <a className="admin-yuque-image-card" href={image.url} target="_blank" rel="noreferrer" key={`${image.url}-${index}`}>
+                              <img src={image.url} alt={mediaLabel(image, `图片 ${index + 1}`)} loading="lazy" />
+                              <span>{mediaLabel(image, `图片 ${index + 1}`)}</span>
+                            </a>
+                          ))}
+                        </div>
+                      ) : null}
+                      <pre className="admin-yuque-doc-body">{plainKnowledgeBody(selectedKnowledgeDoc.body) || "该文档暂无正文内容。"}</pre>
                     </>
                   ) : (
                     <div className="admin-empty-state admin-empty-state--compact">

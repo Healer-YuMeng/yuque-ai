@@ -10,7 +10,7 @@ from app.schemas.chat import SourceItem
 
 
 class FakeVectorStore:
-    def search(self, query_embedding, top_k):
+    async def search(self, query_embedding, top_k):
         return []
 
 

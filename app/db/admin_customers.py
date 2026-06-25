@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
@@ -71,82 +72,55 @@ class AdminCustomerRepository:
         page_num = max(1, int(page))
         size = max(1, min(int(page_size), MAX_PAGE_SIZE))
         offset = (page_num - 1) * size
+        conn = await self._session_factory.connect()
+        try:
+            all_items = await self._load_deduped_customer_rows(conn, query=q)
+            total = len(all_items)
+            return all_items[offset: offset + size], total
+        finally:
+            await conn.close()
+
+    async def _load_deduped_customer_rows(self, conn: Any, *, query: str = "") -> List[AdminCustomerRow]:
+        q = (query or "").strip()
         search_sql, search_params = _search_params(q, is_postgres=self._session_factory.is_postgres)
         not_deleted_filter = self._not_deleted_filter()
         customer_from = self._customer_base_from()
         updated_at_expr = self._updated_at_select_expr()
         order_by_sql = self._order_by_sql()
-        conn = await self._session_factory.connect()
-        try:
-            count_row = await conn.fetchone(
-                f"""
-                SELECT COUNT(*)
-                {customer_from}
-                WHERE {not_deleted_filter}
-                {search_sql}
-                """,
-                tuple(search_params),
-            )
-            total = int(count_row[0] if count_row else 0)
-
-            rows = await conn.fetchall(
-                f"""
-                SELECT COALESCE(p.session_id, l.session_id) AS session_id,
-                       p.display_name,
-                       p.org_name,
-                       p.visitor_type,
-                       p.interests_json,
-                       {updated_at_expr} AS updated_at
-                {customer_from}
-                WHERE {not_deleted_filter}
-                {search_sql}
-                {order_by_sql}
-                LIMIT ? OFFSET ?
-                """,
-                tuple(search_params + [size, offset]),
-            )
-            leads = await self._load_leads_by_session(conn, [str(row["session_id"]) for row in rows])
-            items = [_customer_row_from_db(row, leads.get(str(row["session_id"]), [])) for row in rows]
-            return items, total
-        finally:
-            await conn.close()
+        rows = await conn.fetchall(
+            f"""
+            SELECT COALESCE(p.session_id, l.session_id) AS session_id,
+                   p.display_name,
+                   p.org_name,
+                   p.visitor_type,
+                   p.interests_json,
+                   {updated_at_expr} AS updated_at
+            {customer_from}
+            WHERE {not_deleted_filter}
+            {search_sql}
+            {order_by_sql}
+            """,
+            tuple(search_params),
+        )
+        leads = await self._load_leads_by_session(conn, [str(row["session_id"]) for row in rows])
+        row_pairs = [
+            (row, leads.get(str(row["session_id"]), []))
+            for row in rows
+        ]
+        return _dedupe_customer_rows(row_pairs)
 
     async def count_customers(self, *, query: str = "") -> int:
-        q = (query or "").strip()
-        search_sql, search_params = _search_params(q, is_postgres=self._session_factory.is_postgres)
-        not_deleted_filter = self._not_deleted_filter()
-        customer_from = self._customer_base_from()
         conn = await self._session_factory.connect()
         try:
-            row = await conn.fetchone(
-                f"""
-                SELECT COUNT(*)
-                {customer_from}
-                WHERE {not_deleted_filter}
-                {search_sql}
-                """,
-                tuple(search_params),
-            )
-            return int(row[0] if row else 0)
+            return len(await self._load_deduped_customer_rows(conn, query=query))
         finally:
             await conn.close()
 
     async def count_trial_issued(self) -> int:
         conn = await self._session_factory.connect()
         try:
-            rows = await conn.fetchall(
-                f"""
-                SELECT p.interests_json
-                {self._customer_base_from()}
-                WHERE {self._not_deleted_filter()}
-                """
-            )
-            total = 0
-            for row in rows:
-                interests = _safe_json_obj(row["interests_json"])
-                if _test_account_status(interests) == "已发放":
-                    total += 1
-            return total
+            rows = await self._load_deduped_customer_rows(conn)
+            return sum(1 for row in rows if row.trial_account == "已发放")
         finally:
             await conn.close()
 
@@ -347,6 +321,95 @@ def _customer_row_from_db(row: Any, leads: List[tuple[str, str, str]]) -> AdminC
         trial_account=_test_account_status(interests),
         updated_at=str(row["updated_at"] or ""),
     )
+
+
+def _dedupe_customer_rows(row_pairs: List[tuple[Any, List[tuple[str, str, str]]]]) -> List[AdminCustomerRow]:
+    merged: dict[str, AdminCustomerRow] = {}
+    for row, leads in row_pairs:
+        item = _customer_row_from_db(row, leads)
+        key = _customer_identity_key(row, leads)
+        if key not in merged:
+            merged[key] = item
+            continue
+        merged[key] = _merge_customer_row(merged[key], item)
+    return list(merged.values())
+
+
+def _customer_identity_key(row: Any, leads: List[tuple[str, str, str]]) -> str:
+    for contact_type, contact_value, _visitor_type in leads:
+        key = _contact_identity_key(contact_type, contact_value)
+        if key:
+            return key
+
+    interests = _safe_json_obj(row["interests_json"])
+    lead = interests.get("_lead") if isinstance(interests.get("_lead"), dict) else {}
+    key = _contact_identity_key(
+        str(lead.get("contact_type") or ""),
+        str(lead.get("contact_value") or ""),
+    )
+    if key:
+        return key
+
+    session_id = str(row["session_id"] or "").strip()
+    return f"session:{session_id}"
+
+
+def _contact_identity_key(contact_type: str, contact_value: str) -> str:
+    value = (contact_value or "").strip()
+    if not value:
+        return ""
+    digits = re.sub(r"\D", "", value)
+    if digits and ((contact_type or "").strip().lower() in {"phone", "mobile", "tel"} or len(digits) >= 6):
+        return f"phone:{digits}"
+    normalized = re.sub(r"\s+", "", value).lower()
+    if not normalized:
+        return ""
+    contact_label = (contact_type or "contact").strip().lower() or "contact"
+    return f"{contact_label}:{normalized}"
+
+
+def _merge_customer_row(primary: AdminCustomerRow, incoming: AdminCustomerRow) -> AdminCustomerRow:
+    return AdminCustomerRow(
+        session_id=primary.session_id,
+        display_name=_prefer_text(primary.display_name, incoming.display_name),
+        org_name=_prefer_text(primary.org_name, incoming.org_name),
+        role_category=_prefer_text(primary.role_category, incoming.role_category),
+        contact=_merge_contact_text(primary.contact, incoming.contact),
+        email=_prefer_text(primary.email, incoming.email),
+        follow_up_status=_prefer_status(primary.follow_up_status, incoming.follow_up_status, "待跟进"),
+        trial_account=_prefer_status(primary.trial_account, incoming.trial_account, "待发放"),
+        updated_at=primary.updated_at,
+    )
+
+
+def _prefer_text(primary: str, incoming: str) -> str:
+    current = (primary or "").strip()
+    candidate = (incoming or "").strip()
+    return current or candidate
+
+
+def _prefer_status(primary: str, incoming: str, default: str) -> str:
+    current = (primary or "").strip() or default
+    candidate = (incoming or "").strip() or default
+    if current != default:
+        return current
+    return candidate
+
+
+def _merge_contact_text(primary: str, incoming: str) -> str:
+    seen: set[str] = set()
+    parts: List[str] = []
+    for raw in [primary, incoming]:
+        for part in (raw or "").split("/"):
+            text = part.strip()
+            if not text:
+                continue
+            key = re.sub(r"\s+", "", text).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            parts.append(text)
+    return " / ".join(parts)
 
 
 def _format_contact(leads: List[tuple[str, str, str]], interests: dict[str, Any]) -> str:

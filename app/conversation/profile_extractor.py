@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from openai import AsyncOpenAI
 
 from app.core.config import settings
+from app.conversation.user_info_cleaner import normalize_organization_candidate
 from app.conversation.visitor_profile import VisitorType, detect_visitor_type
 from app.db.profile_repository import ChatSessionProfile
 from app.db.repositories import ChatMessageRow
@@ -27,12 +28,16 @@ _NAME_PATTERNS: Sequence[re.Pattern[str]] = (
     re.compile(r"(?:我是|我时)\s*[^\s，,。；;]{2,40}?(?:学校|中学|小学|幼儿园|教育集团|机构|公司)的\s*([^\s，,。；;]{1,16}(?:老师|教师|校长|先生|女士|同学|家长|主任|院长|园长))"),
     # 整段称呼含老师/教师，避免只抽到姓氏「赵」
     re.compile(r"我是\s*([^\s，,。；;]{1,16}(?:老师|教师))"),
+    re.compile(r"我是\s*([^\s，,。；;]{1,16}(?:校长|园长|主任|院长|负责人))"),
     re.compile(r"我是\s*([^\s，,。；;]{1,16}(?:先生|女士))"),
     re.compile(r"我是\s*([^\s，,。；;]{1,16})\s*(?:老师|教师|校长|家长|学生|同学)\b"),
     # 容错：口语/错别字「我时张老师」
     re.compile(r"我[是时]\s*([^\s，,。；;]{1,16}(?:老师|教师|校长|家长|同学|先生|女士|主任|院长|园长))"),
 )
 _ORG_PATTERNS: Sequence[re.Pattern[str]] = (
+    re.compile(r"我在\s*([A-Za-z0-9一-龥·（）()\-\s&]{2,80})\s*(?:上班|工作|任职)"),
+    re.compile(r"(?:单位是|单位叫|公司是|公司叫|机构是|学校是|我的单位是|所在单位是|来自)\s*[:：]?\s*([A-Za-z0-9一-龥·（）()\-\s&]{2,80})"),
+    re.compile(r"(?:办公地点是|办公地点在|办公地址是|办公单位是)\s*[:：]?\s*([A-Za-z0-9一-龥·（）()\-\s&]{2,80})"),
     re.compile(r"(?:来自|在)\s*([^\s，,。；;]{2,30}?(?:学校|中学|小学|幼儿园|教育集团|机构|公司))"),
     re.compile(r"(?:我是|我时)\s*([^\s，,。；;]{2,30}?(?:学校|中学|小学|幼儿园|教育集团|机构|公司))的"),
     re.compile(r"(?:单位|学校)\s*[:：]?\s*([^\s，,。；;]{2,30})"),
@@ -130,7 +135,7 @@ class ProfileExtractor:
         name = _pick_first_group(q, _NAME_PATTERNS)
         org = _pick_first_group(q, _ORG_PATTERNS)
         if org:
-            org = org.strip().strip("，,。；;")
+            org = normalize_organization_candidate(org) or ""
             if org in _INVALID_ORG_VALUES:
                 org = ""
         if name:
@@ -185,7 +190,7 @@ class ProfileExtractor:
                 if not org:
                     o2 = _pick_first_group(t, _ORG_PATTERNS)
                     if o2:
-                        org = o2.strip().strip("，,。；;")
+                        org = normalize_organization_candidate(o2) or ""
                         if org in _INVALID_ORG_VALUES:
                             org = ""
                         if name:
@@ -242,7 +247,7 @@ class ProfileExtractor:
             return ProfileUpdate()
         text = (resp.choices[0].message.content or "").strip()
         data = _safe_json_dict(text)
-        org_name = str(data.get("org_name") or "").strip()
+        org_name = normalize_organization_candidate(data.get("org_name")) or ""
         display_name = _sanitize_name(str(data.get("display_name") or ""), org=org_name) if data else ""
         vt = str(data.get("visitor_type") or "unknown").strip()
         interests_raw = data.get("interests") if isinstance(data, dict) else []

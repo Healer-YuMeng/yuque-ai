@@ -21,6 +21,12 @@ from app.conversation.contact_extractor import extract_contact
 from app.conversation.friend_persona_v5 import all_friend_v5_scenes
 from app.conversation.lead_nudge_policy import LeadNudgePolicy
 from app.conversation.trial_account_pool import allocate_trial_account, load_trial_accounts
+from app.conversation.user_info_extractor import UserInfoStructuredExtractor
+from app.conversation.user_info_cleaner import (
+    normalize_display_name_candidate,
+    normalize_email_candidate,
+    normalize_organization_candidate,
+)
 from app.conversation.v4_lead_outreach import V4LeadOutreach
 from app.conversation.visitor_prompt import build_visitor_generation_question
 from app.conversation.visitor_profile import detect_visitor_type
@@ -54,7 +60,7 @@ from app.service.friend_v5_scene_query_rewriter import FriendV5SceneQueryRewrite
 from app.service.friend_v5_yuque_deep_reader import FriendV5YuqueDeepReader
 from app.service.sales_dialog_orchestrator_v3 import SalesDialogOrchestratorV3
 from app.service.sales_dialog_orchestrator_v4 import SalesDialogOrchestratorV4, _strip_media_urls_from_text
-from app.storage.vector_store import StoredChunk, VectorStore
+from app.storage.vector_store import VectorStore
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -139,7 +145,7 @@ def _visitor_profile_parts(profile: Any) -> dict[str, str]:
     interests = profile.interests if isinstance(profile.interests, dict) else {}
     lead = interests.get("_lead") if isinstance(interests.get("_lead"), dict) else {}
     session_meta = interests.get("_session") if isinstance(interests.get("_session"), dict) else {}
-    org_name = str(lead.get("org_name") or profile.org_name or "")
+    org_name = str(getattr(profile, "org_name", "") or lead.get("org_name") or "")
     fallback_name = normalize_display_name(str(lead.get("name") or ""), org=org_name)
     return {
         "name": display_name_for_chat(profile) or fallback_name,
@@ -150,6 +156,17 @@ def _visitor_profile_parts(profile: Any) -> dict[str, str]:
         "concern": str(lead.get("concern") or ""),
         "module_scope": str(session_meta.get("module_scope") or ""),
     }
+
+
+def _trial_apply_info_transcript(*, name: str, org_name: str, contact: str, email: str) -> str:
+    return "\n".join(
+        [
+            f"姓名：{(name or '').strip()}",
+            f"单位：{(org_name or '').strip()}",
+            f"联系方式：{(contact or '').strip()}",
+            f"邮箱：{(email or '').strip()}",
+        ]
+    ).strip()
 
 
 def _build_v4_memory_answer(profile: Any) -> str:
@@ -232,6 +249,7 @@ class QAService:
             rounds_threshold=settings.chat_v15_lead_nudge_rounds,
             stay_seconds_threshold=settings.chat_v15_lead_nudge_stay_s,
         )
+        self._user_info_extractor = UserInfoStructuredExtractor()
         self._chat_session_profile_repository = chat_session_profile_repository
 
     async def startup(self) -> None:
@@ -891,10 +909,21 @@ class QAService:
         concern: str = "",
     ) -> TrialCredentialsResponse:
         sid = (session_id or "").strip()
-        display_name = (name or "").strip()
-        org = (org_name or "").strip()
+        info_transcript = _trial_apply_info_transcript(
+            name=name,
+            org_name=org_name,
+            contact=contact,
+            email=email,
+        )
+        extractor = getattr(self, "_user_info_extractor", None) or UserInfoStructuredExtractor()
+        structured_info = await extractor.extract(info_transcript)
+        display_name = structured_info.display_name or normalize_display_name_candidate(name) or ""
+        org = structured_info.org_name or normalize_organization_candidate(org_name) or ""
         contact_text = (contact or "").strip()
-        email_text = (email or "").strip()
+        if structured_info.contact:
+            contact_text = structured_info.contact
+        raw_email = structured_info.email or (email or "").strip()
+        email_text = normalize_email_candidate(raw_email) or ""
         product = (interested_product or "").strip()
         concern_text = (concern or "").strip()
         if not sid:
@@ -904,7 +933,7 @@ class QAService:
         contact_hit = extract_contact(contact_text)
         if not contact_hit:
             return TrialCredentialsResponse(ok=False, message="联系方式校验失败，请填写手机号或微信号。")
-        if email_text and not _EMAIL_RE.match(email_text):
+        if raw_email and not email_text:
             return TrialCredentialsResponse(ok=False, message="邮箱格式校验失败，请检查后重试。")
 
         await self._lead_capture_repository.try_insert_lead(
@@ -1008,8 +1037,8 @@ class QAService:
             visitor_type=visitor_type or None,
         )
 
-        display_name = str(lead.get("name") or getattr(profile, "display_name", "") or "").strip()
-        org_name = str(lead.get("org_name") or getattr(profile, "org_name", "") or "").strip()
+        display_name = str(getattr(profile, "display_name", "") or lead.get("name") or "").strip()
+        org_name = str(getattr(profile, "org_name", "") or lead.get("org_name") or "").strip()
         lead.update(
             {
                 "contact_type": contact_type,
@@ -1617,19 +1646,7 @@ class QAService:
         documents = await self._yuque_loader.fetch_documents_for_bootstrap(query=bootstrap_query)
         chunks = self._chunk_documents(documents)
         embeddings = await self._embedder.embed_texts([chunk.text for chunk in chunks])
-        stored_chunks = [
-            StoredChunk(
-                chunk_id=chunk.chunk_id,
-                doc_id=chunk.doc_id,
-                title=chunk.title,
-                url=chunk.url,
-                text=chunk.text,
-                order=chunk.order,
-            )
-            for chunk in chunks
-        ]
-        self._vector_store.rebuild(chunks=stored_chunks, embeddings=embeddings)
-        await self._document_repository.replace_documents(chunks)
+        await self._document_repository.replace_documents(chunks, embeddings=embeddings)
         return len(documents), len(chunks)
 
     def _chunk_documents(self, documents: List[YuqueDocument]) -> List[TextChunk]:

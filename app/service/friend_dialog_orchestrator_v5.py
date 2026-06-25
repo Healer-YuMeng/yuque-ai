@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, List, Optional, Sequence
 
 from app.conversation.contact_extractor import extract_contact
+from app.conversation.user_info_cleaner import extract_email_text_candidate
 from app.conversation.friend_persona_v5 import build_friend_v5_system_prompt_with_scene_intro, scene_description
 from app.conversation.friend_product_playbook_v5 import scene_name_to_admin_key
 from app.conversation.skill_catalog import SKILL_CATALOG, SkillRoute
@@ -145,6 +146,12 @@ class FriendDialogOrchestratorV5:
                 interests=update.interests,
             )
             profile = await self._profile_repo.get_profile(session_id=session_id)
+            if profile is not None and (update.display_name or update.org_name):
+                profile = await _sync_profile_identity_into_lead(
+                    profile_repo=self._profile_repo,
+                    session_id=session_id,
+                    profile=profile,
+                )
 
         profile = await _persist_contact_from_question(
             profile_repo=self._profile_repo,
@@ -152,6 +159,12 @@ class FriendDialogOrchestratorV5:
             question=question,
             profile=profile,
             scene=scene,
+        )
+        profile = await _persist_email_from_question(
+            profile_repo=self._profile_repo,
+            session_id=session_id,
+            question=question,
+            profile=profile,
         )
 
         deep_read = FriendV5YuqueDeepReadResult()
@@ -627,6 +640,7 @@ class FriendDialogOrchestratorV5:
         answer = _strip_inline_urls(answer)
         answer = _strip_internal_status_leaks(answer)
         answer = _soften_assumptive_phrasing(answer)
+        answer = _normalize_lead_confirmation_phrasing(answer)
 
         source_items = _dedupe_sources(_source_urls_to_items(parsed.source_urls), existing=web_sources)
         if source_items:
@@ -884,6 +898,32 @@ def _profile_block(profile: Any) -> str:
     return "\n".join(lines) if lines else "（暂无）"
 
 
+async def _sync_profile_identity_into_lead(
+    *,
+    profile_repo: Any,
+    session_id: str,
+    profile: Any,
+) -> Any:
+    interests = dict(profile.interests) if profile and isinstance(getattr(profile, "interests", None), dict) else {}
+    lead = dict(interests.get("_lead") or {})
+    if not lead:
+        return profile
+    changed = False
+    display_name = str(getattr(profile, "display_name", "") or "").strip()
+    org_name = str(getattr(profile, "org_name", "") or "").strip()
+    if display_name and lead.get("name") != display_name:
+        lead["name"] = display_name
+        changed = True
+    if org_name and lead.get("org_name") != org_name:
+        lead["org_name"] = org_name
+        changed = True
+    if not changed:
+        return profile
+    interests["_lead"] = lead
+    await profile_repo.upsert_profile(session_id=session_id, interests=interests)
+    return await profile_repo.get_profile(session_id=session_id)
+
+
 def _source_urls_to_items(urls: list[str]) -> list[FriendV5SourceItem]:
     items: list[FriendV5SourceItem] = []
     seen: set[str] = set()
@@ -1111,6 +1151,26 @@ def _apply_recommendation_tag_rhythm(
     if not exploration:
         exploration = _clean_content_tags(content_tags)
     scene_title_norms = _scene_title_norms()
+    seen_wrapped_subdir_norms = _history_wrapped_subdir_title_norms(history)
+    current_wrapped_subdir_norm = _norm_for_match(_wrapped_subdir_title_from_tag(question))
+    if current_wrapped_subdir_norm and trigger_type == "tag":
+        seen_wrapped_subdir_norms = set(seen_wrapped_subdir_norms)
+        seen_wrapped_subdir_norms.add(current_wrapped_subdir_norm)
+    suppressed_seen_subdir = False
+    if trigger_type in {"manual", "tag"} and seen_wrapped_subdir_norms:
+        filtered_exploration: List[str] = []
+        for raw_title in exploration:
+            if _norm_for_match(raw_title) in seen_wrapped_subdir_norms:
+                suppressed_seen_subdir = True
+                continue
+            filtered_exploration.append(raw_title)
+        exploration = filtered_exploration
+    if suppressed_seen_subdir:
+        case_tag = case_tag_for_scene(effective_scene)
+        tags = [item for item in tags if _norm_for_match(item) != _norm_for_match(case_tag)]
+        trial_tag = trial_tag_for_scene(effective_scene)
+        if _norm_for_match(trial_tag) not in {_norm_for_match(item) for item in tags}:
+            tags.append(trial_tag)
     for raw_title in exploration:
         if len(tags) >= 3:
             break
@@ -1123,7 +1183,12 @@ def _apply_recommendation_tag_rhythm(
             tags.append(tag)
     # 无任何可探索目录时，用转化型标签兜底补齐（第 1 位已是指南/价格，不再重复）
     if len(tags) < 3:
-        for fallback in (case_tag_for_scene(effective_scene), trial_tag_for_scene(effective_scene)):
+        fallback_order = (
+            (trial_tag_for_scene(effective_scene), case_tag_for_scene(effective_scene))
+            if suppressed_seen_subdir
+            else (case_tag_for_scene(effective_scene), trial_tag_for_scene(effective_scene))
+        )
+        for fallback in fallback_order:
             if len(tags) >= 3:
                 break
             if _norm_for_match(fallback) not in {_norm_for_match(item) for item in tags}:
@@ -1432,6 +1497,18 @@ def _history_active_content_branch(history: Sequence[ChatMessageRow]) -> Optiona
     return active
 
 
+def _history_wrapped_subdir_title_norms(history: Sequence[ChatMessageRow]) -> set[str]:
+    out: set[str] = set()
+    for row in history:
+        if getattr(row, "role", "") != "user":
+            continue
+        title = _wrapped_subdir_title_from_tag(str(getattr(row, "content", "") or ""))
+        norm = _norm_for_match(title)
+        if norm:
+            out.add(norm)
+    return out
+
+
 def _resolve_guide_focus(
     *,
     product_title: str,
@@ -1478,6 +1555,26 @@ async def _persist_contact_from_question(
     )
     if not str(lead.get("interested_product") or "").strip():
         lead["interested_product"] = toc_title_for_scene(scene)
+    interests["_lead"] = lead
+    await profile_repo.upsert_profile(session_id=session_id, interests=interests)
+    return await profile_repo.get_profile(session_id=session_id)
+
+
+async def _persist_email_from_question(
+    *,
+    profile_repo: Any,
+    session_id: str,
+    question: str,
+    profile: Any,
+) -> Any:
+    email_text = extract_email_text_candidate(question)
+    if not email_text:
+        return profile
+    interests = dict(profile.interests) if profile and isinstance(getattr(profile, "interests", None), dict) else {}
+    lead = dict(interests.get("_lead") or {})
+    if str(lead.get("email") or "").strip() == email_text:
+        return profile
+    lead["email"] = email_text
     interests["_lead"] = lead
     await profile_repo.upsert_profile(session_id=session_id, interests=interests)
     return await profile_repo.get_profile(session_id=session_id)
@@ -2005,6 +2102,29 @@ def _soften_assumptive_phrasing(text: str) -> str:
         "您这边目前大概有多少位老师在负责这块接待",
         "您这边更想先看试点怎么跑，还是先看老师要配合到什么程度",
     )
+    out = re.sub(r"[ ]{2,}", " ", out)
+    return out.strip()
+
+
+def _normalize_lead_confirmation_phrasing(text: str) -> str:
+    out = (text or "").strip()
+    if not out:
+        return out
+    out = re.sub(
+        r"^([^，。！？\n]{1,16}您好)[，,]\s*称呼信息我已经帮您登记啦[。.]?\s*",
+        r"\1。 ",
+        out,
+    )
+    replacements = {
+        "单位信息我已经帮您登记啦": "单位信息为您登记完成",
+        "联系方式我已经帮您登记啦": "联系方式为您登记完成",
+        "邮箱信息我已经帮您登记啦": "邮箱信息为您登记完成",
+        "联系方式都齐了": "联系方式为您登记完成",
+    }
+    for old, new in replacements.items():
+        out = out.replace(old, new)
+    out = re.sub(r"[^。！？\n]*这名字听着[^。！？\n]*[。！？]", "", out)
+    out = re.sub(r"[^。！？\n]*这个学校听起来[^。！？\n]*[。！？]", "", out)
     out = re.sub(r"[ ]{2,}", " ", out)
     return out.strip()
 

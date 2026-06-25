@@ -12,6 +12,7 @@ from app.db.admin_customers import AdminCustomerRepository
 from app.db.profile_repository import ChatSessionProfileRepository
 from app.db.repositories import ChatSessionRepository, DocumentRepository, LeadCaptureRepository, QALogRepository
 from app.db.session import DatabaseSessionFactory
+from app.conversation.user_info_extractor import StructuredUserInfo
 from app.service.qa_service import QAService
 
 
@@ -41,6 +42,20 @@ def _build_client(tmp_path: Path) -> TestClient:
     client = TestClient(app)
     client.post("/admin-api/auth/login", json={"username": "admin", "password": "admin123456"})
     return client
+
+
+class _FakeStructuredUserInfoExtractor:
+    def __init__(self) -> None:
+        self.seen_transcript = ""
+
+    async def extract(self, transcript: str) -> StructuredUserInfo:
+        self.seen_transcript = transcript
+        return StructuredUserInfo(
+            display_name="zjt",
+            org_name="xx学校",
+            contact="13813655304",
+            email="zjt@test.com",
+        )
 
 
 def test_visitor_trial_apply_persists_customer_for_admin(tmp_path: Path) -> None:
@@ -79,6 +94,34 @@ def test_visitor_trial_apply_persists_customer_for_admin(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_visitor_profile_prefers_latest_profile_org_over_stale_lead_snapshot(tmp_path: Path) -> None:
+    client = _build_client(tmp_path)
+
+    with client:
+        service = client.app.dependency_overrides[get_qa_service]()
+        await service._document_repository.init_db()
+        await service._chat_session_profile_repository.upsert_profile(
+            session_id="sess_profile_latest_org",
+            display_name="zjy老师",
+            org_name="加薪中学",
+            interests={
+                "_lead": {
+                    "name": "zjy老师",
+                    "org_name": "育才中学",
+                    "contact_value": "18018278286",
+                }
+            },
+        )
+
+        profile_resp = client.get("/visitor/profile", params={"session_id": "sess_profile_latest_org"})
+        assert profile_resp.status_code == 200
+        payload = profile_resp.json()
+        assert payload["name"] == "zjy老师"
+        assert payload["org_name"] == "加薪中学"
+        assert payload["contact"] == "18018278286"
+
+
+@pytest.mark.asyncio
 async def test_apply_visitor_trial_account_sets_admin_defaults(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     await service._document_repository.init_db()
@@ -103,6 +146,57 @@ async def test_apply_visitor_trial_account_sets_admin_defaults(tmp_path: Path) -
     assert lead_meta.get("email") == "li@example.com"
     session_meta = (profile.interests or {}).get("_session") or {}
     assert session_meta.get("trial_apply_submitted") is True
+
+
+@pytest.mark.asyncio
+async def test_apply_visitor_trial_account_cleans_user_info_before_persisting(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    await service._document_repository.init_db()
+
+    result = await service.apply_visitor_trial_account(
+        session_id="sess_clean_apply",
+        name="我的名字是 zjt",
+        org_name="是xx",
+        contact="手机号 13813655304",
+        email="邮箱是 ZJT@Test.COM",
+    )
+
+    assert result.ok is True
+    profile = await service._chat_session_profile_repository.get_profile(session_id="sess_clean_apply")
+    assert profile is not None
+    assert profile.display_name == "zjt"
+    assert profile.org_name == "xx"
+    lead_meta = (profile.interests or {}).get("_lead") or {}
+    assert lead_meta.get("name") == "zjt"
+    assert lead_meta.get("org_name") == "xx"
+    assert lead_meta.get("contact_value") == "13813655304"
+    assert lead_meta.get("email") == "zjt@test.com"
+
+
+@pytest.mark.asyncio
+async def test_apply_visitor_trial_account_uses_structured_extractor_before_persisting(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    extractor = _FakeStructuredUserInfoExtractor()
+    service._user_info_extractor = extractor
+    await service._document_repository.init_db()
+
+    result = await service.apply_visitor_trial_account(
+        session_id="sess_structured_apply",
+        name="我叫 zjt，不要存整句",
+        org_name="单位是 xx学校",
+        contact="联系方式是 13813655304",
+        email="邮箱是 zjt@test.com",
+    )
+
+    assert result.ok is True
+    assert "姓名：我叫 zjt，不要存整句" in extractor.seen_transcript
+    profile = await service._chat_session_profile_repository.get_profile(session_id="sess_structured_apply")
+    assert profile is not None
+    assert profile.display_name == "zjt"
+    assert profile.org_name == "xx学校"
+    lead_meta = (profile.interests or {}).get("_lead") or {}
+    assert lead_meta.get("contact_value") == "13813655304"
+    assert lead_meta.get("email") == "zjt@test.com"
 
 
 @pytest.mark.asyncio

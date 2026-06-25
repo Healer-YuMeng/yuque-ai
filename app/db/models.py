@@ -129,6 +129,9 @@ def _sqlite_schema_statements() -> List[str]:
 def _postgres_schema_statements() -> List[str]:
     return [
         """
+        CREATE EXTENSION IF NOT EXISTS vector;
+        """,
+        """
         CREATE TABLE IF NOT EXISTS documents (
             doc_id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
@@ -142,8 +145,16 @@ def _postgres_schema_statements() -> List[str]:
             chunk_id TEXT PRIMARY KEY,
             doc_id TEXT NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
             chunk_order INTEGER NOT NULL,
-            snippet TEXT NOT NULL
+            snippet TEXT NOT NULL,
+            chunk_text TEXT,
+            embedding vector
         );
+        """,
+        """
+        ALTER TABLE chunks ADD COLUMN IF NOT EXISTS chunk_text TEXT;
+        """,
+        """
+        ALTER TABLE chunks ADD COLUMN IF NOT EXISTS embedding vector;
         """,
         """
         CREATE TABLE IF NOT EXISTS qa_logs (

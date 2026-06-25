@@ -820,10 +820,22 @@ function sanitizeTrialApplyNameCandidate(raw: string): string {
 }
 
 function sanitizeTrialApplyOrgCandidate(raw: string): string {
-  const org = (raw || "").trim().replace(/^[，,。；;：:\s]+|[，,。；;：:\s]+$/g, "");
+  const org = (raw || "")
+    .trim()
+    .replace(/^(?:我在|我于|我来自|来自)\s*/, "")
+    .replace(/\s*(?:上班|工作|任职|就职)$/, "")
+    .replace(/^[，,。；;：:\s]+|[，,。；;：:\s]+$/g, "");
   if (!org) return "";
   if (INVALID_TRIAL_APPLY_ORG_VALUES.includes(org)) return "";
   return org.slice(0, 40);
+}
+
+function extractTrialApplyEmail(userText: string): string {
+  const strict = userText.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || "";
+  if (strict) return strict.toLowerCase();
+  return (
+    userText.match(/(?:邮箱|邮件|email|e-mail)\s*(?:是|为)?\s*[:：]?\s*([A-Z0-9._%+-@]{2,80})/i)?.[1]?.trim() || ""
+  );
 }
 
 function extractTrialApplyName(userText: string): string {
@@ -846,8 +858,9 @@ function extractTrialApplyDraft(session: SessionState | null, fallbackProduct: s
   const phone = userText.match(/1[3-9]\d{9}/)?.[0] || "";
   const name = extractTrialApplyName(userText);
   const org = sanitizeTrialApplyOrgCandidate(
-    userText.match(/(?:单位是|学校是|来自|在)\s*([^，,。；;\n]{2,40}(?:学校|学院|机构|中心|公司|集团|教育局)?)/)?.[1] || "",
+    userText.match(/(?:单位是|学校是|来自|在|办公地点是|办公地址是|办公单位是)\s*([^，,。；;\n]{2,40}(?:学校|学院|机构|中心|公司|集团|教育局)?)/)?.[1] || "",
   );
+  const email = extractTrialApplyEmail(userText);
   const concern =
     [...(session?.messages || [])]
       .reverse()
@@ -859,7 +872,7 @@ function extractTrialApplyDraft(session: SessionState | null, fallbackProduct: s
     name,
     org_name: org,
     contact: phone,
-    email: "",
+    email,
     interested_product: fallbackProduct,
     concern,
   };
@@ -1739,10 +1752,10 @@ function App() {
       }
     }
     const safeName = sanitizeTrialApplyNameCandidate(profile.name || "");
-    setTrialApplyName((prev) => prev || safeName || "");
-    setTrialApplyOrg((prev) => prev || profile.org_name || "");
-    setTrialApplyContact((prev) => prev || profile.contact || "");
-    setTrialApplyEmail((prev) => prev || profile.email || "");
+    setTrialApplyName(safeName || "");
+    setTrialApplyOrg(profile.org_name || "");
+    setTrialApplyContact(profile.contact || "");
+    setTrialApplyEmail(profile.email || "");
     setTrialApplyError("");
     setTrialApplySuccess(false);
     setTrialApplyDialogOpen(true);

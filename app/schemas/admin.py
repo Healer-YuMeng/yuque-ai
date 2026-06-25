@@ -4,6 +4,8 @@ from typing import List
 
 from pydantic import BaseModel, Field
 
+from app.schemas.chat import ChatMediaBundle
+
 
 class AdminLoginRequest(BaseModel):
     username: str = Field(..., min_length=1, max_length=80)
@@ -108,3 +110,4 @@ class AdminKnowledgeDocResponse(BaseModel):
     title: str = ""
     url: str = ""
     body: str = ""
+    media: ChatMediaBundle = Field(default_factory=ChatMediaBundle)

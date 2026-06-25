@@ -17,6 +17,7 @@ from app.core.yuque_credentials import default_yuque_scope_for_profile, yuque_to
 from app.data.yuque_loader import YuqueLoader, YuqueLoaderError
 from app.db.admin_customers import DEFAULT_PAGE_SIZE, AdminCustomerRepository, AdminCustomerRow
 from app.db.repositories import AdminSceneIntroRepository, AdminSceneIntroRow, AdminVideoAssetRepository, AdminVideoAssetRow
+from app.service.media_answer_orchestrator import _DocContext, collect_media_from_doc_contexts
 from app.schemas.admin import (
     AdminAuthStatusResponse,
     AdminCustomerFollowUpUpdateRequest,
@@ -291,11 +292,19 @@ async def admin_knowledge_doc(
     loader, scope = _build_admin_yuque_loader(owner=owner, token_profile=token_profile)
     try:
         doc = await loader.get_doc(book=scope, id_or_slug=ref)
+        media = collect_media_from_doc_contexts(
+            [_DocContext(doc_id=doc.doc_id, title=doc.title, url=doc.url, snippet="", body=doc.body)],
+            question=doc.title,
+            max_images=30,
+            max_videos=10,
+            primary_doc_title=doc.title,
+        )
         return AdminKnowledgeDocResponse(
             doc_id=doc.doc_id,
             title=doc.title,
             url=doc.url,
             body=doc.body,
+            media=media,
         )
     except YuqueLoaderError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

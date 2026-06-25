@@ -35,7 +35,7 @@ async def lifespan(application: FastAPI):
             timeout_s=settings.yuque_timeout_s,
             scope=settings.yuque_scope,
         ),
-        vector_store=VectorStore(vector_dir=settings.vector_dir),
+        vector_store=VectorStore(session_factory=session_factory),
         document_repository=DocumentRepository(session_factory),
         qa_log_repository=QALogRepository(session_factory),
         lead_capture_repository=LeadCaptureRepository(session_factory),

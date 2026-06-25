@@ -46,7 +46,6 @@ class Settings:
     port: int = _env_int("PORT", 8000)
 
     data_dir: Path = BASE_DIR / "data_runtime"
-    vector_dir: Path = BASE_DIR / "data_runtime" / "vector_store"
     sqlite_path: Path = BASE_DIR / "data_runtime" / "rag_mvp.db"
     database_url: str = _env("DATABASE_URL", str(BASE_DIR / "data_runtime" / "rag_mvp.db"))
     admin_upload_dir: Path = BASE_DIR / "data_runtime" / "admin_uploads"
@@ -212,7 +211,6 @@ class Settings:
 
     def ensure_runtime_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.vector_dir.mkdir(parents=True, exist_ok=True)
         self.admin_upload_dir.mkdir(parents=True, exist_ok=True)
 
 

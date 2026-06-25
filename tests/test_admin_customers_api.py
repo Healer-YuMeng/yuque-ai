@@ -65,6 +65,7 @@ async def _seed_trial_customer(
                         **_trial_apply_interests(),
                         "_lead": {
                             **_trial_apply_interests()["_lead"],
+                            "contact_value": contact,
                             "email": email,
                         },
                     },
@@ -143,6 +144,60 @@ def test_list_customers_includes_leads_even_without_trial_apply(tmp_path: Path) 
         assert payload["items"][0]["contact"] == "13900001111"
 
 
+def test_list_customers_deduplicates_chat_and_form_by_contact(tmp_path: Path) -> None:
+    client = build_admin_customer_test_client(tmp_path)
+    session_factory = DatabaseSessionFactory(str(tmp_path / "admin_customers.db"))
+
+    with client:
+        async def seed_chat_lead() -> None:
+            conn = await session_factory.connect()
+            try:
+                await conn.execute(
+                    "INSERT INTO chat_session_profiles(session_id, display_name, org_name, visitor_type, interests_json) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        "sess_chat_same_phone",
+                        "王老师",
+                        "",
+                        "teacher",
+                        json.dumps(
+                            {"_lead": {"contact_value": "18018278654", "contact_type": "phone"}},
+                            ensure_ascii=False,
+                        ),
+                    ),
+                )
+                await conn.execute(
+                    "INSERT INTO lead_captures(session_id, contact_type, contact_value, visitor_type) VALUES (?, ?, ?, ?)",
+                    ("sess_chat_same_phone", "phone", "18018278654", "teacher"),
+                )
+                await conn.commit()
+            finally:
+                await conn.close()
+
+        asyncio.run(seed_chat_lead())
+        asyncio.run(
+            _seed_trial_customer(
+                session_factory,
+                session_id="sess_form_same_phone",
+                display_name="王校长",
+                org_name="有为中学",
+                contact="18018278654",
+                email="zjy",
+                visitor_type="institution_decision_maker",
+            )
+        )
+
+        list_resp = client.get("/admin-api/customers")
+        assert list_resp.status_code == 200
+        payload = list_resp.json()
+        assert payload["total"] == 1
+        assert len(payload["items"]) == 1
+        item = payload["items"][0]
+        assert item["contact"] == "18018278654"
+        assert item["org_name"] == "有为中学"
+        assert item["email"] == "zjy"
+        assert item["role_category"] in {"老师", "机构/学校负责人"}
+
+
 def test_list_customers_includes_role_category_from_profile(tmp_path: Path) -> None:
     client = build_admin_customer_test_client(tmp_path)
     session_factory = DatabaseSessionFactory(str(tmp_path / "admin_customers.db"))
@@ -197,6 +252,7 @@ def test_list_customers_pagination(tmp_path: Path) -> None:
                     session_id=f"sess_apply_{idx}",
                     display_name=f"客户{idx}",
                     org_name=f"单位{idx}",
+                    contact=f"13800138{idx:03d}",
                 )
             )
 

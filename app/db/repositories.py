@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Sequence
 
 from app.data.splitter import TextChunk
+from app.storage.vector_store import format_pgvector
 from app.db.models import schema_statements
 from app.db.session import DatabaseSessionFactory
 from app.schemas.chat import ChatResponse
@@ -24,14 +25,18 @@ class DocumentRepository:
         finally:
             await conn.close()
 
-    async def replace_documents(self, chunks: Iterable[TextChunk]) -> None:
+    async def replace_documents(
+        self,
+        chunks: Iterable[TextChunk],
+        embeddings: Optional[Sequence[Sequence[float]]] = None,
+    ) -> None:
         chunk_list = list(chunks)
         documents = {}
         conn = await self._session_factory.connect()
         try:
             await conn.execute("DELETE FROM chunks")
             await conn.execute("DELETE FROM documents")
-            for chunk in chunk_list:
+            for index, chunk in enumerate(chunk_list):
                 documents.setdefault(
                     chunk.doc_id,
                     {
@@ -41,10 +46,27 @@ class DocumentRepository:
                         "content_hash": hashlib.sha256(chunk.text.encode("utf-8")).hexdigest(),
                     },
                 )
-                await conn.execute(
-                    "INSERT INTO chunks(chunk_id, doc_id, chunk_order, snippet) VALUES (?, ?, ?, ?)",
-                    (chunk.chunk_id, chunk.doc_id, chunk.order, chunk.text[:500]),
-                )
+                embedding_value: str | None = None
+                if embeddings is not None and index < len(embeddings):
+                    embedding_value = format_pgvector(embeddings[index])
+                if self._session_factory.is_postgres and embedding_value is not None:
+                    await conn.execute(
+                        "INSERT INTO chunks(chunk_id, doc_id, chunk_order, snippet, chunk_text, embedding) "
+                        "VALUES (?, ?, ?, ?, ?, ?::vector)",
+                        (
+                            chunk.chunk_id,
+                            chunk.doc_id,
+                            chunk.order,
+                            chunk.text[:500],
+                            chunk.text,
+                            embedding_value,
+                        ),
+                    )
+                else:
+                    await conn.execute(
+                        "INSERT INTO chunks(chunk_id, doc_id, chunk_order, snippet) VALUES (?, ?, ?, ?)",
+                        (chunk.chunk_id, chunk.doc_id, chunk.order, chunk.text[:500]),
+                    )
             for doc in documents.values():
                 await conn.execute(
                     "INSERT INTO documents(doc_id, title, url, content_hash) VALUES (?, ?, ?, ?)",
