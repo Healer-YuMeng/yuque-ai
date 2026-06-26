@@ -830,12 +830,23 @@ function sanitizeTrialApplyOrgCandidate(raw: string): string {
   return org.slice(0, 40);
 }
 
+function sanitizeTrialApplyEmailCandidate(raw: string): string {
+  const email = (raw || "").match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || "";
+  return email ? email.toLowerCase() : "";
+}
+
+function sanitizeTrialApplyContactCandidate(raw: string): string {
+  const text = (raw || "").trim();
+  const phone = text.match(/1[3-9]\d{9}/)?.[0] || "";
+  if (phone) return phone;
+  const wechat =
+    text.match(/(?:微信号?|微信|weixin|wechat|wx)\s*(?:是|为)?\s*[:：]?\s*([A-Z0-9_-]{3,40})/i)?.[1]?.trim() || "";
+  if (wechat && !wechat.includes("@")) return wechat;
+  return "";
+}
+
 function extractTrialApplyEmail(userText: string): string {
-  const strict = userText.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || "";
-  if (strict) return strict.toLowerCase();
-  return (
-    userText.match(/(?:邮箱|邮件|email|e-mail)\s*(?:是|为)?\s*[:：]?\s*([A-Z0-9._%+-@]{2,80})/i)?.[1]?.trim() || ""
-  );
+  return sanitizeTrialApplyEmailCandidate(userText);
 }
 
 function extractTrialApplyName(userText: string): string {
@@ -855,7 +866,7 @@ function extractTrialApplyDraft(session: SessionState | null, fallbackProduct: s
     .filter((m) => m.role === "user")
     .map((m) => m.text || "")
     .join("\n");
-  const phone = userText.match(/1[3-9]\d{9}/)?.[0] || "";
+  const contact = sanitizeTrialApplyContactCandidate(userText);
   const name = extractTrialApplyName(userText);
   const org = sanitizeTrialApplyOrgCandidate(
     userText.match(/(?:单位是|学校是|来自|在|办公地点是|办公地址是|办公单位是)\s*([^，,。；;\n]{2,40}(?:学校|学院|机构|中心|公司|集团|教育局)?)/)?.[1] || "",
@@ -871,7 +882,7 @@ function extractTrialApplyDraft(session: SessionState | null, fallbackProduct: s
     ok: true,
     name,
     org_name: org,
-    contact: phone,
+    contact,
     email,
     interested_product: fallbackProduct,
     concern,
@@ -1752,10 +1763,12 @@ function App() {
       }
     }
     const safeName = sanitizeTrialApplyNameCandidate(profile.name || "");
+    const safeContact = sanitizeTrialApplyContactCandidate(profile.contact || "");
+    const safeEmail = sanitizeTrialApplyEmailCandidate(profile.email || profile.contact || "");
     setTrialApplyName(safeName || "");
     setTrialApplyOrg(profile.org_name || "");
-    setTrialApplyContact(profile.contact || "");
-    setTrialApplyEmail(profile.email || "");
+    setTrialApplyContact(safeContact);
+    setTrialApplyEmail(safeEmail);
     setTrialApplyError("");
     setTrialApplySuccess(false);
     setTrialApplyDialogOpen(true);
@@ -3757,7 +3770,7 @@ function App() {
                       trialApplySubmitting ||
                       !trialApplyName.trim() ||
                       !trialApplyOrg.trim() ||
-                      !trialApplyContact.trim()
+                      (!trialApplyContact.trim() && !trialApplyEmail.trim())
                     }
                   >
                     {trialApplySubmitting ? "提交中…" : "提交申请"}

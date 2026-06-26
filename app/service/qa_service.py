@@ -23,6 +23,7 @@ from app.conversation.lead_nudge_policy import LeadNudgePolicy
 from app.conversation.trial_account_pool import allocate_trial_account, load_trial_accounts
 from app.conversation.user_info_extractor import UserInfoStructuredExtractor
 from app.conversation.user_info_cleaner import (
+    extract_email_text_candidate,
     normalize_display_name_candidate,
     normalize_email_candidate,
     normalize_organization_candidate,
@@ -928,18 +929,22 @@ class QAService:
         concern_text = (concern or "").strip()
         if not sid:
             return TrialCredentialsResponse(ok=False, message="缺少会话标识，请刷新后重试。")
-        if not (display_name and org and contact_text):
-            return TrialCredentialsResponse(ok=False, message="请完整填写姓名、单位、联系方式。")
-        contact_hit = extract_contact(contact_text)
-        if not contact_hit:
+        if not (display_name and org and (contact_text or email_text)):
+            return TrialCredentialsResponse(ok=False, message="请完整填写姓名、单位，并至少填写联系方式或邮箱。")
+        contact_hit = extract_contact(contact_text) if contact_text else None
+        if contact_text and not contact_hit:
             return TrialCredentialsResponse(ok=False, message="联系方式校验失败，请填写手机号或微信号。")
         if raw_email and not email_text:
             return TrialCredentialsResponse(ok=False, message="邮箱格式校验失败，请检查后重试。")
 
+        lead_contact_type = contact_hit.contact_type if contact_hit else ""
+        lead_contact_value = contact_hit.value if contact_hit else ""
+        capture_contact_type = lead_contact_type or ("email" if email_text else "")
+        capture_contact_value = lead_contact_value or email_text
         await self._lead_capture_repository.try_insert_lead(
             session_id=sid,
-            contact_type=contact_hit.contact_type,
-            contact_value=contact_hit.value,
+            contact_type=capture_contact_type,
+            contact_value=capture_contact_value,
             visitor_type=None,
         )
         profile = await self._chat_session_profile_repository.get_profile(session_id=sid)
@@ -958,8 +963,8 @@ class QAService:
                 "wants_trial": True,
                 "name": display_name,
                 "org_name": org,
-                "contact_type": contact_hit.contact_type,
-                "contact_value": contact_hit.value,
+                "contact_type": lead_contact_type,
+                "contact_value": lead_contact_value,
                 "email": email_text,
                 "interested_product": product,
                 "concern": concern_text,
@@ -1021,8 +1026,12 @@ class QAService:
         interests = dict(profile.interests) if profile and isinstance(profile.interests, dict) else {}
         lead = dict(interests.get("_lead") or {})
         contact_hit = extract_contact(question)
+        email_text = extract_email_text_candidate(question) or str(lead.get("email") or "").strip()
         contact_type = contact_hit.contact_type if contact_hit else str(lead.get("contact_type") or "").strip()
         contact_value = contact_hit.value if contact_hit else str(lead.get("contact_value") or "").strip()
+        if (not contact_type or not contact_value) and email_text:
+            contact_type = "email"
+            contact_value = email_text
         if not contact_type or not contact_value:
             return False
 
@@ -1046,6 +1055,8 @@ class QAService:
                 "interested_product": str(lead.get("interested_product") or scene or "").strip(),
             }
         )
+        if email_text:
+            lead["email"] = email_text
         if display_name:
             lead["name"] = display_name
         if org_name:

@@ -415,6 +415,8 @@ def _merge_contact_text(primary: str, incoming: str) -> str:
 def _format_contact(leads: List[tuple[str, str, str]], interests: dict[str, Any]) -> str:
     parts: List[str] = []
     for contact_type, contact_value, _visitor_type in leads:
+        if _is_email_contact_type(contact_type):
+            continue
         value = (contact_value or "").strip()
         if not value:
             continue
@@ -424,9 +426,13 @@ def _format_contact(leads: List[tuple[str, str, str]], interests: dict[str, Any]
         return " / ".join(parts)
     lead = interests.get("_lead") if isinstance(interests.get("_lead"), dict) else {}
     value = str(lead.get("contact_value") or "").strip()
-    if value:
+    if value and not _is_email_contact_type(str(lead.get("contact_type") or "")):
         return f"{_contact_type_label(str(lead.get('contact_type') or ''))}{value}"
     return ""
+
+
+def _is_email_contact_type(contact_type: str) -> bool:
+    return (contact_type or "").strip().lower() in {"email", "mail"}
 
 
 def _contact_type_label(contact_type: str) -> str:

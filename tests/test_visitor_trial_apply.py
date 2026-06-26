@@ -93,6 +93,35 @@ def test_visitor_trial_apply_persists_customer_for_admin(tmp_path: Path) -> None
         assert profile_resp.json()["email"] == "zhao@example.com"
 
 
+def test_visitor_trial_apply_accepts_email_without_contact(tmp_path: Path) -> None:
+    client = _build_client(tmp_path)
+
+    with client:
+        resp = client.post(
+            "/visitor/trial/apply",
+            json={
+                "session_id": "sess_visitor_email_apply",
+                "name": "双老师",
+                "org_name": "有为教育小学",
+                "contact": "",
+                "email": "yumeng@mc2.cn",
+                "interested_product": "智能招生",
+            },
+        )
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["ok"] is True
+
+        list_resp = client.get("/admin-api/customers")
+        assert list_resp.status_code == 200
+        items = list_resp.json()["items"]
+        assert len(items) == 1
+        assert items[0]["display_name"] == "双老师"
+        assert items[0]["org_name"] == "有为教育小学"
+        assert items[0]["contact"] == ""
+        assert items[0]["email"] == "yumeng@mc2.cn"
+
+
 @pytest.mark.asyncio
 async def test_visitor_profile_prefers_latest_profile_org_over_stale_lead_snapshot(tmp_path: Path) -> None:
     client = _build_client(tmp_path)
@@ -230,3 +259,31 @@ async def test_v5_chat_contact_persists_customer_for_admin(tmp_path: Path) -> No
     assert items[0].contact == "13423445679"
     assert items[0].follow_up_status == "待跟进"
     assert items[0].trial_account == "待发放"
+
+
+@pytest.mark.asyncio
+async def test_v5_chat_email_only_persists_customer_for_admin(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    await service._document_repository.init_db()
+    await service._chat_session_profile_repository.upsert_profile(
+        session_id="sess_v5_chat_email_lead",
+        display_name="王校长",
+        org_name="有为中学",
+        visitor_type="institution_decision_maker",
+        interests={"_lead": {"interested_product": "人工智能通识课程"}},
+    )
+
+    saved = await service._persist_v5_chat_lead_for_admin(
+        session_id="sess_v5_chat_email_lead",
+        question="我的邮箱是yument@test.com，后续可以发资料到这里",
+        scene="人工智能通识教育",
+    )
+
+    assert saved is True
+    customer_repo = AdminCustomerRepository(DatabaseSessionFactory(str(tmp_path / "visitor_trial.db")))
+    items, total = await customer_repo.list_customers()
+    assert total == 1
+    assert items[0].display_name == "王校长"
+    assert items[0].contact == ""
+    assert items[0].email == "yument@test.com"
+    assert items[0].role_category == "机构/学校负责人"
