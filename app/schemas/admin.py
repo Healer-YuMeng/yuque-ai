@@ -61,6 +61,8 @@ class AdminCustomerResponse(BaseModel):
     display_name: str = ""
     org_name: str = ""
     role_category: str = ""
+    consult_scene: str = ""
+    consult_time: str = ""
     contact: str = ""
     email: str = ""
     follow_up_status: str = "待跟进"

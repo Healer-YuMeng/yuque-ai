@@ -19,6 +19,8 @@ class AdminCustomerRow:
     display_name: str
     org_name: str
     role_category: str
+    consult_scene: str
+    consult_time: str
     contact: str
     email: str
     follow_up_status: str
@@ -35,14 +37,21 @@ class AdminCustomerRepository:
             return "COALESCE(p.updated_at, l.latest_lead_at)::text"
         return "CAST(COALESCE(p.updated_at, l.latest_lead_at) AS TEXT)"
 
-    def _order_by_sql(self) -> str:
+    def _consult_time_select_expr(self) -> str:
         if self._session_factory.is_postgres:
-            return """
-                ORDER BY COALESCE(p.updated_at, l.latest_lead_at) DESC NULLS LAST,
+            return "l.latest_lead_at::text"
+        return "CAST(l.latest_lead_at AS TEXT)"
+
+    def _order_by_sql(self, *, consult_time_order: str = "desc") -> str:
+        direction = "ASC" if _normalize_consult_time_order(consult_time_order) == "asc" else "DESC"
+        if self._session_factory.is_postgres:
+            nulls = "NULLS FIRST" if direction == "ASC" else "NULLS LAST"
+            return f"""
+                ORDER BY l.latest_lead_at {direction} {nulls},
                          COALESCE(p.session_id, l.session_id) DESC
             """
-        return """
-            ORDER BY COALESCE(p.updated_at, l.latest_lead_at) DESC,
+        return f"""
+            ORDER BY l.latest_lead_at {direction},
                      COALESCE(p.session_id, l.session_id) DESC
         """
 
@@ -65,6 +74,8 @@ class AdminCustomerRepository:
         self,
         *,
         query: str = "",
+        follow_up_status: str = "",
+        consult_time_order: str = "desc",
         page: int = 1,
         page_size: int = DEFAULT_PAGE_SIZE,
     ) -> Tuple[List[AdminCustomerRow], int]:
@@ -74,19 +85,33 @@ class AdminCustomerRepository:
         offset = (page_num - 1) * size
         conn = await self._session_factory.connect()
         try:
-            all_items = await self._load_deduped_customer_rows(conn, query=q)
+            all_items = await self._load_deduped_customer_rows(
+                conn,
+                query=q,
+                consult_time_order=consult_time_order,
+            )
+            status_filter = _normalize_follow_up_filter(follow_up_status)
+            if status_filter:
+                all_items = [item for item in all_items if item.follow_up_status == status_filter]
             total = len(all_items)
             return all_items[offset: offset + size], total
         finally:
             await conn.close()
 
-    async def _load_deduped_customer_rows(self, conn: Any, *, query: str = "") -> List[AdminCustomerRow]:
+    async def _load_deduped_customer_rows(
+        self,
+        conn: Any,
+        *,
+        query: str = "",
+        consult_time_order: str = "desc",
+    ) -> List[AdminCustomerRow]:
         q = (query or "").strip()
         search_sql, search_params = _search_params(q, is_postgres=self._session_factory.is_postgres)
         not_deleted_filter = self._not_deleted_filter()
         customer_from = self._customer_base_from()
         updated_at_expr = self._updated_at_select_expr()
-        order_by_sql = self._order_by_sql()
+        consult_time_expr = self._consult_time_select_expr()
+        order_by_sql = self._order_by_sql(consult_time_order=consult_time_order)
         rows = await conn.fetchall(
             f"""
             SELECT COALESCE(p.session_id, l.session_id) AS session_id,
@@ -94,6 +119,7 @@ class AdminCustomerRepository:
                    p.org_name,
                    p.visitor_type,
                    p.interests_json,
+                   {consult_time_expr} AS consult_time,
                    {updated_at_expr} AS updated_at
             {customer_from}
             WHERE {not_deleted_filter}
@@ -129,6 +155,7 @@ class AdminCustomerRepository:
         if not sid:
             return None
         updated_at_expr = self._updated_at_select_expr()
+        consult_time_expr = self._consult_time_select_expr()
         conn = await self._session_factory.connect()
         try:
             row = await conn.fetchone(
@@ -138,6 +165,7 @@ class AdminCustomerRepository:
                        p.org_name,
                        p.visitor_type,
                        p.interests_json,
+                       {consult_time_expr} AS consult_time,
                        {updated_at_expr} AS updated_at
                 {self._customer_base_from()}
                 WHERE l.session_id = ?
@@ -315,6 +343,8 @@ def _customer_row_from_db(row: Any, leads: List[tuple[str, str, str]]) -> AdminC
         display_name=str(row["display_name"] or "").strip(),
         org_name=str(row["org_name"] or "").strip(),
         role_category=_role_category(row, leads, interests),
+        consult_scene=_consult_scene(interests),
+        consult_time=str(row["consult_time"] or ""),
         contact=contact,
         email=_lead_email(interests),
         follow_up_status=_follow_up_status(interests),
@@ -374,6 +404,8 @@ def _merge_customer_row(primary: AdminCustomerRow, incoming: AdminCustomerRow) -
         display_name=_prefer_text(primary.display_name, incoming.display_name),
         org_name=_prefer_text(primary.org_name, incoming.org_name),
         role_category=_prefer_text(primary.role_category, incoming.role_category),
+        consult_scene=_prefer_text(primary.consult_scene, incoming.consult_scene),
+        consult_time=_prefer_text(primary.consult_time, incoming.consult_time),
         contact=_merge_contact_text(primary.contact, incoming.contact),
         email=_prefer_text(primary.email, incoming.email),
         follow_up_status=_prefer_status(primary.follow_up_status, incoming.follow_up_status, "待跟进"),
@@ -477,6 +509,18 @@ def _lead_email(interests: dict[str, Any]) -> str:
     return str(lead.get("email") or "").strip()
 
 
+def _consult_scene(interests: dict[str, Any]) -> str:
+    lead = interests.get("_lead") if isinstance(interests.get("_lead"), dict) else {}
+    session_meta = interests.get("_session") if isinstance(interests.get("_session"), dict) else {}
+    return str(
+        lead.get("interested_product")
+        or lead.get("consult_scene")
+        or session_meta.get("interested_product")
+        or session_meta.get("module_scope")
+        or ""
+    ).strip()
+
+
 def _follow_up_status(interests: dict[str, Any]) -> str:
     admin_meta = interests.get("_admin") if isinstance(interests.get("_admin"), dict) else {}
     stored = str(admin_meta.get("follow_up_status") or "").strip()
@@ -498,6 +542,16 @@ def _normalize_follow_up(value: str) -> str:
     if status in FOLLOW_UP_OPTIONS:
         return status
     return "待跟进"
+
+
+def _normalize_follow_up_filter(value: str) -> str:
+    status = (value or "").strip()
+    return status if status in FOLLOW_UP_OPTIONS else ""
+
+
+def _normalize_consult_time_order(value: str) -> str:
+    order = (value or "").strip().lower()
+    return "asc" if order == "asc" else "desc"
 
 
 def _normalize_test_account(value: str) -> str:

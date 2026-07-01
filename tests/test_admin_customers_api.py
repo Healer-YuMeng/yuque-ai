@@ -50,6 +50,7 @@ async def _seed_trial_customer(
     contact: str = "13800138000",
     email: str = "",
     visitor_type: str = "",
+    consult_scene: str = "",
 ) -> None:
     conn = await session_factory.connect()
     try:
@@ -67,6 +68,7 @@ async def _seed_trial_customer(
                             **_trial_apply_interests()["_lead"],
                             "contact_value": contact,
                             "email": email,
+                            "interested_product": consult_scene,
                         },
                     },
                     ensure_ascii=False,
@@ -240,6 +242,71 @@ def test_list_customers_includes_email_when_present(tmp_path: Path) -> None:
         assert item["email"] == "zhao@example.com"
 
 
+def test_list_customers_includes_consult_scene_when_present(tmp_path: Path) -> None:
+    client = build_admin_customer_test_client(tmp_path)
+    session_factory = DatabaseSessionFactory(str(tmp_path / "admin_customers.db"))
+
+    with client:
+        asyncio.run(
+            _seed_trial_customer(
+                session_factory,
+                session_id="sess_scene_1",
+                display_name="钱老师",
+                org_name="未来学校",
+                consult_scene="智能招生",
+            )
+        )
+
+        list_resp = client.get("/admin-api/customers")
+        assert list_resp.status_code == 200
+        item = list_resp.json()["items"][0]
+        assert item["consult_scene"] == "智能招生"
+        assert item["consult_time"]
+
+
+def test_list_customers_orders_by_latest_consult_time_not_admin_update(tmp_path: Path) -> None:
+    client = build_admin_customer_test_client(tmp_path)
+    session_factory = DatabaseSessionFactory(str(tmp_path / "admin_customers.db"))
+
+    with client:
+        async def seed_custom_times() -> None:
+            conn = await session_factory.connect()
+            try:
+                for session_id, display_name, created_at in [
+                    ("sess_old_consult", "较早咨询", "2026-01-01 09:00:00"),
+                    ("sess_new_consult", "较晚咨询", "2026-01-02 09:00:00"),
+                ]:
+                    await conn.execute(
+                        "INSERT INTO chat_session_profiles(session_id, display_name, org_name, interests_json, updated_at) VALUES (?, ?, ?, ?, ?)",
+                        (
+                            session_id,
+                            display_name,
+                            "测试学校",
+                            json.dumps({"_lead": {"interested_product": "智能招生"}}, ensure_ascii=False),
+                            "2026-01-03 09:00:00" if session_id == "sess_old_consult" else created_at,
+                        ),
+                    )
+                    await conn.execute(
+                        "INSERT INTO lead_captures(session_id, contact_type, contact_value, visitor_type, created_at) VALUES (?, ?, ?, ?, ?)",
+                        (session_id, "phone", "13800138001" if session_id == "sess_old_consult" else "13800138002", None, created_at),
+                    )
+                await conn.commit()
+            finally:
+                await conn.close()
+
+        asyncio.run(seed_custom_times())
+
+        list_resp = client.get("/admin-api/customers")
+        assert list_resp.status_code == 200
+        items = list_resp.json()["items"]
+        assert [item["display_name"] for item in items[:2]] == ["较晚咨询", "较早咨询"]
+
+        asc_resp = client.get("/admin-api/customers", params={"consult_time_order": "asc"})
+        assert asc_resp.status_code == 200
+        asc_items = asc_resp.json()["items"]
+        assert [item["display_name"] for item in asc_items[:2]] == ["较早咨询", "较晚咨询"]
+
+
 def test_list_customers_pagination(tmp_path: Path) -> None:
     client = build_admin_customer_test_client(tmp_path)
     session_factory = DatabaseSessionFactory(str(tmp_path / "admin_customers.db"))
@@ -370,6 +437,43 @@ def test_update_follow_up_status(tmp_path: Path) -> None:
         )
         assert patch_resp.status_code == 200
         assert patch_resp.json()["follow_up_status"] == "已完成"
+
+
+def test_list_customers_filters_by_follow_up_status(tmp_path: Path) -> None:
+    client = build_admin_customer_test_client(tmp_path)
+    session_factory = DatabaseSessionFactory(str(tmp_path / "admin_customers.db"))
+
+    with client:
+        asyncio.run(
+            _seed_trial_customer(
+                session_factory,
+                session_id="sess_filter_waiting",
+                display_name="待跟进客户",
+                org_name="第一中学",
+                contact="13800138001",
+            )
+        )
+        asyncio.run(
+            _seed_trial_customer(
+                session_factory,
+                session_id="sess_filter_progress",
+                display_name="跟进中客户",
+                org_name="第二中学",
+                contact="13800138002",
+            )
+        )
+        patch_resp = client.patch(
+            "/admin-api/customers/sess_filter_progress/follow-up",
+            json={"follow_up_status": "跟进中"},
+        )
+        assert patch_resp.status_code == 200
+
+        list_resp = client.get("/admin-api/customers", params={"follow_up_status": "跟进中"})
+        assert list_resp.status_code == 200
+        payload = list_resp.json()
+        assert payload["total"] == 1
+        assert payload["items"][0]["display_name"] == "跟进中客户"
+        assert payload["items"][0]["follow_up_status"] == "跟进中"
 
 
 def test_customer_summary_counts_trial_issued(tmp_path: Path) -> None:

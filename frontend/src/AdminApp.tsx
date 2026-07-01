@@ -48,6 +48,8 @@ type AdminCustomer = {
   display_name: string;
   org_name: string;
   role_category: string;
+  consult_scene: string;
+  consult_time: string;
   contact: string;
   email: string;
   follow_up_status: string;
@@ -239,6 +241,8 @@ function AdminApp() {
   const [customerSummary, setCustomerSummary] = useState<CustomerSummary>({ customer_total: 0, trial_issued_total: 0 });
   const [customers, setCustomers] = useState<AdminCustomer[]>([]);
   const [customerQuery, setCustomerQuery] = useState("");
+  const [customerFollowUpFilter, setCustomerFollowUpFilter] = useState("");
+  const [customerConsultTimeOrder, setCustomerConsultTimeOrder] = useState<"asc" | "desc">("desc");
   const [customerPage, setCustomerPage] = useState(1);
   const [customerTotal, setCustomerTotal] = useState(0);
   const [customerTotalPages, setCustomerTotalPages] = useState(0);
@@ -379,6 +383,7 @@ function AdminApp() {
     setMenuOpen(false);
     if (card.target === "customers") {
       setCustomerQuery("");
+      setCustomerFollowUpFilter("");
       setCustomerPage(1);
       setCustomerListVersion((version) => version + 1);
     }
@@ -564,9 +569,14 @@ function AdminApp() {
         if (showLoading) setCustomersLoading(true);
         setCustomerError("");
       });
-      fetch(
-        `/admin-api/customers?q=${encodeURIComponent(customerQuery.trim())}&page=${customerPage}&page_size=${CUSTOMER_PAGE_SIZE}`,
-      )
+      const params = new URLSearchParams({
+        q: customerQuery.trim(),
+        page: String(customerPage),
+        page_size: String(CUSTOMER_PAGE_SIZE),
+        consult_time_order: customerConsultTimeOrder,
+      });
+      if (customerFollowUpFilter) params.set("follow_up_status", customerFollowUpFilter);
+      fetch(`/admin-api/customers?${params.toString()}`)
         .then(async (resp) => {
           if (!resp.ok) {
             const data = await resp.json().catch(() => ({}));
@@ -597,7 +607,7 @@ function AdminApp() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [adminAuthenticated, activeSection, customerQuery, customerPage, customerListVersion, customers.length]);
+  }, [adminAuthenticated, activeSection, customerQuery, customerFollowUpFilter, customerConsultTimeOrder, customerPage, customerListVersion, customers.length]);
 
   useEffect(() => {
     if (!adminAuthenticated || activeSection !== "customers") return;
@@ -1194,16 +1204,33 @@ function AdminApp() {
 
           {activeSection === "customers" ? (
             <section className="admin-customers-panel" aria-label="客户管理">
-              <input
-                type="search"
-                className="admin-customers-search"
-                placeholder="搜索客户名称、单位、联系方式或邮箱..."
-                value={customerQuery}
-                onChange={(event) => {
-                  setCustomerQuery(event.target.value);
-                  setCustomerPage(1);
-                }}
-              />
+              <div className="admin-customers-toolbar">
+                <input
+                  type="search"
+                  className="admin-customers-search"
+                  placeholder="搜索客户名称、单位、联系方式或邮箱..."
+                  value={customerQuery}
+                  onChange={(event) => {
+                    setCustomerQuery(event.target.value);
+                    setCustomerPage(1);
+                  }}
+                />
+                <label className="admin-customers-filter">
+                  <span>跟进进度</span>
+                  <select
+                    value={customerFollowUpFilter}
+                    onChange={(event) => {
+                      setCustomerFollowUpFilter(event.target.value);
+                      setCustomerPage(1);
+                    }}
+                  >
+                    <option value="">全部</option>
+                    {FOLLOW_UP_OPTIONS.map((option) => (
+                      <option key={option} value={option}>{option}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
               {customerError ? <div className="admin-customers-error" role="alert">{customerError}</div> : null}
               <div className="admin-customers-table-wrap">
                 <table className="admin-customers-table">
@@ -1212,6 +1239,27 @@ function AdminApp() {
                       <th>称呼</th>
                       <th>单位</th>
                       <th>角色类别</th>
+                      <th>咨询场景</th>
+                      <th>
+                        <span className="admin-sort-heading">
+                          咨询时间
+                          <button
+                            type="button"
+                            className="admin-sort-icon"
+                            title={customerConsultTimeOrder === "desc" ? "当前倒序，点击切换为正序" : "当前正序，点击切换为倒序"}
+                            aria-label={customerConsultTimeOrder === "desc" ? "咨询时间倒序，点击切换为正序" : "咨询时间正序，点击切换为倒序"}
+                            onClick={() => {
+                              setCustomerConsultTimeOrder((order) => (order === "desc" ? "asc" : "desc"));
+                              setCustomerPage(1);
+                            }}
+                          >
+                            <span aria-hidden="true">↕</span>
+                            <span className="admin-sort-direction" aria-hidden="true">
+                              {customerConsultTimeOrder === "desc" ? "↓" : "↑"}
+                            </span>
+                          </button>
+                        </span>
+                      </th>
                       <th>联系方式</th>
                       <th>邮箱</th>
                       <th>跟进进度</th>
@@ -1223,11 +1271,11 @@ function AdminApp() {
                   <tbody>
                     {customersLoading ? (
                       <tr>
-                        <td colSpan={9} className="admin-customers-empty">正在加载客户数据...</td>
+                        <td colSpan={11} className="admin-customers-empty">正在加载客户数据...</td>
                       </tr>
                     ) : customers.length === 0 ? (
                       <tr>
-                        <td colSpan={9} className="admin-customers-empty">暂无客户数据</td>
+                        <td colSpan={11} className="admin-customers-empty">暂无客户数据</td>
                       </tr>
                     ) : (
                       customers.map((customer) => (
@@ -1235,6 +1283,8 @@ function AdminApp() {
                           <td>{customer.display_name || "—"}</td>
                           <td>{customer.org_name || "—"}</td>
                           <td>{customer.role_category || "—"}</td>
+                          <td>{customer.consult_scene || "—"}</td>
+                          <td>{customer.consult_time || customer.updated_at || "—"}</td>
                           <td>{customer.contact || "—"}</td>
                           <td>{customer.email || "—"}</td>
                           <td>

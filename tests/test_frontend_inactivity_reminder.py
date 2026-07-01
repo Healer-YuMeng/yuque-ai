@@ -107,6 +107,21 @@ def test_inactivity_reminder_shows_trial_apply_button() -> None:
     assert "申请测试账号" in app
 
 
+def test_friend_v5_can_also_show_trial_apply_button() -> None:
+    app = (ROOT / "frontend/src/App.tsx").read_text(encoding="utf-8")
+    assert "const showFriendV5TrialApplyButton =" in app
+    assert "item.isFriendV5" in app
+    assert "{showFriendV5TrialApplyButton ? (" in app
+    assert 'className="msg-inline-action"' in app
+
+
+def test_selected_focus_scene_button_is_disabled_to_prevent_repeat_click() -> None:
+    app = (ROOT / "frontend/src/App.tsx").read_text(encoding="utf-8")
+    assert "const isFocusSceneDisabled = (scene: FocusScene) =>" in app
+    assert "Boolean(activeFocusScene && activeFocusScene === scene)" in app
+    assert "disabled={isStreaming || isFocusSceneDisabled(scene)}" in app
+
+
 def test_admin_customers_table_includes_email_column() -> None:
     admin_app = (ROOT / "frontend/src/AdminApp.tsx").read_text(encoding="utf-8")
     assert "email: string;" in admin_app

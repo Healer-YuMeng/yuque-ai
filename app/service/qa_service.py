@@ -53,7 +53,6 @@ from app.schemas.chat import (
     ChatV4Response,
     SelectedYuqueDocRef,
     TrialCredentialsResponse,
-    VisitorProfileResponse,
 )
 from app.service.media_answer_orchestrator import MediaAnswerOrchestrator
 from app.service.friend_dialog_orchestrator_v5 import FriendDialogOrchestratorV5
@@ -989,26 +988,6 @@ class QAService:
         return TrialCredentialsResponse(
             ok=True,
             message="提交成功，我们会尽快与您联系。",
-        )
-
-    async def visitor_profile_summary(self, *, session_id: str) -> VisitorProfileResponse:
-        sid = (session_id or "").strip()
-        if not sid:
-            return VisitorProfileResponse(ok=False)
-        profile = await self._chat_session_profile_repository.get_profile(session_id=sid)
-        parts = _visitor_profile_parts(profile)
-        interests = profile.interests if profile and isinstance(profile.interests, dict) else {}
-        session_meta = interests.get("_session") if isinstance(interests.get("_session"), dict) else {}
-        return VisitorProfileResponse(
-            ok=True,
-            name=parts["name"],
-            org_name=parts["org_name"],
-            contact=parts["contact"],
-            email=parts["email"],
-            interested_product=parts["interested_product"],
-            concern=parts.get("concern", ""),
-            module_scope=parts["module_scope"],
-            trial_account_issued=bool(session_meta.get("trial_account_issued")),
         )
 
     async def _persist_v5_chat_lead_for_admin(

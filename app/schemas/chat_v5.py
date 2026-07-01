@@ -58,6 +58,7 @@ class ChatV5DonePayload(BaseModel):
     search_keywords: List[str] = Field(default_factory=list)
     media: ChatMediaBundle = Field(default_factory=ChatMediaBundle)
     profile_fields: Dict[str, Any] = Field(default_factory=dict)
+    trial_apply_available: bool = False
     fallback_used: bool = False
     debug: Optional[Dict[str, Any]] = None
 

@@ -121,18 +121,6 @@ class VisitorTrialApplyRequest(BaseModel):
     concern: str = Field(default="", max_length=500)
 
 
-class VisitorProfileResponse(BaseModel):
-    ok: bool = True
-    name: str = ""
-    org_name: str = ""
-    contact: str = ""
-    email: str = ""
-    interested_product: str = ""
-    concern: str = ""
-    module_scope: str = ""
-    trial_account_issued: bool = False
-
-
 class ChatV4CapabilitiesResponse(BaseModel):
     enabled: bool
     toc_loaded: bool = False

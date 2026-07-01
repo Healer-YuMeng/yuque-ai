@@ -607,12 +607,67 @@ async def test_price_tag_returns_handoff_without_yuque_read() -> None:
     )
 
     done = [item for item in events if item["event"] == "done"][0]["data"]
-    assert "方便留个微信或电话吗" in done["answer"]
+    assert "如果您有需求，可以留下您的联系方式！" in done["answer"]
+    assert "方便留个微信或电话吗" not in done["answer"]
     assert "方便留下您的称呼吗" not in done["answer"]
     assert deep_reader.calls == []
     assert deep_reader.node_calls == []
+    assert done["trial_apply_available"] is True
     assert done["debug"]["tag_route"]["kind"] == "price"
     assert done["debug"]["mcp_route"]["mode"] == "price_direct"
+
+
+@pytest.mark.asyncio
+async def test_round_based_lead_offer_waits_until_fifth_user_turn() -> None:
+    generator = _FakeGenerator()
+    orch = FriendDialogOrchestratorV5(
+        generator=generator,
+        profile_repo=_FakeProfileRepo(),
+        profile_extractor=_FakeNoProfileUpdateExtractor(),
+        toc_nodes=_FAKE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="那一般从哪个年级先开始会更合适？",
+        session_id="sess_v5_round_lead_offer",
+        scene="人工智能通识教育",
+        trigger_type="manual",
+        history=[
+            ChatMessageRow(role="user", content="人工智能通识教育", created_at=""),
+            ChatMessageRow(role="assistant", content="先给您讲讲整体方向。", created_at=""),
+            ChatMessageRow(role="user", content="适合几年级？", created_at=""),
+            ChatMessageRow(role="assistant", content="我先按课堂场景给您说。", created_at=""),
+            ChatMessageRow(role="user", content="课堂里一般怎么用？", created_at=""),
+            ChatMessageRow(role="assistant", content="可以先看案例和指南。", created_at=""),
+        ],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert "如果您有需求，可以留下您的联系方式！" not in done["answer"]
+    assert done["trial_apply_available"] is False
+
+    events = await _collect_v5_events(
+        orch,
+        question="那一般从哪个年级先开始会更合适？",
+        session_id="sess_v5_round_lead_offer_5",
+        scene="人工智能通识教育",
+        trigger_type="manual",
+        history=[
+            ChatMessageRow(role="user", content="人工智能通识教育", created_at=""),
+            ChatMessageRow(role="assistant", content="先给您讲讲整体方向。", created_at=""),
+            ChatMessageRow(role="user", content="适合几年级？", created_at=""),
+            ChatMessageRow(role="assistant", content="我先按课堂场景给您说。", created_at=""),
+            ChatMessageRow(role="user", content="课堂里一般怎么用？", created_at=""),
+            ChatMessageRow(role="assistant", content="可以先看案例和指南。", created_at=""),
+            ChatMessageRow(role="user", content="前面说的案例适合什么学校？", created_at=""),
+            ChatMessageRow(role="assistant", content="我再给您缩小一下范围。", created_at=""),
+        ],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert "如果您有需求，可以留下您的联系方式！" in done["answer"]
+    assert done["trial_apply_available"] is True
 
 
 @pytest.mark.asyncio
@@ -1325,7 +1380,7 @@ async def test_scene_first_turn_returns_uploaded_admin_video() -> None:
     assert done["media"]["videos"][0]["title"] == "学校AI场景定制演示视频"
     assert done["debug"]["admin_scene_video_count"] == 1
     assert done["debug"]["media_display_mode"] == "before_answer"
-    assert "可以先看这段学校AI场景定制的演示视频" in done["debug"]["media_intro"]
+    assert done["debug"]["media_intro"] == "您可以先通过下面这个视频，了解咱们这个产品及其应用场景。"
 
 
 @pytest.mark.asyncio
@@ -1747,7 +1802,7 @@ async def test_after_explore_product_tag_restores_normal_rhythm() -> None:
     assert done["media"]["videos"][0]["url"] == "/admin-media/videos/school_ai_custom/20260615120000_school.mp4"
     assert done["debug"]["admin_scene_video_count"] == 1
     assert done["debug"]["media_display_mode"] == "before_answer"
-    assert "可以先看这段学校AI场景定制的演示视频" in done["debug"]["media_intro"]
+    assert done["debug"]["media_intro"] == "您可以先通过下面这个视频，了解咱们这个产品及其应用场景。"
 
 
 @pytest.mark.asyncio

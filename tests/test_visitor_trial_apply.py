@@ -88,11 +88,6 @@ def test_visitor_trial_apply_persists_customer_for_admin(tmp_path: Path) -> None
         assert items[0]["follow_up_status"] == "待跟进"
         assert items[0]["trial_account"] == "待发放"
 
-        profile_resp = client.get("/visitor/profile", params={"session_id": "sess_visitor_apply_1"})
-        assert profile_resp.status_code == 200
-        assert profile_resp.json()["email"] == "zhao@example.com"
-
-
 def test_visitor_trial_apply_accepts_email_without_contact(tmp_path: Path) -> None:
     client = _build_client(tmp_path)
 
@@ -120,35 +115,6 @@ def test_visitor_trial_apply_accepts_email_without_contact(tmp_path: Path) -> No
         assert items[0]["org_name"] == "有为教育小学"
         assert items[0]["contact"] == ""
         assert items[0]["email"] == "yumeng@mc2.cn"
-
-
-@pytest.mark.asyncio
-async def test_visitor_profile_prefers_latest_profile_org_over_stale_lead_snapshot(tmp_path: Path) -> None:
-    client = _build_client(tmp_path)
-
-    with client:
-        service = client.app.dependency_overrides[get_qa_service]()
-        await service._document_repository.init_db()
-        await service._chat_session_profile_repository.upsert_profile(
-            session_id="sess_profile_latest_org",
-            display_name="zjy老师",
-            org_name="加薪中学",
-            interests={
-                "_lead": {
-                    "name": "zjy老师",
-                    "org_name": "育才中学",
-                    "contact_value": "18018278286",
-                }
-            },
-        )
-
-        profile_resp = client.get("/visitor/profile", params={"session_id": "sess_profile_latest_org"})
-        assert profile_resp.status_code == 200
-        payload = profile_resp.json()
-        assert payload["name"] == "zjy老师"
-        assert payload["org_name"] == "加薪中学"
-        assert payload["contact"] == "18018278286"
-
 
 @pytest.mark.asyncio
 async def test_apply_visitor_trial_account_sets_admin_defaults(tmp_path: Path) -> None:

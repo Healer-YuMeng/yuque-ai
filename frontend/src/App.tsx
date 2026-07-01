@@ -120,8 +120,8 @@ function isFriendV5ExploreProductTag(tag: string): boolean {
   return /^想了解一下(.+?)产品？$/.test((tag || "").trim());
 }
 
-function friendV5VideoIntroForScene(scene: FocusScene): string {
-  return `可以先看这段${SCENE_TO_TOC_TITLE[scene]}的演示视频，直观感受一下实际效果。`;
+function friendV5VideoIntroForScene(): string {
+  return "您可以先通过下面这个视频，了解咱们这个产品及其应用场景。";
 }
 
 function isFriendV5TrialApplyTag(tag: string) {
@@ -408,18 +408,6 @@ type TrialApplyResponse = {
   password?: string;
   label?: string;
   message?: string;
-};
-
-type VisitorProfileResponse = {
-  ok?: boolean;
-  name?: string;
-  org_name?: string;
-  contact?: string;
-  email?: string;
-  interested_product?: string;
-  concern?: string;
-  module_scope?: string;
-  trial_account_issued?: boolean;
 };
 
 type RuntimeModeResponse = {
@@ -784,109 +772,6 @@ function looksLikeTrialApplyIntent(text: string): boolean {
 function looksLikeAlreadyApplied(text: string): boolean {
   const q = (text || "").trim();
   return /(已经|已).*(申请过|提交过)|申请过了|提交过了|我已经申请/.test(q);
-}
-
-const INVALID_TRIAL_APPLY_NAME_PATTERNS = [
-  /^(?:低年级|中年级|高年级|低中年级|中高年级)$/,
-  /^(?:小学|初中|高中|大学)(?:阶段|年级)?$/,
-  /^[一二三四五六七八九十]+年级$/,
-  /^[0-9]+年级$/,
-  /^(?:软件项目|软件编程|硬件搭建|信息课|社团)$/,
-  /^(?:给|带|做|看)(?:小学|初中|高中|低年级|中年级|高年级|低中年级|中高年级|软件项目|软件编程|硬件搭建|社团).*$/,
-  /^(?:学校|机构|培训机构|学校里|机构里)?(?:老师|教师|家长|学生|同学|校长|主任|负责人)$/,
-];
-
-const INVALID_TRIAL_APPLY_ORG_VALUES = [
-  "老师",
-  "教师",
-  "家长",
-  "学生",
-  "同学",
-  "校长",
-  "主任",
-  "负责人",
-  "先生",
-  "女士",
-];
-
-function sanitizeTrialApplyNameCandidate(raw: string): string {
-  let name = (raw || "").trim().replace(/^[“"'《【（(<]+|[”"'》】）)>]+$/g, "");
-  name = name.replace(/^(?:我是|我时|我叫|姓名是|名字是)/, "").trim();
-  name = name.replace(/^[，,。；;：:\s]+|[，,。；;：:\s]+$/g, "");
-  if (!name) return "";
-  if (["老师", "教师", "家长", "学生", "同学", "校长", "先生", "女士"].includes(name)) return "";
-  if (INVALID_TRIAL_APPLY_NAME_PATTERNS.some((pattern) => pattern.test(name))) return "";
-  return name.slice(0, 24);
-}
-
-function sanitizeTrialApplyOrgCandidate(raw: string): string {
-  const org = (raw || "")
-    .trim()
-    .replace(/^(?:我在|我于|我来自|来自)\s*/, "")
-    .replace(/\s*(?:上班|工作|任职|就职)$/, "")
-    .replace(/^[，,。；;：:\s]+|[，,。；;：:\s]+$/g, "");
-  if (!org) return "";
-  if (INVALID_TRIAL_APPLY_ORG_VALUES.includes(org)) return "";
-  return org.slice(0, 40);
-}
-
-function sanitizeTrialApplyEmailCandidate(raw: string): string {
-  const email = (raw || "").match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || "";
-  return email ? email.toLowerCase() : "";
-}
-
-function sanitizeTrialApplyContactCandidate(raw: string): string {
-  const text = (raw || "").trim();
-  const phone = text.match(/1[3-9]\d{9}/)?.[0] || "";
-  if (phone) return phone;
-  const wechat =
-    text.match(/(?:微信号?|微信|weixin|wechat|wx)\s*(?:是|为)?\s*[:：]?\s*([A-Z0-9_-]{3,40})/i)?.[1]?.trim() || "";
-  if (wechat && !wechat.includes("@")) return wechat;
-  return "";
-}
-
-function extractTrialApplyEmail(userText: string): string {
-  return sanitizeTrialApplyEmailCandidate(userText);
-}
-
-function extractTrialApplyName(userText: string): string {
-  const candidates = [
-    userText.match(/(?:我叫|姓名是|名字是)\s*([^，,。；;\n]{1,12})/)?.[1] || "",
-    userText.match(/(?:我是|我时)\s*([^，,。；;\n]{1,16}(?:老师|教师|校长|主任|先生|女士|家长|同学))/)?.[1] || "",
-  ];
-  for (const candidate of candidates) {
-    const name = sanitizeTrialApplyNameCandidate(candidate);
-    if (name) return name;
-  }
-  return "";
-}
-
-function extractTrialApplyDraft(session: SessionState | null, fallbackProduct: string): VisitorProfileResponse {
-  const userText = (session?.messages || [])
-    .filter((m) => m.role === "user")
-    .map((m) => m.text || "")
-    .join("\n");
-  const contact = sanitizeTrialApplyContactCandidate(userText);
-  const name = extractTrialApplyName(userText);
-  const org = sanitizeTrialApplyOrgCandidate(
-    userText.match(/(?:单位是|学校是|来自|在|办公地点是|办公地址是|办公单位是)\s*([^，,。；;\n]{2,40}(?:学校|学院|机构|中心|公司|集团|教育局)?)/)?.[1] || "",
-  );
-  const email = extractTrialApplyEmail(userText);
-  const concern =
-    [...(session?.messages || [])]
-      .reverse()
-      .find((m) => m.role === "user" && !looksLikeContactInUserMessage(m.text) && !looksLikeTrialApplyIntent(m.text))
-      ?.text.trim()
-      .slice(0, 180) || "";
-  return {
-    ok: true,
-    name,
-    org_name: org,
-    contact,
-    email,
-    interested_product: fallbackProduct,
-    concern,
-  };
 }
 
 /** 访客销售：新会话首条为 AI 欢迎语 */
@@ -1739,40 +1624,14 @@ function App() {
   }, [kbPanelDocs.length, loadKbToc]);
 
   const handleTrialApplyEntryClick = useCallback(async () => {
-    const sid = activeSessionRef.current;
-    const fallback = extractTrialApplyDraft(activeSession, activeFocusScene || "");
-    let profile = fallback;
-    if (sid) {
-      try {
-        const resp = await fetch(`/visitor/profile?session_id=${encodeURIComponent(sid)}`);
-        if (resp.ok) {
-          const data = (await resp.json()) as VisitorProfileResponse;
-          profile = {
-            ...fallback,
-            ...data,
-            name: data.name || fallback.name,
-            org_name: data.org_name || fallback.org_name,
-            contact: data.contact || fallback.contact,
-            email: data.email || fallback.email,
-            interested_product: data.interested_product || fallback.interested_product,
-            concern: data.concern || fallback.concern,
-          };
-        }
-      } catch {
-        profile = fallback;
-      }
-    }
-    const safeName = sanitizeTrialApplyNameCandidate(profile.name || "");
-    const safeContact = sanitizeTrialApplyContactCandidate(profile.contact || "");
-    const safeEmail = sanitizeTrialApplyEmailCandidate(profile.email || profile.contact || "");
-    setTrialApplyName(safeName || "");
-    setTrialApplyOrg(profile.org_name || "");
-    setTrialApplyContact(safeContact);
-    setTrialApplyEmail(safeEmail);
+    setTrialApplyName("");
+    setTrialApplyOrg("");
+    setTrialApplyContact("");
+    setTrialApplyEmail("");
     setTrialApplyError("");
     setTrialApplySuccess(false);
     setTrialApplyDialogOpen(true);
-  }, [activeFocusScene, activeSession]);
+  }, []);
 
   const submitTrialApply = useCallback(async () => {
     const sid = activeSessionRef.current;
@@ -1781,7 +1640,6 @@ function App() {
     setTrialApplySuccess(false);
     setTrialApplySubmitting(true);
     try {
-      const draft = extractTrialApplyDraft(activeSession, activeFocusScene || "");
       const resp = await fetch("/visitor/trial/apply", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1791,7 +1649,7 @@ function App() {
           org_name: trialApplyOrg.trim(),
           contact: trialApplyContact.trim(),
           email: trialApplyEmail.trim(),
-          interested_product: draft.interested_product || activeFocusScene || "",
+          interested_product: activeFocusScene || "",
         }),
       });
       const data = (await resp.json()) as TrialApplyResponse;
@@ -2045,7 +1903,7 @@ function App() {
                         ...item,
                         media,
                         mediaDisplayMode: "before_answer",
-                        mediaIntro: friendV5VideoIntroForScene(scene),
+                        mediaIntro: friendV5VideoIntroForScene(),
                         isFriendV5: true,
                         pendingComfortMessage: undefined,
                       }
@@ -2145,7 +2003,7 @@ function App() {
         text: "",
         media: cachedSceneVideo,
         mediaDisplayMode: cachedSceneVideo ? "before_answer" : undefined,
-        mediaIntro: cachedSceneVideo ? friendV5VideoIntroForScene(friendV5Scene) : undefined,
+        mediaIntro: cachedSceneVideo ? friendV5VideoIntroForScene() : undefined,
         isFriendV5: isFriendV5Request,
         streamStage: visitorStreamUi
           ? VISITOR_STREAM_STAGE_TEXT
@@ -2284,6 +2142,7 @@ function App() {
       const friendTags = isFriendV5Request ? parseFriendV5Tags(payload.tags) : [];
       const friendSources = isFriendV5Request ? parseFriendV5Sources(payload.sources) : [];
       const friendSearchKw = isFriendV5Request ? parseFriendV5SearchKeywords(payload.search_keywords) : [];
+      const friendTrialApplyAvailable = isFriendV5Request && payload.trial_apply_available === true;
       const friendMediaDisplay = isFriendV5Request ? parseFriendV5MediaDisplay(dbg) : {};
       if (isFriendV5Request && typeof window !== "undefined") {
         console.log("[V5 done]", { sources: payload.sources, parsed: friendSources, search_keywords: friendSearchKw });
@@ -2328,10 +2187,11 @@ function App() {
                         streamElapsedSec: undefined,
                         pendingComfortMessage: undefined,
                         trialApplyAvailable:
-                          !isFriendV5Request &&
                           !session.trialApplicationSubmitted &&
-                          (trialApplyIntentHit ||
-                            looksLikeTrialApplyIntent(serverAnswer)),
+                          (isFriendV5Request
+                            ? friendTrialApplyAvailable
+                            : (trialApplyIntentHit ||
+                              looksLikeTrialApplyIntent(serverAnswer))),
                         text: isFriendV5Request
                           ? finalText || item.text || "没有返回回答。"
                           : item.text || finalText || "没有返回回答。",
@@ -2625,6 +2485,8 @@ function App() {
     });
   };
 
+  const isFocusSceneDisabled = (scene: FocusScene) => Boolean(activeFocusScene && activeFocusScene === scene);
+
   const turnTrace = parseTurnTrace(lastPipelineDebug);
   const pipelineMode = typeof lastPipelineDebug?.mode === "string" ? lastPipelineDebug.mode : turnTrace?.pipeline;
   const v5DebugSources = parseFriendV5Sources(lastPipelineDebug?.v5_sources);
@@ -2806,9 +2668,9 @@ function App() {
                     <button
                       key={scene}
                       type="button"
-                      className={`focus-scene-btn${activeFocusScene === scene ? " focus-scene-btn--active" : ""} focus-scene-btn--visitor-drop`}
+                      className={`focus-scene-btn${activeFocusScene === scene ? " focus-scene-btn--active" : ""}${isFocusSceneDisabled(scene) ? " focus-scene-btn--locked" : ""} focus-scene-btn--visitor-drop`}
                       onClick={() => handleFocusSceneShortcut(scene)}
-                      disabled={isStreaming}
+                      disabled={isStreaming || isFocusSceneDisabled(scene)}
                       style={{ animationDelay: `${120 + idx * 90}ms` }}
                     >
                       <span className="focus-scene-btn-icon" aria-hidden="true">
@@ -2831,9 +2693,9 @@ function App() {
                   <button
                     key={scene}
                     type="button"
-                    className={`focus-scene-btn${activeFocusScene === scene ? " focus-scene-btn--active" : ""}`}
+                    className={`focus-scene-btn${activeFocusScene === scene ? " focus-scene-btn--active" : ""}${isFocusSceneDisabled(scene) ? " focus-scene-btn--locked" : ""}`}
                     onClick={() => handleFocusSceneShortcut(scene)}
-                    disabled={isStreaming}
+                    disabled={isStreaming || isFocusSceneDisabled(scene)}
                   >
                     {scene}
                   </button>
@@ -3503,6 +3365,12 @@ function App() {
                         !item.isFriendV5 &&
                         !item.trialCredentialsShown &&
                         !activeSession?.trialApplicationSubmitted;
+                      const showFriendV5TrialApplyButton =
+                        item.role === "assistant" &&
+                        item.trialApplyAvailable &&
+                        item.isFriendV5 &&
+                        !item.trialCredentialsShown &&
+                        !activeSession?.trialApplicationSubmitted;
                       if (item.hidden) return null;
                       return (
                       <div
@@ -3572,6 +3440,17 @@ function App() {
                             </div>
                           ) : null}
                           {showInactivityTrialApplyButton ? (
+                            <div className="msg-inline-action">
+                              <button
+                                type="button"
+                                className="trial-apply-button"
+                                onClick={() => void handleTrialApplyEntryClick()}
+                              >
+                                申请测试账号
+                              </button>
+                            </div>
+                          ) : null}
+                          {showFriendV5TrialApplyButton ? (
                             <div className="msg-inline-action">
                               <button
                                 type="button"

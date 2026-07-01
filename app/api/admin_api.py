@@ -315,6 +315,8 @@ async def admin_knowledge_doc(
 @router.get("/customers", response_model=AdminCustomerListResponse)
 async def list_customers(
     q: str = "",
+    follow_up_status: str = "",
+    consult_time_order: str = "desc",
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     _admin_username: str = Depends(require_admin_auth),
@@ -322,7 +324,13 @@ async def list_customers(
 ) -> AdminCustomerListResponse:
     size = max(1, min(int(page_size), 50))
     page_num = max(1, int(page))
-    items, total = await repo.list_customers(query=q, page=page_num, page_size=size)
+    items, total = await repo.list_customers(
+        query=q,
+        follow_up_status=follow_up_status,
+        consult_time_order=consult_time_order,
+        page=page_num,
+        page_size=size,
+    )
     total_pages = (total + size - 1) // size if total > 0 else 0
     return AdminCustomerListResponse(
         items=[_customer_response(row) for row in items],
@@ -527,6 +535,8 @@ def _customer_response(row: AdminCustomerRow) -> AdminCustomerResponse:
         display_name=row.display_name,
         org_name=row.org_name,
         role_category=row.role_category,
+        consult_scene=row.consult_scene,
+        consult_time=sqlite_utc_to_cst(row.consult_time),
         contact=row.contact,
         email=row.email,
         follow_up_status=row.follow_up_status,

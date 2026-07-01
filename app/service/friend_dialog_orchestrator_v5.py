@@ -72,6 +72,7 @@ _CASE_KB_FALLBACK_ANSWER = (
     "目前在上海、江苏、成都多所K12学校均有落地实施的具体案例，"
     "需了解更为具体的案例介绍，方便的话可以留下您的联系方式。"
 )
+_CONTACT_OFFER_LINE = "如果您有需求，可以留下您的联系方式！"
 
 
 @dataclass(frozen=True)
@@ -224,6 +225,7 @@ class FriendDialogOrchestratorV5:
                 search_keywords=_derive_search_keywords(question),
                 media=deep_read.media,
                 profile_fields=_profile_fields(profile),
+                trial_apply_available=True,
                 fallback_used=False,
                 debug={
                     "pipeline": "friend_v5",
@@ -312,6 +314,7 @@ class FriendDialogOrchestratorV5:
                 search_keywords=_derive_search_keywords(question),
                 media=deep_read.media,
                 profile_fields=_profile_fields(profile),
+                trial_apply_available=True,
                 fallback_used=False,
                 debug={
                     "pipeline": "friend_v5",
@@ -525,6 +528,12 @@ class FriendDialogOrchestratorV5:
                 search_keywords=_derive_search_keywords(question),
                 media=deep_read.media,
                 profile_fields=_profile_fields(profile),
+                trial_apply_available=_should_offer_trial_apply(
+                    question=question,
+                    history=history,
+                    profile=profile,
+                    route_kind="case",
+                ),
                 fallback_used=True,
                 debug={
                     "pipeline": "friend_v5",
@@ -682,6 +691,14 @@ class FriendDialogOrchestratorV5:
             history=history,
             trigger_type=trigger_type,
         )
+        trial_apply_available = _should_offer_trial_apply(
+            question=question,
+            history=history,
+            profile=profile,
+            route_kind=tag_route.kind,
+        )
+        if trial_apply_available:
+            answer = _append_contact_offer(answer)
         rhythm_tags = _apply_recommendation_tag_rhythm(
             content_tags=catalog_tags.tags,
             question=question,
@@ -704,6 +721,7 @@ class FriendDialogOrchestratorV5:
             search_keywords=merged_keywords,
             media=display_media,
             profile_fields=_profile_fields(profile),
+            trial_apply_available=trial_apply_available,
             fallback_used=False,
             debug={
                 "pipeline": "friend_v5",
@@ -896,6 +914,65 @@ def _profile_block(profile: Any) -> str:
     if interests and not lines:
         lines.append(f"兴趣参考：{interests}")
     return "\n".join(lines) if lines else "（暂无）"
+
+
+def _lead_already_collected(profile: Any) -> bool:
+    interests = getattr(profile, "interests", None)
+    if not isinstance(interests, dict):
+        return False
+    lead = interests.get("_lead")
+    if not isinstance(lead, dict):
+        return False
+    if str(lead.get("contact_value") or "").strip():
+        return True
+    if str(lead.get("email") or "").strip():
+        return True
+    return False
+
+
+def _history_has_contact_offer(history: Sequence[ChatMessageRow]) -> bool:
+    markers = (_CONTACT_OFFER_LINE, "申请测试账号")
+    for row in history[-8:]:
+        if getattr(row, "role", "") != "assistant":
+            continue
+        content = str(getattr(row, "content", "") or "")
+        if any(marker in content for marker in markers):
+            return True
+    return False
+
+
+def _is_strong_lead_intent(question: str, route_kind: str) -> bool:
+    if route_kind in {"price", "trial"}:
+        return True
+    text = (question or "").strip()
+    if not text:
+        return False
+    return bool(re.search(r"(价格|报价|费用|试用|测试账号|合作|落地|采购|对接)", text))
+
+
+def _should_offer_trial_apply(
+    *,
+    question: str,
+    history: Sequence[ChatMessageRow],
+    profile: Any,
+    route_kind: str,
+) -> bool:
+    if _lead_already_collected(profile):
+        return False
+    if _history_has_contact_offer(history):
+        return False
+    if _is_strong_lead_intent(question, route_kind):
+        return True
+    return _v5_turn_index(history) >= 5
+
+
+def _append_contact_offer(answer: str) -> str:
+    base = (answer or "").strip()
+    if not base:
+        return _CONTACT_OFFER_LINE
+    if _CONTACT_OFFER_LINE in base:
+        return base
+    return f"{base}\n\n{_CONTACT_OFFER_LINE}"
 
 
 async def _sync_profile_identity_into_lead(
@@ -1306,8 +1383,7 @@ def _media_display_mode_for_turn(media: ChatMediaBundle) -> str:
 def _media_intro_for_turn(*, scene: str, media: ChatMediaBundle) -> str:
     if not media.videos:
         return ""
-    title = toc_title_for_scene(scene)
-    return f"可以先看这段{title}的演示视频，直观感受一下实际效果。"
+    return "您可以先通过下面这个视频，了解咱们这个产品及其应用场景。"
 
 
 async def _load_admin_scene_media(
@@ -2201,13 +2277,8 @@ def _price_handoff_answer(*, scene: str, profile: Any) -> str:
         f"{prefix}{title}的价格会根据学校规模、使用场景、账号数量和服务支持范围来确定，"
         "通常需要先做一次简单沟通，才能给到更准确的方案区间。\n\n"
     )
-    if name:
-        ask = "我可以先帮您登记，后续安排顾问对接详细报价。方便留个微信或电话吗？"
-    elif org:
-        ask = "我可以先帮您登记，后续安排顾问对接详细报价。方便告诉我怎么称呼您，并留个微信或电话吗？"
-    else:
-        ask = "我可以先帮您登记，后续安排顾问对接详细报价。方便留下您的称呼和联系方式吗？"
-    return body + ask
+    _ = (name, org)
+    return body + _CONTACT_OFFER_LINE
 
 
 def _tag_route_debug(route: _TagRouteResult) -> dict[str, Any]:
