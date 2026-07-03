@@ -41,7 +41,7 @@ def test_friend_v5_prompt_emphasizes_role_specific_human_style_and_boundaries() 
 def test_friend_v5_prompt_handles_user_info_confirmation_naturally() -> None:
     prompt = build_friend_v5_system_prompt()
 
-    assert "如果用户有进一步需求，可以轻量提示“如果您有需求，可以留下您的联系方式！”" in prompt
+    assert "如果用户有进一步需求，可以轻量提示“如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。”" in prompt
     assert "不要继续依次追问称呼、单位、联系方式或邮箱" in prompt
     assert "不要说“我记岔了”“我记错了”“特别备注”这类容易出戏的话" in prompt
     assert "用户刚补充一个字段后，不要回得像登记表回执" in prompt
@@ -61,6 +61,27 @@ def test_friend_v5_prompt_includes_ideas_pbl_product_facts() -> None:
     assert "不会自动分类，通常按项目阶段分阶段上传和留存资料" in prompt
     assert "自动化留存和追踪各阶段学习数据与成果" not in prompt
     assert "如果用户问 IDEAS-PBL 的价值、适用对象、优势、痛点、角色收益" in prompt
+
+
+def test_friend_v5_prompt_prioritizes_tencent_for_general_ai_scene_intro() -> None:
+    prompt = build_friend_v5_system_prompt()
+
+    assert "【人工智能通识教育专属产品口径】" in prompt
+    assert "先介绍“腾讯青少年人工智能课程”" in prompt
+    assert "其他拓展课程可在后面轻带一句" in prompt
+    assert "不要一上来把乐高、苹果 STEAM、索尼三条路线并列展开" in prompt
+    assert "腾讯这条线" not in prompt
+    assert "作为主线" not in prompt
+    assert "默认先从“腾讯青少年人工智能课程”讲起" not in prompt
+    assert "优先讲这套课程更像完整方案" in prompt
+
+
+def test_friend_v5_prompt_requires_guide_answers_to_sound_like_human_walkthrough() -> None:
+    prompt = build_friend_v5_system_prompt()
+
+    assert "用户问使用指南时，先用一句口语化的话接住" in prompt
+    assert "不要一上来连续罗列四五个功能点" in prompt
+    assert "更像带着对方看一遍怎么上手" in prompt
 
 
 def test_friend_v5_prompt_can_inject_admin_scene_intro() -> None:

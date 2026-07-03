@@ -16,6 +16,7 @@ from app.service.friend_dialog_orchestrator_v5 import (
     FriendDialogOrchestratorV5,
     _CASE_KB_FALLBACK_ANSWER,
     _normalize_lead_confirmation_phrasing,
+    _soften_assumptive_phrasing,
     _public_yuque_share_url_for_focus,
 )
 from app.service.friend_v5_tags import (
@@ -63,6 +64,70 @@ def test_normalize_lead_confirmation_phrasing_removes_flattery_and_shortens_fiel
     assert "登记啦" not in answer
     assert "邮箱信息为您登记完成" in answer
     assert "联系方式为您登记完成" in answer
+
+
+def test_soften_assumptive_phrasing_removes_mainline_jargon() -> None:
+    answer = _soften_assumptive_phrasing(
+        "您好，我是小为。这块默认以腾讯青少年人工智能课程为主线，包含平台、资源和师资培训。"
+    )
+
+    assert "默认以" not in answer
+    assert "为主线" not in answer
+    assert "腾讯青少年人工智能课程是一套包含平台、资源和师资培训。" in answer
+
+
+def test_soften_assumptive_phrasing_removes_default_push_jargon() -> None:
+    answer = _soften_assumptive_phrasing(
+        "您好，我是小为。这块默认先推腾讯青少年人工智能课程，是一套含平台、资源和师资培训的完整方案。"
+    )
+
+    assert "默认先推" not in answer
+    assert "腾讯青少年人工智能课程是一套含平台、资源和师资培训的完整方案。" in answer
+
+
+def test_soften_assumptive_phrasing_removes_default_talk_jargon() -> None:
+    answer = _soften_assumptive_phrasing(
+        "您好，我是小为。这块默认先讲腾讯青少年人工智能课程，是一套含平台、资源和师资培训的完整方案。"
+    )
+
+    assert "默认先讲" not in answer
+    assert "腾讯青少年人工智能课程是一套含平台、资源和师资培训的完整方案。" in answer
+
+
+def test_soften_assumptive_phrasing_removes_default_is_jargon() -> None:
+    answer = _soften_assumptive_phrasing(
+        "您好，我是小为。这块默认是腾讯青少年人工智能课程，提供从平台、资源到师资培训的整体方案。"
+    )
+
+    assert "默认是" not in answer
+    assert "腾讯青少年人工智能课程提供从平台、资源到师资培训的整体方案。" in answer
+
+
+def test_soften_assumptive_phrasing_removes_main_push_jargon() -> None:
+    answer = _soften_assumptive_phrasing(
+        "您好，我是小为。这块主要推腾讯青少年人工智能课程，是一套包含平台、资源和师资培训的完整方案。"
+    )
+
+    assert "主要推" not in answer
+    assert "腾讯青少年人工智能课程是一套包含平台、资源和师资培训的完整方案。" in answer
+
+
+def test_soften_assumptive_phrasing_rewrites_received_to_hao_de() -> None:
+    answer = _soften_assumptive_phrasing("收到。对校长来说，这套方案更像“交钥匙工程”。")
+
+    assert answer.startswith("好的。")
+    assert not answer.startswith("收到。")
+
+
+def test_soften_assumptive_phrasing_hides_empty_doc_exposure() -> None:
+    answer = _soften_assumptive_phrasing(
+        "校长您好，刚调取的这份资料正文目前是空的，没法直接给您展示具体的操作指南。"
+    )
+
+    assert "正文目前是空的" not in answer
+    assert "没法直接给您展示" not in answer
+    assert "目前这块内容还没有细化到具体操作" in answer
+    assert "申请测试账号" in answer
 
 
 @dataclass
@@ -122,6 +187,17 @@ class _FakeGenerator:
             "[/SOURCES]\n"
             "[TAGS]想看课程例子？\n想了解适合年级？\n想看看落地方式？[END_TAGS]"
         )
+
+
+class _FakeGeneratorWithTrialApplyAsk:
+    async def stream(self, *, system_prompt: str, user_prompt: str, enable_search: bool = False):
+        self.system_prompt = system_prompt
+        self.user_prompt = user_prompt
+        self.enable_search = enable_search
+        yield FriendV5StreamEvent.token(
+            "老师想试用很支持。通常我们会先开通一个测试账号，您可以直接进后台看课程资源和平台功能，自己上手跑一遍流程最直观。"
+        )
+        yield FriendV5StreamEvent.token("您这边方便提供一下学校名称和联系方式吗？我帮您安排开通。")
 
 
 class _FakeGeneratorWithWebSources:
@@ -341,6 +417,32 @@ _FAKE_TOC_NODES = [
     {"uuid": "enroll-faq", "title": "招生问答示例", "level": 2, "parent_uuid": "enroll", "node_type": "doc"},
 ]
 
+
+@pytest.mark.asyncio
+async def test_v5_done_debug_includes_performance_timings() -> None:
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        profile_extractor=_FakeNoProfileUpdateExtractor(),
+        toc_nodes=_FAKE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="想了解人工智能课程",
+        session_id="sess_v5_perf",
+        scene="人工智能通识教育",
+        trigger_type="manual",
+        history=[],
+    )
+
+    done = next(item["data"] for item in events if item["event"] == "done")
+    performance = done["debug"]["performance"]
+    assert performance["total_ms"] >= 0
+    assert performance["stages_ms"]["profile"] >= 0
+    assert performance["stages_ms"]["generation"] >= 0
+
+
 _FAKE_CASE_TOC_NODES = [
     {"uuid": "platform", "title": "平台介绍", "level": 1, "parent_uuid": "", "node_type": "title"},
     {"uuid": "platform-ai", "title": "人工智能通识课程", "level": 2, "parent_uuid": "platform", "node_type": "doc"},
@@ -432,6 +534,63 @@ async def test_scene_trigger_uses_fixed_toc_mapping_and_reads_yuque_doc() -> Non
         "skipped": "fixed_scene_toc_mapping",
     }
     assert done["debug"]["catalog_focus_node"]["title"] == "乐高人工智能课程介绍"
+
+
+@pytest.mark.asyncio
+async def test_general_ai_scene_entry_prefers_tencent_course_as_default_focus() -> None:
+    class _TencentFirstDeepReader:
+        def __init__(self) -> None:
+            self.node_calls: list[dict[str, Any]] = []
+
+        async def read(self, *, question: str) -> FriendV5YuqueDeepReadResult:
+            return FriendV5YuqueDeepReadResult(debug={"mode": "search_fallback"})
+
+        async def read_toc_node(self, *, node: dict[str, Any], question: str) -> FriendV5YuqueDeepReadResult:
+            self.node_calls.append({"node": node, "question": question})
+            return FriendV5YuqueDeepReadResult(
+                used=True,
+                prompt_block="【语雀文档深读】\n标题：腾讯青少年人工智能课程\n正文摘录：整体解决方案、课程资源、师资培训、赛事运营。",
+                sources=[
+                    FriendV5SourceItem(
+                        source_type="yuque",
+                        title="腾讯青少年人工智能课程",
+                        url="https://www.yuque.com/example/tencent-ai-course",
+                        doc_id=str(node.get("doc_id") or ""),
+                    )
+                ],
+                debug={"mode": "mcp_get_doc", "doc_count": 1},
+            )
+
+    toc_nodes = [
+        {"uuid": "platform", "title": "平台介绍", "level": 1, "parent_uuid": "", "node_type": "title"},
+        {"uuid": "p-ai", "title": "人工智能通识课程", "level": 2, "parent_uuid": "platform", "node_type": "title"},
+        {"uuid": "p-ai-tencent", "title": "腾讯青少年人工智能课程", "level": 3, "parent_uuid": "p-ai", "node_type": "title"},
+        {"uuid": "p-ai-tencent-doc", "title": "腾讯青少年人工智能课程详情", "level": 4, "parent_uuid": "p-ai-tencent", "node_type": "doc", "doc_id": "9101"},
+        {"uuid": "p-ai-ext", "title": "拓展课程", "level": 3, "parent_uuid": "p-ai", "node_type": "title"},
+        {"uuid": "p-ai-lego", "title": "乐高人工智能课程", "level": 4, "parent_uuid": "p-ai-ext", "node_type": "doc", "doc_id": "9102"},
+    ]
+    deep_reader = _TencentFirstDeepReader()
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=deep_reader,
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=toc_nodes,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="人工智能通识教育",
+        session_id="sess_v5_general_ai_tencent_default",
+        scene="人工智能通识教育",
+        trigger_type="scene",
+        history=[],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert deep_reader.node_calls
+    assert deep_reader.node_calls[0]["node"]["title"] == "腾讯青少年人工智能课程详情"
+    assert done["debug"]["catalog_focus_node"]["title"] == "腾讯青少年人工智能课程详情"
 
 
 @pytest.mark.asyncio
@@ -607,7 +766,7 @@ async def test_price_tag_returns_handoff_without_yuque_read() -> None:
     )
 
     done = [item for item in events if item["event"] == "done"][0]["data"]
-    assert "如果您有需求，可以留下您的联系方式！" in done["answer"]
+    assert "如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。" in done["answer"]
     assert "方便留个微信或电话吗" not in done["answer"]
     assert "方便留下您的称呼吗" not in done["answer"]
     assert deep_reader.calls == []
@@ -644,7 +803,7 @@ async def test_round_based_lead_offer_waits_until_fifth_user_turn() -> None:
     )
 
     done = [item for item in events if item["event"] == "done"][0]["data"]
-    assert "如果您有需求，可以留下您的联系方式！" not in done["answer"]
+    assert "如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。" not in done["answer"]
     assert done["trial_apply_available"] is False
 
     events = await _collect_v5_events(
@@ -666,8 +825,62 @@ async def test_round_based_lead_offer_waits_until_fifth_user_turn() -> None:
     )
 
     done = [item for item in events if item["event"] == "done"][0]["data"]
-    assert "如果您有需求，可以留下您的联系方式！" in done["answer"]
+    assert "如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。" in done["answer"]
     assert done["trial_apply_available"] is True
+
+
+@pytest.mark.asyncio
+async def test_self_proposed_trial_request_uses_single_apply_button_copy() -> None:
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGeneratorWithTrialApplyAsk(),
+        profile_repo=_FakeProfileRepo(),
+        profile_extractor=_FakeNoProfileUpdateExtractor(),
+        toc_nodes=_FAKE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="想测试你们的产品，也想留个联系方式",
+        session_id="sess_v5_self_trial_apply",
+        scene="人工智能通识教育",
+        trigger_type="manual",
+        history=[
+            ChatMessageRow(role="user", content="人工智能通识教育", created_at=""),
+            ChatMessageRow(role="assistant", content="我先给您讲讲课程方向。", created_at=""),
+        ],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["trial_apply_available"] is True
+    assert done["answer"].count("如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。") == 1
+    assert "学校名称和联系方式" not in done["answer"]
+    assert "我帮您安排开通" not in done["answer"]
+
+
+@pytest.mark.asyncio
+async def test_try_product_phrase_also_shows_trial_apply_button() -> None:
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        profile_extractor=_FakeNoProfileUpdateExtractor(),
+        toc_nodes=_FAKE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="我想试一试产品",
+        session_id="sess_v5_try_product_phrase",
+        scene="人工智能通识教育",
+        trigger_type="manual",
+        history=[
+            ChatMessageRow(role="user", content="人工智能通识教育", created_at=""),
+            ChatMessageRow(role="assistant", content="我先给您讲讲课程方向。", created_at=""),
+        ],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["trial_apply_available"] is True
+    assert "如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。" in done["answer"]
 
 
 @pytest.mark.asyncio
@@ -700,37 +913,85 @@ async def test_followup_confirmation_uses_previous_followup_topic() -> None:
 
 
 @pytest.mark.asyncio
+async def test_confirming_trial_apply_invite_with_xuyao_shows_apply_button() -> None:
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        profile_extractor=_FakeNoProfileUpdateExtractor(),
+        toc_nodes=_FAKE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="需要",
+        session_id="sess_v5_trial_invite_confirm",
+        scene="智能招生",
+        trigger_type="manual",
+        history=[
+            ChatMessageRow(role="user", content="想看看智能招生的产品的使用指南？", created_at=""),
+            ChatMessageRow(
+                role="assistant",
+                content="这块目前还没有细化到具体操作步骤。建议您可以先申请一个测试账号，实际进后台看一眼界面和流程，这样会更直观。需要我帮您安排个测试账号吗？",
+                created_at="",
+            ),
+        ],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["trial_apply_available"] is True
+    assert "申请测试账号" in done["answer"]
+
+
+@pytest.mark.asyncio
+async def test_confirming_trial_apply_invite_does_not_ask_user_to_send_contact_in_chat() -> None:
+    class _TrialInviteConfirmGenerator:
+        async def stream(self, *, system_prompt: str, user_prompt: str, enable_search: bool = False):
+            yield FriendV5StreamEvent.token(
+                "那我先帮您申请个测试账号，后台界面一目了然，您登录就能顺着菜单看怎么配。"
+                "麻烦发下学校名称和联系方式，我让顾问把账号发您，后续有不清楚的随时问。"
+            )
+            yield FriendV5StreamEvent.token("[SOURCES]\n[/SOURCES]\n[TAGS][END_TAGS]")
+
+    orch = FriendDialogOrchestratorV5(
+        generator=_TrialInviteConfirmGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        profile_extractor=_FakeNoProfileUpdateExtractor(),
+        toc_nodes=_FAKE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="可以",
+        session_id="sess_v5_trial_invite_no_direct_contact_ask",
+        scene="智能招生",
+        trigger_type="manual",
+        history=[
+            ChatMessageRow(role="user", content="想看看智能招生的产品的使用指南？", created_at=""),
+            ChatMessageRow(
+                role="assistant",
+                content="这块目前还没有细化到具体操作步骤。您是想先看看后台怎么配置，还是直接申请个测试账号上手试试？",
+                created_at="",
+            ),
+        ],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["trial_apply_available"] is True
+    assert "麻烦发下学校名称和联系方式" not in done["answer"]
+    assert "联系方式，我让顾问把账号发您" not in done["answer"]
+    assert "如果您现在不方便继续看，也可以先申请测试账号。" in done["answer"]
+
+
+@pytest.mark.asyncio
 async def test_scene_rewrite_maps_frontend_scene_alias_to_real_toc_node() -> None:
     toc_nodes = [
         {"uuid": "platform", "title": "平台介绍", "level": 1, "parent_uuid": "", "node_type": "title"},
-        {
-            "uuid": "ai-course",
-            "title": "人工智能通识课程",
-            "level": 2,
-            "parent_uuid": "platform",
-            "node_type": "doc",
-        },
-        {
-            "uuid": "ai-lego",
-            "title": "乐高人工智能课程",
-            "level": 3,
-            "parent_uuid": "ai-course",
-            "node_type": "doc",
-        },
-        {
-            "uuid": "ai-apple",
-            "title": "苹果STEAM课程",
-            "level": 3,
-            "parent_uuid": "ai-course",
-            "node_type": "doc",
-        },
-        {
-            "uuid": "ai-sony",
-            "title": "索尼人工智能课程",
-            "level": 3,
-            "parent_uuid": "ai-course",
-            "node_type": "doc",
-        },
+        {"uuid": "ai-course", "title": "人工智能通识课程", "level": 2, "parent_uuid": "platform", "node_type": "title"},
+        {"uuid": "ai-tencent", "title": "腾讯青少年人工智能课程", "level": 3, "parent_uuid": "ai-course", "node_type": "doc"},
+        {"uuid": "ai-extend", "title": "拓展课程", "level": 3, "parent_uuid": "ai-course", "node_type": "doc"},
+        {"uuid": "ai-lego", "title": "乐高人工智能课程", "level": 4, "parent_uuid": "ai-extend", "node_type": "doc"},
+        {"uuid": "ai-apple", "title": "苹果STEAM课程", "level": 4, "parent_uuid": "ai-extend", "node_type": "doc"},
+        {"uuid": "ai-sony", "title": "索尼人工智能课程", "level": 4, "parent_uuid": "ai-extend", "node_type": "doc"},
     ]
     deep_reader = _FakeDeepReader()
     orch = FriendDialogOrchestratorV5(
@@ -753,18 +1014,18 @@ async def test_scene_rewrite_maps_frontend_scene_alias_to_real_toc_node() -> Non
         )
     ]
 
-    assert deep_reader.node_calls[0]["node"]["title"] == "人工智能通识课程"
+    assert deep_reader.node_calls[0]["node"]["title"] == "腾讯青少年人工智能课程"
     done = [item for item in events if item["event"] == "done"][0]["data"]
     assert done["debug"]["catalog_focus_node"] == {
-        "uuid": "ai-course",
-        "title": "人工智能通识课程",
-        "path": ["平台介绍", "人工智能通识课程"],
+        "uuid": "ai-tencent",
+        "title": "腾讯青少年人工智能课程",
+        "path": ["平台介绍", "人工智能通识课程", "腾讯青少年人工智能课程"],
     }
-    # T1：使用指南 + 聚焦文档下的子目录探索（动态 TOC 子节点，统一问句）
+    # T1：总入口默认先推腾讯主线，再保留拓展课程为后续展开方向
     assert done["tags"] == [
         "想看看人工智能通识课程的产品的使用指南？",
-        "想看看乐高人工智能课程？",
-        "想看看苹果STEAM课程？",
+        "想看看腾讯青少年人工智能课程？",
+        "想看看拓展课程？",
     ]
 
 
@@ -1806,6 +2067,30 @@ async def test_after_explore_product_tag_restores_normal_rhythm() -> None:
 
 
 @pytest.mark.asyncio
+async def test_case_kb_fallback_uses_apply_button_contact_copy() -> None:
+    orch = FriendDialogOrchestratorV5(
+        generator=_FakeGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=_FAKE_CASE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question=case_tag_for_scene("人工智能通识教育"),
+        session_id="sess_v5_case_kb_contact_copy",
+        scene="人工智能通识教育",
+        trigger_type="tag",
+        history=[ChatMessageRow(role="user", content="人工智能通识教育", created_at="")],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert done["debug"]["case_kb_fallback"] is True
+    assert "如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。" in done["answer"]
+    assert "方便的话可以留下您的联系方式" not in done["answer"]
+
+
+@pytest.mark.asyncio
 async def test_scene_trigger_without_case_history_keeps_platform_intro_route() -> None:
     deep_reader = _FakeDeepReader()
     orch = FriendDialogOrchestratorV5(
@@ -2087,6 +2372,40 @@ async def test_guide_link_only_answer_avoids_detail_missing_phrase_and_repeated_
     assert "负责招生的老师呢" not in done["answer"]
     assert done["answer"].count("您好，我是小为") <= 1
     assert "具体操作我把指南放下面，您可以先看" in done["answer"]
+
+
+@pytest.mark.asyncio
+async def test_guide_empty_doc_answer_hides_empty_doc_wording_and_offers_trial_apply() -> None:
+    class _GuideEmptyDocGenerator:
+        async def stream(self, *, system_prompt: str, user_prompt: str, enable_search: bool = False):
+            yield FriendV5StreamEvent.token(
+                "校长您好，刚调取的这份资料正文目前是空的，没法直接给您展示具体的操作指南。"
+                "不过通常这类工具上手都不复杂，您如果想详细了解，我可以先帮您申请测试账号。"
+            )
+            yield FriendV5StreamEvent.token("[SOURCES]\n[/SOURCES]\n[TAGS][END_TAGS]")
+
+    orch = FriendDialogOrchestratorV5(
+        generator=_GuideEmptyDocGenerator(),
+        profile_repo=_FakeProfileRepo(),
+        yuque_deep_reader=_FakeDeepReader(used=False),
+        profile_extractor=_FakeProfileExtractor(),
+        toc_nodes=_FAKE_TOC_NODES,
+    )
+
+    events = await _collect_v5_events(
+        orch,
+        question="想看看智能招生的产品的使用指南？",
+        session_id="sess_v5_guide_empty_doc_hide",
+        scene="智能招生",
+        trigger_type="tag",
+        history=[],
+    )
+
+    done = [item for item in events if item["event"] == "done"][0]["data"]
+    assert "正文目前是空的" not in done["answer"]
+    assert "没法直接给您展示" not in done["answer"]
+    assert "目前这块内容还没有细化到具体操作" in done["answer"]
+    assert "申请测试账号" in done["answer"]
 
 
 @pytest.mark.asyncio

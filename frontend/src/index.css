@@ -113,6 +113,9 @@ body {
 }
 
 .admin-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 15;
   height: 104px;
   display: flex;
   align-items: center;
@@ -148,6 +151,8 @@ body {
   font-size: 17px;
   font-weight: 700;
   color: #697487;
+  pointer-events: none;
+  user-select: none;
 }
 
 .admin-topbar-account {
@@ -291,7 +296,7 @@ body {
   border: none;
   padding: 0;
   z-index: 10;
-  pointer-events: none;
+  cursor: pointer;
 }
 
 .admin-main {
@@ -6334,13 +6339,14 @@ button:disabled {
   .app-shell--visitor.app-shell--visitor-scene-open .visitor-scene-column {
     display: flex;
     position: fixed;
-    left: 12px;
-    right: 12px;
+    left: 16px;
+    right: 16px;
     top: calc(56px + env(safe-area-inset-top, 0px));
     bottom: calc(12px + env(safe-area-inset-bottom, 0px));
     z-index: 50;
     margin: 0;
-    padding: 14px;
+    padding: 10px 10px 12px;
+    box-sizing: border-box;
     border-radius: 22px;
     border: 1px solid rgba(255, 255, 255, 0.88);
     background:
@@ -6352,6 +6358,11 @@ button:disabled {
     -webkit-overflow-scrolling: touch;
   }
 
+  .app-shell--visitor.app-shell--visitor-scene-open .visitor-scene-column .focus-scene-title-card {
+    min-height: 42px;
+    padding: 0 44px 0 12px;
+  }
+
   .app-shell--visitor.app-shell--visitor-scene-open .visitor-scene-column .focus-scene-sidebar {
     flex: 1 1 auto;
     min-height: 0;
@@ -6360,17 +6371,20 @@ button:disabled {
 
   .visitor-scene-overlay-close {
     display: inline-flex;
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 1;
     align-items: center;
     justify-content: center;
-    align-self: flex-end;
-    width: 36px;
-    height: 36px;
-    margin-bottom: 4px;
+    width: 28px;
+    height: 28px;
+    margin-bottom: 0;
     border: 1px solid #d7e3f6;
     border-radius: 999px;
     background: #fff;
     color: #64748b;
-    font-size: 24px;
+    font-size: 20px;
     line-height: 1;
     cursor: pointer;
     font-family: inherit;
@@ -6432,7 +6446,7 @@ button:disabled {
   }
 }
 
-@media (max-width: 480px) {
+@media (max-width: 640px) {
   .app-shell--visitor .consult-top-brand-title {
     font-size: 14px;
     max-width: min(48vw, 180px);
@@ -6445,8 +6459,8 @@ button:disabled {
   .app-shell--visitor .focus-scene-btn {
     flex-direction: row;
     justify-content: flex-start;
-    min-height: 64px;
-    padding: 12px 14px;
+    min-height: 54px;
+    padding: 10px 12px;
     text-align: left;
   }
 

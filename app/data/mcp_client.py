@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 from urllib.parse import urlparse
 
+from app.core.config import settings
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -20,6 +23,9 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 class MCPClientError(RuntimeError):
     pass
+
+
+_MCP_CACHE_MAX_ENTRIES = 512
 
 
 @dataclass(frozen=True)
@@ -55,6 +61,8 @@ class MCPTocNode:
 
 
 class YuqueMCPClient:
+    _response_cache: ClassVar[Dict[str, tuple[float, Any]]] = {}
+
     def __init__(
         self,
         *,
@@ -179,7 +187,31 @@ class YuqueMCPClient:
             raise MCPClientError(f"不允许调用工具: {tool_name}")
         return await self._call_tool(tool_name, arguments)
 
+    @classmethod
+    def clear_cache(cls) -> None:
+        cls._response_cache.clear()
+
     async def _call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
+        ttl_s = max(0.0, float(getattr(settings, "mcp_cache_ttl_s", 0.0) or 0.0))
+        cache_key = self._cache_key(tool_name, arguments) if ttl_s > 0 else ""
+        if cache_key:
+            hit, cached = self._get_cached_response(cache_key, ttl_s)
+            if hit:
+                logger.info("mcp_cache_hit tool=%s", tool_name)
+                return cached
+
+        timeout_s = max(0.1, float(getattr(settings, "mcp_timeout_s", 20.0) or 20.0))
+        try:
+            result = await asyncio.wait_for(self._call_tool_uncached(tool_name, arguments), timeout=timeout_s)
+        except asyncio.TimeoutError as exc:
+            logger.warning("mcp_call_timeout tool=%s timeout_s=%s", tool_name, timeout_s)
+            raise MCPClientError(f"MCP 调用超时: {tool_name}") from exc
+
+        if cache_key:
+            self._set_cached_response(cache_key, result)
+        return result
+
+    async def _call_tool_uncached(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
         if not self.enabled:
             return {}
         if not (ClientSession and StdioServerParameters and stdio_client):
@@ -204,6 +236,34 @@ class YuqueMCPClient:
                 except json.JSONDecodeError:
                     return text
         return content
+
+    def _cache_key(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+        payload = {
+            "command": self._command,
+            "args": self._args,
+            "repo_id": self._repo_id,
+            "tool": tool_name,
+            "arguments": arguments,
+        }
+        return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+
+    @classmethod
+    def _get_cached_response(cls, cache_key: str, ttl_s: float) -> tuple[bool, Any]:
+        payload = cls._response_cache.get(cache_key)
+        if payload is None:
+            return False, None
+        ts, value = payload
+        if (time.monotonic() - ts) > ttl_s:
+            cls._response_cache.pop(cache_key, None)
+            return False, None
+        return True, value
+
+    @classmethod
+    def _set_cached_response(cls, cache_key: str, value: Any) -> None:
+        if len(cls._response_cache) >= _MCP_CACHE_MAX_ENTRIES:
+            oldest_key = min(cls._response_cache, key=lambda key: cls._response_cache[key][0])
+            cls._response_cache.pop(oldest_key, None)
+        cls._response_cache[cache_key] = (time.monotonic(), value)
 
     @staticmethod
     def _parse_search_results(payload: Any) -> List[MCPSearchResult]:
@@ -328,4 +388,3 @@ class YuqueMCPClient:
         if len(parts) < 2:
             return ""
         return f"{parts[0]}/{parts[1]}"
-

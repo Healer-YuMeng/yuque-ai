@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, List, Optional, Sequence
 
@@ -70,9 +71,33 @@ _CASE_TAG_MIN_TURN = 3
 _TRIAL_TAG_MIN_TURN = 4
 _CASE_KB_FALLBACK_ANSWER = (
     "目前在上海、江苏、成都多所K12学校均有落地实施的具体案例，"
-    "需了解更为具体的案例介绍，方便的话可以留下您的联系方式。"
+    "如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。"
 )
-_CONTACT_OFFER_LINE = "如果您有需求，可以留下您的联系方式！"
+_CONTACT_OFFER_LINE = "如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。"
+
+
+class _V5PerformanceTimer:
+    def __init__(self) -> None:
+        now = time.monotonic()
+        self._started_at = now
+        self._last_mark_at = now
+        self._stages_ms: dict[str, int] = {}
+
+    def mark(self, stage: str) -> None:
+        key = (stage or "").strip()
+        if not key:
+            return
+        now = time.monotonic()
+        elapsed_ms = max(0, int(round((now - self._last_mark_at) * 1000)))
+        self._stages_ms[key] = self._stages_ms.get(key, 0) + elapsed_ms
+        self._last_mark_at = now
+
+    def snapshot(self) -> dict[str, Any]:
+        total_ms = max(0, int(round((time.monotonic() - self._started_at) * 1000)))
+        return {
+            "total_ms": total_ms,
+            "stages_ms": dict(self._stages_ms),
+        }
 
 
 @dataclass(frozen=True)
@@ -131,6 +156,7 @@ class FriendDialogOrchestratorV5:
         trigger_type: str,
         history: Sequence[ChatMessageRow],
     ) -> AsyncIterator[dict[str, Any]]:
+        perf_timer = _V5PerformanceTimer()
         yield _stage("profile", "小为正在记住这次对话里的关键信息...")
         profile = await self._profile_repo.get_profile(session_id=session_id)
         update = await self._profile_extractor.extract_update(
@@ -167,6 +193,7 @@ class FriendDialogOrchestratorV5:
             question=question,
             profile=profile,
         )
+        perf_timer.mark("profile")
 
         deep_read = FriendV5YuqueDeepReadResult()
         scene_query_rewrite: dict[str, Any] = {}
@@ -175,10 +202,7 @@ class FriendDialogOrchestratorV5:
         scene_guide_continuation = False
         if trigger_type == "scene":
             scene_query = toc_title_for_scene(scene)
-            catalog_focus = _resolve_platform_intro_focus(
-                product_title=scene_query,
-                toc_nodes=self._toc_nodes,
-            )
+            catalog_focus = _resolve_scene_default_focus(scene=scene, toc_nodes=self._toc_nodes)
             if catalog_focus is None:
                 catalog_focus = _best_toc_match(
                     question=scene_query,
@@ -227,15 +251,19 @@ class FriendDialogOrchestratorV5:
                 profile_fields=_profile_fields(profile),
                 trial_apply_available=True,
                 fallback_used=False,
-                debug={
-                    "pipeline": "friend_v5",
-                    "scene": scene,
-                    "trigger_type": trigger_type,
-                    "cross_scene_redirect": True,
-                    "redirect_product": product_title,
-                    "tag_route": _tag_route_debug(tag_route),
-                    "conversion_state": tags_result.conversion_state,
-                },
+                debug=_with_performance_debug(
+                    {
+                        "pipeline": "friend_v5",
+                        "scene": scene,
+                        "trigger_type": trigger_type,
+                        "cross_scene_redirect": True,
+                        "redirect_product": product_title,
+                        "tag_route": _tag_route_debug(tag_route),
+                        "conversion_state": tags_result.conversion_state,
+                    },
+                    perf_timer,
+                    final_stage="direct_response",
+                ),
             )
             yield {"event": "done", "data": payload.model_dump()}
             return
@@ -293,6 +321,7 @@ class FriendDialogOrchestratorV5:
         )
         case_branch_used = False
         skill_route: Optional[SkillRoute] = None
+        perf_timer.mark("routing")
 
         if tag_route.kind == "price":
             answer = _price_handoff_answer(scene=scene, profile=profile)
@@ -316,25 +345,29 @@ class FriendDialogOrchestratorV5:
                 profile_fields=_profile_fields(profile),
                 trial_apply_available=True,
                 fallback_used=False,
-                debug={
-                    "pipeline": "friend_v5",
-                    "scene": scene,
-                    "trigger_type": trigger_type,
-                    "tag_route": _tag_route_debug(tag_route),
-                    "next_followup_topic": None,
-                    "skill_route": None,
-                    "mcp_route": {"mode": "price_direct"},
-                    "doc_deep_read_used": False,
-                    "doc_deep_read": deep_read.debug,
-                    "case_branch_used": False,
-                    "conversion_state": tags_result.conversion_state,
-                    "search_keyword_count": 1,
-                    "web_source_count": 0,
-                    "yuque_source_count": 0,
-                    "catalog_tag_source": "fixed_v5_navigation",
-                    "catalog_tag_node_count": len(self._toc_nodes),
-                    "catalog_focus_node": _catalog_focus_debug(catalog_focus),
-                },
+                debug=_with_performance_debug(
+                    {
+                        "pipeline": "friend_v5",
+                        "scene": scene,
+                        "trigger_type": trigger_type,
+                        "tag_route": _tag_route_debug(tag_route),
+                        "next_followup_topic": None,
+                        "skill_route": None,
+                        "mcp_route": {"mode": "price_direct"},
+                        "doc_deep_read_used": False,
+                        "doc_deep_read": deep_read.debug,
+                        "case_branch_used": False,
+                        "conversion_state": tags_result.conversion_state,
+                        "search_keyword_count": 1,
+                        "web_source_count": 0,
+                        "yuque_source_count": 0,
+                        "catalog_tag_source": "fixed_v5_navigation",
+                        "catalog_tag_node_count": len(self._toc_nodes),
+                        "catalog_focus_node": _catalog_focus_debug(catalog_focus),
+                    },
+                    perf_timer,
+                    final_stage="direct_response",
+                ),
             )
             yield {"event": "done", "data": payload.model_dump()}
             return
@@ -496,6 +529,7 @@ class FriendDialogOrchestratorV5:
         if not deep_read.used and self._should_lookup_yuque(question=question, trigger_type=trigger_type):
             yield _stage("yuque_links", "小为正在找相关语雀补充阅读入口...")
             yuque_sources = await self._lookup_yuque_sources(question)
+        perf_timer.mark("yuque")
 
         skill_route = route_skill(question)
         if skill_route is None and deep_read.used:
@@ -535,32 +569,36 @@ class FriendDialogOrchestratorV5:
                     route_kind="case",
                 ),
                 fallback_used=True,
-                debug={
-                    "pipeline": "friend_v5",
-                    "scene": scene,
-                    "trigger_type": trigger_type,
-                    "scene_query_rewrite": scene_query_rewrite,
-                    "tag_route": _tag_route_debug(tag_route),
-                    "scene_case_continuation": scene_case_continuation,
-                    "scene_guide_continuation": scene_guide_continuation,
-                    "case_product_switch": case_product_switch,
-                    "guide_product_switch": guide_product_switch,
-                    "web_search_fallback_enabled": False,
-                    "skill_route": None,
-                    "mcp_route": mcp_route,
-                    "doc_deep_read_used": False,
-                    "doc_deep_read": deep_read.debug,
-                    "case_toc_miss": tag_route.kind == "case" and not deep_read.used,
-                    "case_branch_used": case_branch_used,
-                    "case_kb_fallback": True,
-                    "conversion_state": tags_result.conversion_state,
-                    "search_keyword_count": len(_derive_search_keywords(question)),
-                    "web_source_count": 0,
-                    "yuque_source_count": 0,
-                    "catalog_tag_source": "fixed_v5_navigation",
-                    "catalog_tag_node_count": len(self._toc_nodes),
-                    "catalog_focus_node": _catalog_focus_debug(catalog_focus),
-                },
+                debug=_with_performance_debug(
+                    {
+                        "pipeline": "friend_v5",
+                        "scene": scene,
+                        "trigger_type": trigger_type,
+                        "scene_query_rewrite": scene_query_rewrite,
+                        "tag_route": _tag_route_debug(tag_route),
+                        "scene_case_continuation": scene_case_continuation,
+                        "scene_guide_continuation": scene_guide_continuation,
+                        "case_product_switch": case_product_switch,
+                        "guide_product_switch": guide_product_switch,
+                        "web_search_fallback_enabled": False,
+                        "skill_route": None,
+                        "mcp_route": mcp_route,
+                        "doc_deep_read_used": False,
+                        "doc_deep_read": deep_read.debug,
+                        "case_toc_miss": tag_route.kind == "case" and not deep_read.used,
+                        "case_branch_used": case_branch_used,
+                        "case_kb_fallback": True,
+                        "conversion_state": tags_result.conversion_state,
+                        "search_keyword_count": len(_derive_search_keywords(question)),
+                        "web_source_count": 0,
+                        "yuque_source_count": 0,
+                        "catalog_tag_source": "fixed_v5_navigation",
+                        "catalog_tag_node_count": len(self._toc_nodes),
+                        "catalog_focus_node": _catalog_focus_debug(catalog_focus),
+                    },
+                    perf_timer,
+                    final_stage="direct_response",
+                ),
             )
             yield {"event": "done", "data": payload.model_dump()}
             return
@@ -623,6 +661,7 @@ class FriendDialogOrchestratorV5:
 
         # 语雀深读未命中时，是否开启模型联网搜索兜底（可由开关控制）
         enable_web_search = (not deep_read.used) and settings.chat_v5_web_search_enabled
+        perf_timer.mark("prompt_build")
         try:
             stream_iter = self._generator.stream(
                 system_prompt=system_prompt,
@@ -643,6 +682,7 @@ class FriendDialogOrchestratorV5:
                 if visible:
                     answer_parts.append(visible)
                     yield {"event": "token", "data": {"token": visible}}
+        perf_timer.mark("generation")
 
         parsed = parser.finish()
         answer = parsed.answer or "".join(answer_parts).strip()
@@ -723,38 +763,41 @@ class FriendDialogOrchestratorV5:
             profile_fields=_profile_fields(profile),
             trial_apply_available=trial_apply_available,
             fallback_used=False,
-            debug={
-                "pipeline": "friend_v5",
-                "scene": scene,
-                "trigger_type": trigger_type,
-                "scene_query_rewrite": scene_query_rewrite,
-                "tag_route": _tag_route_debug(tag_route),
-                "scene_case_continuation": scene_case_continuation,
-                "scene_guide_continuation": scene_guide_continuation,
-                "case_product_switch": case_product_switch,
-                "guide_product_switch": guide_product_switch,
-                "next_followup_topic": next_followup_topic,
-                "followup_sibling_topic": followup_sibling_topic,
-                "web_search_fallback_enabled": enable_web_search,
-                "skill_route": _skill_route_debug(skill_route),
-                "mcp_route": mcp_route,
-                "doc_deep_read_used": bool(deep_read.used),
-                "media_suppressed": media_suppressed,
-                "admin_scene_video_count": len(admin_scene_media.videos),
-                "admin_scene_video_scene": admin_media_scene,
-                "media_display_mode": media_display_mode,
-                "media_intro": media_intro,
-                "doc_deep_read": deep_read.debug,
-                "case_toc_miss": tag_route.kind == "case" and not deep_read.used,
-                "case_branch_used": case_branch_used,
-                "conversion_state": rhythm_tags.conversion_state,
-                "search_keyword_count": len(merged_keywords),
-                "web_source_count": len([item for item in merged_sources if item.source_type == "web"]),
-                "yuque_source_count": len([item for item in merged_sources if item.source_type == "yuque"]),
-                "catalog_tag_source": "fixed_v5_navigation",
-                "catalog_tag_node_count": len(self._toc_nodes),
-                "catalog_focus_node": _catalog_focus_debug(catalog_tags.focus_node),
-            },
+            debug=_with_performance_debug(
+                {
+                    "pipeline": "friend_v5",
+                    "scene": scene,
+                    "trigger_type": trigger_type,
+                    "scene_query_rewrite": scene_query_rewrite,
+                    "tag_route": _tag_route_debug(tag_route),
+                    "scene_case_continuation": scene_case_continuation,
+                    "scene_guide_continuation": scene_guide_continuation,
+                    "case_product_switch": case_product_switch,
+                    "guide_product_switch": guide_product_switch,
+                    "next_followup_topic": next_followup_topic,
+                    "followup_sibling_topic": followup_sibling_topic,
+                    "web_search_fallback_enabled": enable_web_search,
+                    "skill_route": _skill_route_debug(skill_route),
+                    "mcp_route": mcp_route,
+                    "doc_deep_read_used": bool(deep_read.used),
+                    "media_suppressed": media_suppressed,
+                    "admin_scene_video_count": len(admin_scene_media.videos),
+                    "admin_scene_video_scene": admin_media_scene,
+                    "media_display_mode": media_display_mode,
+                    "media_intro": media_intro,
+                    "doc_deep_read": deep_read.debug,
+                    "case_toc_miss": tag_route.kind == "case" and not deep_read.used,
+                    "case_branch_used": case_branch_used,
+                    "conversion_state": rhythm_tags.conversion_state,
+                    "search_keyword_count": len(merged_keywords),
+                    "web_source_count": len([item for item in merged_sources if item.source_type == "web"]),
+                    "yuque_source_count": len([item for item in merged_sources if item.source_type == "yuque"]),
+                    "catalog_tag_source": "fixed_v5_navigation",
+                    "catalog_tag_node_count": len(self._toc_nodes),
+                    "catalog_focus_node": _catalog_focus_debug(catalog_tags.focus_node),
+                },
+                perf_timer,
+            ),
         )
         yield {"event": "done", "data": payload.model_dump()}
 
@@ -879,6 +922,18 @@ def _stage(stage: str, detail: str) -> dict[str, Any]:
     return {"event": "stage", "data": {"stage": stage, "detail": detail}}
 
 
+def _with_performance_debug(
+    debug: dict[str, Any],
+    timer: _V5PerformanceTimer,
+    *,
+    final_stage: str = "finalize",
+) -> dict[str, Any]:
+    timer.mark(final_stage)
+    out = dict(debug)
+    out["performance"] = timer.snapshot()
+    return out
+
+
 def _profile_fields(profile: Any) -> dict[str, Any]:
     if profile is None:
         return {}
@@ -947,7 +1002,61 @@ def _is_strong_lead_intent(question: str, route_kind: str) -> bool:
     text = (question or "").strip()
     if not text:
         return False
-    return bool(re.search(r"(价格|报价|费用|试用|测试账号|合作|落地|采购|对接)", text))
+    return bool(
+        re.search(
+            r"(价格|报价|费用|试用|测试账号|合作|落地|采购|对接|联系方式|联系[一-龥]{0,4}方式|电话|微信|试一试(?:这个)?产品|想试一试(?:这个)?产品|体验(?:一下)?产品)",
+            text,
+        )
+    )
+
+
+def _is_trial_apply_followup_confirmation(question: str, history: Sequence[ChatMessageRow]) -> bool:
+    text = (question or "").strip()
+    if not text or not _FOLLOWUP_CONFIRM_RE.match(text):
+        return False
+    for row in reversed(history[-6:]):
+        if getattr(row, "role", "") != "assistant":
+            continue
+        content = str(getattr(row, "content", "") or "")
+        if "测试账号" in content and (
+            "需要我帮您安排" in content
+            or "申请一个测试账号" in content
+            or "申请个测试账号" in content
+            or "上手试试" in content
+        ):
+            return True
+    return False
+
+
+def _normalize_contact_offer_copy(text: str) -> str:
+    out = (text or "").strip()
+    if not out:
+        return out
+    out = out.replace("如果您有需求，可以点击下方申请按钮，留下您的联系方式！", _CONTACT_OFFER_LINE)
+    out = out.replace("您可以点击下方申请按钮，留下您的联系方式！", _CONTACT_OFFER_LINE)
+    out = re.sub(
+        r"您这边方便提供一下学校名称和联系方式吗[？?]我帮您安排开通[。.]?",
+        _CONTACT_OFFER_LINE,
+        out,
+    )
+    out = re.sub(
+        r"您这边方便提供一下(?:学校名称和)?联系方式吗[？?](?:我帮您安排开通[。.]?)?",
+        _CONTACT_OFFER_LINE,
+        out,
+    )
+    out = re.sub(
+        r"麻烦发下学校名称和联系方式[，,]我让顾问把账号发您[，,]后续有不清楚的随时问[。.]?",
+        _CONTACT_OFFER_LINE,
+        out,
+    )
+    out = re.sub(
+        r"麻烦发下(?:学校名称和)?联系方式[，,]我让顾问把账号发您[。.]?",
+        _CONTACT_OFFER_LINE,
+        out,
+    )
+    out = re.sub(rf"(?:{re.escape(_CONTACT_OFFER_LINE)}\s*){{2,}}", _CONTACT_OFFER_LINE, out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
 
 
 def _should_offer_trial_apply(
@@ -963,11 +1072,13 @@ def _should_offer_trial_apply(
         return False
     if _is_strong_lead_intent(question, route_kind):
         return True
+    if _is_trial_apply_followup_confirmation(question, history):
+        return True
     return _v5_turn_index(history) >= 5
 
 
 def _append_contact_offer(answer: str) -> str:
-    base = (answer or "").strip()
+    base = _normalize_contact_offer_copy(answer)
     if not base:
         return _CONTACT_OFFER_LINE
     if _CONTACT_OFFER_LINE in base:
@@ -1610,6 +1721,29 @@ def _resolve_platform_intro_focus(
     return _focus_under_path([_PLATFORM_SECTION_TITLE, title], toc_nodes)
 
 
+def _resolve_scene_default_focus(
+    *,
+    scene: str,
+    toc_nodes: Sequence[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """场景入口默认聚焦节点。
+
+    人工智能通识教育默认先落到「腾讯青少年人工智能课程」正文；
+    其他场景保持原有的场景总目录聚焦。
+    """
+    scene_title = toc_title_for_scene(scene)
+    focus = _resolve_platform_intro_focus(product_title=scene_title, toc_nodes=toc_nodes)
+    if not focus:
+        return None
+    if _norm_for_match(scene) != _norm_for_match("人工智能通识教育"):
+        return focus
+    preferred = _focus_under_path(
+        [_PLATFORM_SECTION_TITLE, scene_title, "腾讯青少年人工智能课程"],
+        toc_nodes,
+    )
+    return preferred or focus
+
+
 async def _persist_contact_from_question(
     *,
     profile_repo: Any,
@@ -2159,13 +2293,36 @@ def _soften_assumptive_phrasing(text: str) -> str:
     if not out:
         return out
     out = re.sub(r"^(您好，我是小为。)\s*\1+", r"\1", out)
+    out = re.sub(r"^收到。", "好的。", out)
+    out = re.sub(r"^收到，", "好的，", out)
+    out = out.replace("腾讯这条线", "腾讯青少年人工智能课程这套内容")
+    out = out.replace("这块默认以腾讯青少年人工智能课程为主线，包含", "腾讯青少年人工智能课程是一套包含")
+    out = out.replace("默认以腾讯青少年人工智能课程为主线，包含", "腾讯青少年人工智能课程是一套包含")
+    out = out.replace("这块默认把腾讯青少年人工智能课程作为主线先介绍，包含", "腾讯青少年人工智能课程是一套包含")
+    out = out.replace("默认把腾讯青少年人工智能课程作为主线先介绍，包含", "腾讯青少年人工智能课程是一套包含")
+    out = out.replace("这块默认先推腾讯青少年人工智能课程，是一套", "腾讯青少年人工智能课程是一套")
+    out = out.replace("默认先推腾讯青少年人工智能课程，是一套", "腾讯青少年人工智能课程是一套")
+    out = out.replace("这块默认先讲腾讯青少年人工智能课程，是一套", "腾讯青少年人工智能课程是一套")
+    out = out.replace("默认先讲腾讯青少年人工智能课程，是一套", "腾讯青少年人工智能课程是一套")
+    out = out.replace("这块默认是腾讯青少年人工智能课程，提供", "腾讯青少年人工智能课程提供")
+    out = out.replace("默认是腾讯青少年人工智能课程，提供", "腾讯青少年人工智能课程提供")
+    out = out.replace("这块主要推腾讯青少年人工智能课程，是一套", "腾讯青少年人工智能课程是一套")
+    out = out.replace("主要推腾讯青少年人工智能课程，是一套", "腾讯青少年人工智能课程是一套")
     out = out.replace("咱们学校", "您学校")
     out = out.replace("咱们这边学校", "您学校")
     out = out.replace("咱们这边", "您这边")
+    out = out.replace("平台操作挺直观的。", "这块上手其实不复杂。")
+    out = out.replace("进工作台能看到", "您一进工作台先能看到")
     out = out.replace("您学校大概有多少老师专门负责这块接待工作", "您这边目前大概有多少位老师在负责这块接待")
     out = out.replace("目前资料里没包含具体的操作指南细节", "具体操作我把指南放下面，您可以先看")
     out = out.replace("目前提供的资料里暂时没有具体的操作使用指南细节", "具体操作我把指南放下面，您可以先看")
     out = out.replace("目前提供的资料中暂无具体的操作使用指南细节", "具体操作我把指南放下面，您可以先看")
+    out = out.replace("刚调取的这份资料正文目前是空的，没法直接给您展示具体的操作指南。", "目前这块内容还没有细化到具体操作，您如果想详细了解，我可以先帮您申请测试账号。")
+    out = out.replace("这份资料正文目前是空的，没法直接给您展示具体的操作指南。", "目前这块内容还没有细化到具体操作，您如果想详细了解，我可以先帮您申请测试账号。")
+    out = out.replace("正文目前是空的", "目前这块内容还没有细化到具体操作")
+    out = out.replace("没法直接给您展示具体的操作指南", "您如果想详细了解，我可以先帮您申请测试账号")
+    out = out.replace("还没细化到具体的操作手册", "目前这块内容还没有细化到具体操作")
+    out = out.replace("目前资料里主要展示的是功能逻辑和场景价值", "目前这块先能帮您看到整体思路和应用方向")
     out = out.replace(
         "您平时晚上大概要处理多少条这类消息？",
         "您这边更想先看它能替老师省下哪些重复回复，还是先看怎么试用？",

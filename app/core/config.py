@@ -108,6 +108,7 @@ class Settings:
     mcp_search_tool: str = _env("YUQUE_MCP_SEARCH_TOOL", "yuque_search")
     mcp_get_doc_tool: str = _env("YUQUE_MCP_GET_DOC_TOOL", "yuque_get_doc")
     mcp_timeout_s: float = _env_float("YUQUE_MCP_TIMEOUT_S", 20.0)
+    mcp_cache_ttl_s: float = _env_float("YUQUE_MCP_CACHE_TTL_S", 600.0)
     force_mcp_fallback: bool = _env_bool("FORCE_MCP_FALLBACK", False)
     auto_mcp_tool_router: bool = _env_bool("AUTO_MCP_TOOL_ROUTER", False)
     intent_llm_enabled: bool = _env_bool("INTENT_LLM_ENABLED", False)

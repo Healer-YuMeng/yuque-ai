@@ -12,6 +12,14 @@ from app.db.session import DatabaseSessionFactory
 from app.schemas.chat import ChatResponse
 
 
+def _matching_schema_statements(dialect: str, markers: tuple[str, ...]) -> list[str]:
+    matched: list[str] = []
+    for stmt in schema_statements(dialect=dialect):
+        if any(marker in stmt for marker in markers):
+            matched.append(stmt)
+    return matched
+
+
 class DocumentRepository:
     def __init__(self, session_factory: DatabaseSessionFactory) -> None:
         self._session_factory = session_factory
@@ -113,7 +121,13 @@ class AdminVideoAssetRepository:
     async def init_db(self) -> None:
         conn = await self._session_factory.connect()
         try:
-            for stmt in schema_statements(dialect=self._session_factory.dialect)[9:11]:
+            for stmt in _matching_schema_statements(
+                self._session_factory.dialect,
+                (
+                    "CREATE TABLE IF NOT EXISTS admin_video_assets",
+                    "CREATE INDEX IF NOT EXISTS idx_admin_video_assets",
+                ),
+            ):
                 await conn.execute(stmt)
             await conn.commit()
         finally:
@@ -234,7 +248,11 @@ class AdminSceneIntroRepository:
     async def init_db(self) -> None:
         conn = await self._session_factory.connect()
         try:
-            await conn.execute(schema_statements(dialect=self._session_factory.dialect)[11])
+            for stmt in _matching_schema_statements(
+                self._session_factory.dialect,
+                ("CREATE TABLE IF NOT EXISTS admin_scene_intros",),
+            ):
+                await conn.execute(stmt)
             await self._ensure_columns(conn)
             await conn.commit()
         finally:

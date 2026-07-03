@@ -307,6 +307,14 @@ function AdminApp() {
   }, [activeSection]);
 
   useEffect(() => {
+    const previousTitle = document.title;
+    document.title = "AI顾问管理后台";
+    return () => {
+      document.title = previousTitle;
+    };
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     fetch("/admin-api/auth/status")
       .then(async (resp) => {
@@ -896,7 +904,14 @@ function AdminApp() {
           </nav>
         </aside>
 
-        {menuOpen ? <div className="admin-sidebar-mask" aria-hidden="true" /> : null}
+        {menuOpen ? (
+          <button
+            type="button"
+            className="admin-sidebar-mask"
+            onClick={() => setMenuOpen(false)}
+            aria-label="关闭侧边菜单"
+          />
+        ) : null}
 
         <main className="admin-main">
           <section className="admin-page-head">

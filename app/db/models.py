@@ -78,6 +78,10 @@ def _sqlite_schema_statements() -> List[str]:
         ON chat_messages(session_id, created_at);
         """,
         """
+        CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id_desc
+        ON chat_messages(session_id, id DESC);
+        """,
+        """
         CREATE TABLE IF NOT EXISTS chat_session_profiles (
             session_id TEXT PRIMARY KEY,
             display_name TEXT,
@@ -202,6 +206,10 @@ def _postgres_schema_statements() -> List[str]:
         """
         CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created
         ON chat_messages(session_id, created_at);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id_desc
+        ON chat_messages(session_id, id DESC);
         """,
         """
         CREATE TABLE IF NOT EXISTS chat_session_profiles (

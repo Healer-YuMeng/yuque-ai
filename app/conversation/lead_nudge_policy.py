@@ -39,11 +39,11 @@ class LeadNudgePolicy:
 
         user_rounds = sum(1 for row in history if row.role == "user") + 1
         if user_rounds >= self._rounds_threshold:
-            return LeadNudgeDecision(
-                triggered=True,
-                reason="rounds",
-                text="如果您愿意，我可以安排顾问按您的场景给一版建议方案。留下电话或微信即可快速对接。",
-            )
+                return LeadNudgeDecision(
+                    triggered=True,
+                    reason="rounds",
+                    text="如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。",
+                )
 
         last_assistant_time = self._latest_assistant_time(history)
         ref = now or datetime.now()
@@ -53,7 +53,7 @@ class LeadNudgePolicy:
                 return LeadNudgeDecision(
                     triggered=True,
                     reason="stay",
-                    text="您若希望继续深入了解，也可以留下联系方式，我这边让顾问结合您的需求跟进。",
+                    text="如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。",
                 )
         return LeadNudgeDecision(triggered=False)
 

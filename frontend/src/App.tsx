@@ -50,6 +50,7 @@ const CHAT_V2_ENV_ENABLED = String(import.meta.env.VITE_CHAT_V2_ENABLED ?? "fals
 const CHAT_V3_ENV_ENABLED = String(import.meta.env.VITE_CHAT_V3_ENABLED ?? "false").toLowerCase() === "true";
 const CHAT_V4_ENV_ENABLED = String(import.meta.env.VITE_CHAT_V4_ENABLED ?? "false").toLowerCase() === "true";
 const CHAT_V5_ENV_ENABLED = String(import.meta.env.VITE_CHAT_V5_ENABLED ?? "false").toLowerCase() === "true";
+const VISITOR_MOBILE_MAX_WIDTH = 768;
 /** 是否为访客专用入口：/visitor 开头的路径（布局等静态判断） */
 const IS_VISITOR_ROUTE =
   typeof window !== "undefined" && window.location && window.location.pathname.startsWith("/visitor");
@@ -657,6 +658,26 @@ function stripTrialAccountDisclosure(text: string): string {
   return out.trim();
 }
 
+function softenFriendV5StreamingText(text: string): string {
+  let out = text || "";
+  out = out.replace(/^收到。/, "好的。");
+  out = out.replace(/^收到，/, "好的，");
+  out = out.replace("腾讯这条线", "腾讯青少年人工智能课程这套内容");
+  out = out.replace("这块默认以腾讯青少年人工智能课程为主线，包含", "腾讯青少年人工智能课程是一套包含");
+  out = out.replace("默认以腾讯青少年人工智能课程为主线，包含", "腾讯青少年人工智能课程是一套包含");
+  out = out.replace("这块默认把腾讯青少年人工智能课程作为主线先介绍，包含", "腾讯青少年人工智能课程是一套包含");
+  out = out.replace("默认把腾讯青少年人工智能课程作为主线先介绍，包含", "腾讯青少年人工智能课程是一套包含");
+  out = out.replace("这块默认先推腾讯青少年人工智能课程，是一套", "腾讯青少年人工智能课程是一套");
+  out = out.replace("默认先推腾讯青少年人工智能课程，是一套", "腾讯青少年人工智能课程是一套");
+  out = out.replace("这块默认先讲腾讯青少年人工智能课程，是一套", "腾讯青少年人工智能课程是一套");
+  out = out.replace("默认先讲腾讯青少年人工智能课程，是一套", "腾讯青少年人工智能课程是一套");
+  out = out.replace("这块默认是腾讯青少年人工智能课程，提供", "腾讯青少年人工智能课程提供");
+  out = out.replace("默认是腾讯青少年人工智能课程，提供", "腾讯青少年人工智能课程提供");
+  out = out.replace("这块主要推腾讯青少年人工智能课程，是一套", "腾讯青少年人工智能课程是一套");
+  out = out.replace("主要推腾讯青少年人工智能课程，是一套", "腾讯青少年人工智能课程是一套");
+  return out;
+}
+
 function renderInlineMediaCard(item: ChatMediaItem, kind: "image" | "video", key: string) {
   const label = (item.title || item.doc_title || (kind === "image" ? "相关图片" : "相关视频")).trim();
   if (kind === "video") {
@@ -766,7 +787,7 @@ function itemTextWithGuideOffer(answer: string, guideTopicHit: boolean, offerLin
 
 function looksLikeTrialApplyIntent(text: string): boolean {
   const q = (text || "").trim();
-  return /(申请|开通|领取|获取).*(测试账号|试用账号)|(测试账号|试用账号).*(申请|开通|领取|获取)/.test(q);
+  return /(申请|开通|领取|获取).*(测试账号|试用账号)|(测试账号|试用账号).*(申请|开通|领取|获取)|试一试(这个)?产品|体验(一下)?产品/.test(q);
 }
 
 function looksLikeAlreadyApplied(text: string): boolean {
@@ -1086,6 +1107,9 @@ function App() {
   const [trialApplyEmail, setTrialApplyEmail] = useState("");
   const [trialApplySuccess, setTrialApplySuccess] = useState(false);
   const [visitorMobileSceneOpen, setVisitorMobileSceneOpen] = useState(false);
+  const [isMobileViewport, setIsMobileViewport] = useState(() =>
+    typeof window !== "undefined" ? window.innerWidth <= VISITOR_MOBILE_MAX_WIDTH : false,
+  );
   const [welcomeHeroTitle, setWelcomeHeroTitle] = useState("");
   const controllerRef = useRef<AbortController | null>(null);
   /** 用户点击「停止」触发的 abort，与超时/空闲 abort 区分 */
@@ -1202,6 +1226,14 @@ function App() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const updateViewport = () => setIsMobileViewport(window.innerWidth <= VISITOR_MOBILE_MAX_WIDTH);
+    updateViewport();
+    window.addEventListener("resize", updateViewport);
+    return () => window.removeEventListener("resize", updateViewport);
   }, []);
 
   useEffect(() => {
@@ -2097,7 +2129,10 @@ function App() {
                   item.id === assistantId
                     ? {
                         ...item,
-                        text: item.text + token,
+                        text: (() => {
+                          const nextText = item.isFriendV5 ? softenFriendV5StreamingText(item.text + token) : item.text + token;
+                          return nextText;
+                        })(),
                         pendingComfortMessage: undefined,
                         ...(token.trim() ? { streamStage: undefined } : {}),
                       }
@@ -2164,8 +2199,9 @@ function App() {
         : itemTextWithGuideOffer(
             serverAnswer,
             guideTopicHit,
-            "需要我给您提供这个模块的测试账号吗？",
+            "如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。",
           );
+      const hasUnifiedTrialApplyOffer = finalText.includes("如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。");
       setSessions((prev) =>
         prev.map((session) =>
           session.id === sessionId
@@ -2189,7 +2225,7 @@ function App() {
                         trialApplyAvailable:
                           !session.trialApplicationSubmitted &&
                           (isFriendV5Request
-                            ? friendTrialApplyAvailable
+                            ? (friendTrialApplyAvailable || trialApplyIntentHit || hasUnifiedTrialApplyOffer)
                             : (trialApplyIntentHit ||
                               looksLikeTrialApplyIntent(serverAnswer))),
                         text: isFriendV5Request
@@ -3352,23 +3388,9 @@ function App() {
                         item.isFriendV5 &&
                         item.mediaDisplayMode === "before_answer" &&
                         hasInlineMedia;
-                      const showInactivityTrialApplyButton =
+                      const showInlineTrialApplyButton =
                         item.role === "assistant" &&
-                        isInactivityReminderMessage(item) &&
-                        !item.isFriendV5 &&
-                        !item.trialCredentialsShown &&
-                        !activeSession?.trialApplicationSubmitted;
-                      const showRegularTrialApplyButton =
-                        item.role === "assistant" &&
-                        item.trialApplyAvailable &&
-                        !isInactivityReminderMessage(item) &&
-                        !item.isFriendV5 &&
-                        !item.trialCredentialsShown &&
-                        !activeSession?.trialApplicationSubmitted;
-                      const showFriendV5TrialApplyButton =
-                        item.role === "assistant" &&
-                        item.trialApplyAvailable &&
-                        item.isFriendV5 &&
+                        (isInactivityReminderMessage(item) || (item.trialApplyAvailable && item.isFriendV5)) &&
                         !item.trialCredentialsShown &&
                         !activeSession?.trialApplicationSubmitted;
                       if (item.hidden) return null;
@@ -3439,18 +3461,7 @@ function App() {
                               ) : null}
                             </div>
                           ) : null}
-                          {showInactivityTrialApplyButton ? (
-                            <div className="msg-inline-action">
-                              <button
-                                type="button"
-                                className="trial-apply-button"
-                                onClick={() => void handleTrialApplyEntryClick()}
-                              >
-                                申请测试账号
-                              </button>
-                            </div>
-                          ) : null}
-                          {showFriendV5TrialApplyButton ? (
+                          {showInlineTrialApplyButton ? (
                             <div className="msg-inline-action">
                               <button
                                 type="button"
@@ -3487,7 +3498,12 @@ function App() {
                             </div>
                           ) : null}
                           <div className="msg-footer">
-                            {showRegularTrialApplyButton ? (
+                            {item.role === "assistant" &&
+                            item.trialApplyAvailable &&
+                            !isInactivityReminderMessage(item) &&
+                            !item.isFriendV5 &&
+                            !item.trialCredentialsShown &&
+                            !activeSession?.trialApplicationSubmitted ? (
                               <button
                                 type="button"
                                 className="trial-apply-button"
@@ -3561,7 +3577,9 @@ function App() {
                         rows={1}
                         placeholder={
                           IS_VISITOR_ROUTE
-                            ? "请输入您的问题，我们会尽快与您对接..."
+                            ? IS_VISITOR_ROUTE && isMobileViewport
+                              ? ""
+                              : "请输入您的问题，我们会尽快与您对接..."
                             : hasPickedFocusScene
                               ? "输入您想了解的内容或者可以问问左侧使用指南。"
                               : "请现在左侧选择你最想关注的场景。"

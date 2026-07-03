@@ -11,3 +11,4 @@ def test_qwen_visitor_sales_system_enforces_consultative_persona() -> None:
     assert "不要说「A也可以、B也可以、看需求决定」" in system
     assert "主动采集的客户字段只有三项：称呼、工作单位、联系方式" in system
     assert "禁止直接问“手机号是多少/留个微信吧/请填写联系方式”" in system
+    assert "腾讯这条线" not in system
