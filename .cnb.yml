@@ -27,10 +27,13 @@
               cp -R app web scripts /tmp/yuque-rag-demo-backend/
 
               DOCKER_BUILDKIT=1 docker build --progress=plain \
+                --build-arg CNB_COMMIT_SHORT="${CNB_COMMIT_SHORT}" \
                 -t "${SERVER_DOCKER_REGISTRY}/${SERVER_DOCKER_NAMESPACE}/${BACKEND_IMAGE_NAME:-yuque-rag-demo-backend}:${CNB_COMMIT_SHORT}" \
                 -t "${SERVER_DOCKER_REGISTRY}/${SERVER_DOCKER_NAMESPACE}/${BACKEND_IMAGE_NAME:-yuque-rag-demo-backend}:latest" \
                 -f - /tmp/yuque-rag-demo-backend <<'DOCKERFILE'
               FROM python:3.11-slim
+              ARG CNB_COMMIT_SHORT=unknown
+              LABEL org.opencontainers.image.revision=$CNB_COMMIT_SHORT
 
               ENV PYTHONDONTWRITEBYTECODE=1 \
                   PYTHONUNBUFFERED=1
@@ -38,7 +41,7 @@
               WORKDIR /app
 
               RUN apt-get update \
-                  && apt-get install -y --no-install-recommends build-essential curl nodejs npm \
+                  && apt-get install -y --no-install-recommends build-essential curl ffmpeg nodejs npm \
                   && rm -rf /var/lib/apt/lists/*
 
               COPY requirements.txt ./
@@ -72,13 +75,8 @@
     - name: docker-login-build-push
       jobs:
         - name: build and push frontend image
-          image: node:20-alpine # 替换原来的docker:24
+          image: docker:24
           script:
-            - cd frontend
-            - npm install
-            - npm run build
-            # 安装docker客户端（node镜像无docker，补上）
-            - apk add docker-cli
             - test -n "$SERVER_DOCKER_REGISTRY"
             - test -n "$SERVER_DOCKER_NAMESPACE"
             - test -n "$SERVER_DOCKER_USERNAME"
@@ -93,10 +91,12 @@
               cp -R frontend/public frontend/src /tmp/yuque-rag-demo-frontend/
 
               DOCKER_BUILDKIT=1 docker build --progress=plain \
+                --build-arg CNB_COMMIT_SHORT="${CNB_COMMIT_SHORT}" \
                 -t "${SERVER_DOCKER_REGISTRY}/${SERVER_DOCKER_NAMESPACE}/${FRONTEND_IMAGE_NAME:-yuque-rag-demo-frontend}:${CNB_COMMIT_SHORT}" \
                 -t "${SERVER_DOCKER_REGISTRY}/${SERVER_DOCKER_NAMESPACE}/${FRONTEND_IMAGE_NAME:-yuque-rag-demo-frontend}:latest" \
                 -f - /tmp/yuque-rag-demo-frontend <<'DOCKERFILE'
               FROM node:24-alpine AS build
+              ARG CNB_COMMIT_SHORT=unknown
 
               WORKDIR /app
 
@@ -105,8 +105,11 @@
 
               COPY . .
               RUN npm run build
+              RUN grep -o '/assets/index-[^"]*\.js' dist/index.html
 
               FROM nginx:1.27-alpine
+              ARG CNB_COMMIT_SHORT=unknown
+              LABEL org.opencontainers.image.revision=$CNB_COMMIT_SHORT
 
               COPY --from=build /app/dist /usr/share/nginx/html
 
@@ -118,6 +121,11 @@
             - docker push "${SERVER_DOCKER_REGISTRY}/${SERVER_DOCKER_NAMESPACE}/${FRONTEND_IMAGE_NAME:-yuque-rag-demo-frontend}:latest"
 
 main:
+  push:
+    - *build_and_push_backend
+    - *build_and_push_frontend
+
+dev:
   push:
     - *build_and_push_backend
     - *build_and_push_frontend
