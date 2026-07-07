@@ -72,8 +72,13 @@
     - name: docker-login-build-push
       jobs:
         - name: build and push frontend image
-          image: docker:24
+          image: node:20-alpine # 替换原来的docker:24
           script:
+            - cd frontend
+            - npm install
+            - npm run build
+            # 安装docker客户端（node镜像无docker，补上）
+            - apk add docker-cli
             - test -n "$SERVER_DOCKER_REGISTRY"
             - test -n "$SERVER_DOCKER_NAMESPACE"
             - test -n "$SERVER_DOCKER_USERNAME"
