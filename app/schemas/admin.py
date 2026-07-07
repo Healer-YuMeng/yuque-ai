@@ -4,6 +4,8 @@ from typing import List
 
 from pydantic import BaseModel, Field
 
+from app.schemas.chat import ChatMediaBundle
+
 
 class AdminLoginRequest(BaseModel):
     username: str = Field(..., min_length=1, max_length=80)
@@ -58,7 +60,11 @@ class AdminCustomerResponse(BaseModel):
     session_id: str
     display_name: str = ""
     org_name: str = ""
+    role_category: str = ""
+    consult_scene: str = ""
+    consult_time: str = ""
     contact: str = ""
+    email: str = ""
     follow_up_status: str = "待跟进"
     trial_account: str = "待发放"
     updated_at: str = ""
@@ -83,3 +89,27 @@ class AdminCustomerFollowUpUpdateRequest(BaseModel):
 
 class AdminCustomerTestAccountUpdateRequest(BaseModel):
     test_account_status: str = Field(..., min_length=1, max_length=40)
+
+
+class AdminKnowledgeTocNodeResponse(BaseModel):
+    uuid: str = ""
+    parent_uuid: str = ""
+    level: int = 0
+    node_type: str = ""
+    title: str = ""
+    url: str = ""
+    doc_id: str = ""
+    selectable: bool = False
+
+
+class AdminKnowledgeTocResponse(BaseModel):
+    scope: str = ""
+    items: List[AdminKnowledgeTocNodeResponse]
+
+
+class AdminKnowledgeDocResponse(BaseModel):
+    doc_id: str = ""
+    title: str = ""
+    url: str = ""
+    body: str = ""
+    media: ChatMediaBundle = Field(default_factory=ChatMediaBundle)

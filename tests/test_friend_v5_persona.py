@@ -38,6 +38,19 @@ def test_friend_v5_prompt_emphasizes_role_specific_human_style_and_boundaries() 
     assert "正文后按系统要求补全 `[SOURCES]` 与 `[TAGS]` 隐藏块" in prompt
 
 
+def test_friend_v5_prompt_handles_user_info_confirmation_naturally() -> None:
+    prompt = build_friend_v5_system_prompt()
+
+    assert "如果用户有进一步需求，可以轻量提示“您可以申请测试账号，我把测试账号发给您。”" in prompt
+    assert "不要继续依次追问称呼、单位、联系方式或邮箱" in prompt
+    assert "不要说“我记岔了”“我记错了”“特别备注”这类容易出戏的话" in prompt
+    assert "用户刚补充一个字段后，不要回得像登记表回执" in prompt
+    assert "不要评价用户的学校、单位、城市或名字" in prompt
+    assert "- 我记岔了" in prompt
+    assert "- 我会特别备注" in prompt
+    assert "- 这名字听着就很有前瞻性" in prompt
+
+
 def test_friend_v5_prompt_includes_ideas_pbl_product_facts() -> None:
     prompt = build_friend_v5_system_prompt()
 
@@ -45,7 +58,30 @@ def test_friend_v5_prompt_includes_ideas_pbl_product_facts() -> None:
     assert "IDEAS-PBL 是由有为云联合上海师范大学打造的一款 AI 原生应用" in prompt
     assert "沉淀 800+ 优秀模板与成熟项目案例库" in prompt
     assert "支持 PDF、Word、图片、视频、表格、PPT 等多模态数据采集与上传" in prompt
+    assert "不会自动分类，通常按项目阶段分阶段上传和留存资料" in prompt
+    assert "自动化留存和追踪各阶段学习数据与成果" not in prompt
     assert "如果用户问 IDEAS-PBL 的价值、适用对象、优势、痛点、角色收益" in prompt
+
+
+def test_friend_v5_prompt_prioritizes_tencent_for_general_ai_scene_intro() -> None:
+    prompt = build_friend_v5_system_prompt()
+
+    assert "【人工智能通识教育专属产品口径】" in prompt
+    assert "先介绍“腾讯青少年人工智能课程”" in prompt
+    assert "其他拓展课程可在后面轻带一句" in prompt
+    assert "不要一上来把乐高、苹果 STEAM、索尼三条路线并列展开" in prompt
+    assert "腾讯这条线" not in prompt
+    assert "作为主线" not in prompt
+    assert "默认先从“腾讯青少年人工智能课程”讲起" not in prompt
+    assert "优先讲这套课程更像完整方案" in prompt
+
+
+def test_friend_v5_prompt_requires_guide_answers_to_sound_like_human_walkthrough() -> None:
+    prompt = build_friend_v5_system_prompt()
+
+    assert "用户问使用指南时，先用一句口语化的话接住" in prompt
+    assert "不要一上来连续罗列四五个功能点" in prompt
+    assert "更像带着对方看一遍怎么上手" in prompt
 
 
 def test_friend_v5_prompt_can_inject_admin_scene_intro() -> None:
@@ -74,3 +110,13 @@ def test_friend_v5_prompt_adds_smart_enrollment_role_specific_guardrails() -> No
     assert "不要一上来追问具体数量" in prompt
     assert "不要连续追问“多少条消息”“多少位老师”“一年多少线索”这类数字问题" in prompt
     assert "如果用户问试用，不要直接只说“把学校名称和联系方式发我”" in prompt
+
+
+def test_friend_v5_prompt_forbids_offline_experience_language() -> None:
+    prompt = build_friend_v5_system_prompt()
+
+    assert "所有产品默认都按在线产品、在线平台、在线服务来介绍" in prompt
+    assert "不要说线下体验点、线下门店、到店体验、带孩子去现场体验" in prompt
+    assert "如果用户追问哪里可以线下体验" in prompt
+    assert "当前这类产品主要是在线使用和在线交付" in prompt
+    assert "是否有实践体验" not in prompt

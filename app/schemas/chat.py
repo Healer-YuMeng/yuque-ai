@@ -115,20 +115,10 @@ class VisitorTrialApplyRequest(BaseModel):
     session_id: str = Field(..., min_length=1, max_length=120)
     name: str = Field(..., min_length=1, max_length=80)
     org_name: str = Field(..., min_length=1, max_length=160)
-    contact: str = Field(..., min_length=1, max_length=120)
+    contact: str = Field(default="", max_length=120)
+    email: str = Field(default="", max_length=160)
     interested_product: str = Field(default="", max_length=160)
     concern: str = Field(default="", max_length=500)
-
-
-class VisitorProfileResponse(BaseModel):
-    ok: bool = True
-    name: str = ""
-    org_name: str = ""
-    contact: str = ""
-    interested_product: str = ""
-    concern: str = ""
-    module_scope: str = ""
-    trial_account_issued: bool = False
 
 
 class ChatV4CapabilitiesResponse(BaseModel):

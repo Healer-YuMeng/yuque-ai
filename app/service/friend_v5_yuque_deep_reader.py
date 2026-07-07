@@ -17,7 +17,7 @@ from app.service.v4_vision_enrichment import enrich_media_bundle_with_vision
 
 
 _DEEP_READ_HINT_RE = re.compile(
-    r"(语雀|文档|指南|手册|正文|图文|图片|视频|截图|这篇|那篇|某篇|总结|提取|解读|阅读|《[^》]+》)"
+    r"(语雀|文档|指南|手册|正文|图文|图片|视频|截图|这篇|那篇|某篇|总结|提取|解读|阅读|比赛|赛事|竞赛|认证|证书|《[^》]+》)"
 )
 _ALL_DOC_MEDIA_SCAN_LIMIT = 10_000
 _PROMPT_BODY_CHAR_LIMIT = 3000
@@ -226,10 +226,11 @@ class FriendV5YuqueDeepReader:
         prompt_block = (
             "【语雀文档深读】\n"
             f"标题：{doc.title}\n"
-            f"链接：{doc.url or '（无）'}\n"
+            f"链接（内部参考，勿在正文复述链接或路径）：{doc.url or '（无）'}\n"
             f"正文摘录：\n{plain[:_PROMPT_BODY_CHAR_LIMIT] or body_text[:_PROMPT_BODY_CHAR_LIMIT]}\n"
             f"{chr(10) + vision_block + chr(10) if vision_block else ''}"
             "请严格基于这篇语雀文档的正文和媒体信息回答；如果正文没有提到，不要编造。"
+            "正文中不要输出语雀链接、路径或文档 ID。"
         )
         source = FriendV5SourceItem(
             source_type="yuque",

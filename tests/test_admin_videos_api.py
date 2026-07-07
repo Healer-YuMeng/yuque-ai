@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.api import admin_api
 from app.api.admin_api import router
 from app.db.repositories import AdminVideoAssetRepository
 from app.db.session import DatabaseSessionFactory
@@ -91,6 +92,32 @@ def test_upload_video_saves_file_and_returns_public_url(tmp_path: Path) -> None:
     assert saved.read_bytes() == content
 
 
+def test_upload_mov_video_transcodes_to_mp4(tmp_path: Path, monkeypatch) -> None:
+    async def fake_transcode(*, source: Path, target: Path) -> int:
+        assert source.suffix == ".mov"
+        target.write_bytes(b"converted-mp4")
+        return target.stat().st_size
+
+    monkeypatch.setattr(admin_api, "_transcode_video_for_web", fake_transcode)
+    client = build_admin_test_client(tmp_path)
+
+    with client:
+        response = client.post(
+            "/admin-api/videos/upload",
+            data={"scene_key": "general_ai_course", "title": "通识演示"},
+            files={"file": ("demo.mov", b"mov-content", "video/quicktime")},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["stored_filename"].endswith(".mp4")
+    assert payload["file_url"].endswith(".mp4")
+    assert payload["mime_type"] == "video/mp4"
+    saved = tmp_path / "uploads" / "videos" / "general_ai_course" / payload["stored_filename"]
+    assert saved.read_bytes() == b"converted-mp4"
+    assert not list((tmp_path / "uploads" / "videos" / "general_ai_course").glob("*_source.mov"))
+
+
 def test_list_videos_filters_by_scene(tmp_path: Path) -> None:
     client = build_admin_test_client(tmp_path)
 
@@ -103,7 +130,7 @@ def test_list_videos_filters_by_scene(tmp_path: Path) -> None:
         client.post(
             "/admin-api/videos/upload",
             data={"scene_key": "smart_enrollment"},
-            files={"file": ("enroll.webm", b"enroll", "video/webm")},
+            files={"file": ("enroll.mp4", b"enroll", "video/mp4")},
         )
         response = client.get("/admin-api/videos", params={"scene_key": "school_ai_custom"})
 

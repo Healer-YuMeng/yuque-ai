@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import time
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
@@ -20,6 +21,13 @@ from app.conversation.contact_extractor import extract_contact
 from app.conversation.friend_persona_v5 import all_friend_v5_scenes
 from app.conversation.lead_nudge_policy import LeadNudgePolicy
 from app.conversation.trial_account_pool import allocate_trial_account, load_trial_accounts
+from app.conversation.user_info_extractor import UserInfoStructuredExtractor
+from app.conversation.user_info_cleaner import (
+    extract_email_text_candidate,
+    normalize_display_name_candidate,
+    normalize_email_candidate,
+    normalize_organization_candidate,
+)
 from app.conversation.v4_lead_outreach import V4LeadOutreach
 from app.conversation.visitor_prompt import build_visitor_generation_question
 from app.conversation.visitor_profile import detect_visitor_type
@@ -45,7 +53,6 @@ from app.schemas.chat import (
     ChatV4Response,
     SelectedYuqueDocRef,
     TrialCredentialsResponse,
-    VisitorProfileResponse,
 )
 from app.service.media_answer_orchestrator import MediaAnswerOrchestrator
 from app.service.friend_dialog_orchestrator_v5 import FriendDialogOrchestratorV5
@@ -53,10 +60,12 @@ from app.service.friend_v5_scene_query_rewriter import FriendV5SceneQueryRewrite
 from app.service.friend_v5_yuque_deep_reader import FriendV5YuqueDeepReader
 from app.service.sales_dialog_orchestrator_v3 import SalesDialogOrchestratorV3
 from app.service.sales_dialog_orchestrator_v4 import SalesDialogOrchestratorV4, _strip_media_urls_from_text
-from app.storage.vector_store import StoredChunk, VectorStore
+from app.storage.vector_store import VectorStore
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
+
+_EMAIL_RE = re.compile(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$", re.IGNORECASE)
 
 
 def _doc_anchor_pairs(selected: Optional[List[SelectedYuqueDocRef]]) -> Optional[List[Tuple[int, Optional[str]]]]:
@@ -132,20 +141,32 @@ def _is_v4_memory_only_question(question: str) -> bool:
 
 def _visitor_profile_parts(profile: Any) -> dict[str, str]:
     if not profile:
-        return {"name": "", "org_name": "", "contact": "", "interested_product": "", "concern": "", "module_scope": ""}
+        return {"name": "", "org_name": "", "contact": "", "email": "", "interested_product": "", "concern": "", "module_scope": ""}
     interests = profile.interests if isinstance(profile.interests, dict) else {}
     lead = interests.get("_lead") if isinstance(interests.get("_lead"), dict) else {}
     session_meta = interests.get("_session") if isinstance(interests.get("_session"), dict) else {}
-    org_name = str(lead.get("org_name") or profile.org_name or "")
+    org_name = str(getattr(profile, "org_name", "") or lead.get("org_name") or "")
     fallback_name = normalize_display_name(str(lead.get("name") or ""), org=org_name)
     return {
         "name": display_name_for_chat(profile) or fallback_name,
         "org_name": org_name,
         "contact": str(lead.get("contact_value") or ""),
+        "email": str(lead.get("email") or ""),
         "interested_product": str(lead.get("interested_product") or ""),
         "concern": str(lead.get("concern") or ""),
         "module_scope": str(session_meta.get("module_scope") or ""),
     }
+
+
+def _trial_apply_info_transcript(*, name: str, org_name: str, contact: str, email: str) -> str:
+    return "\n".join(
+        [
+            f"姓名：{(name or '').strip()}",
+            f"单位：{(org_name or '').strip()}",
+            f"联系方式：{(contact or '').strip()}",
+            f"邮箱：{(email or '').strip()}",
+        ]
+    ).strip()
 
 
 def _build_v4_memory_answer(profile: Any) -> str:
@@ -228,6 +249,7 @@ class QAService:
             rounds_threshold=settings.chat_v15_lead_nudge_rounds,
             stay_seconds_threshold=settings.chat_v15_lead_nudge_stay_s,
         )
+        self._user_info_extractor = UserInfoStructuredExtractor()
         self._chat_session_profile_repository = chat_session_profile_repository
 
     async def startup(self) -> None:
@@ -823,6 +845,14 @@ class QAService:
                                 role="assistant",
                                 content=answer,
                             )
+                        lead_saved = await self._persist_v5_chat_lead_for_admin(
+                            session_id=sid,
+                            question=question,
+                            scene=scene,
+                        )
+                        debug = dict(data.get("debug") or {})
+                        debug["v5_lead_admin"] = {"lead_saved": lead_saved}
+                        data["debug"] = debug
                     yield event
                     continue
                 yield event
@@ -874,27 +904,46 @@ class QAService:
         name: str,
         org_name: str,
         contact: str,
+        email: str = "",
         interested_product: str = "",
         concern: str = "",
     ) -> TrialCredentialsResponse:
         sid = (session_id or "").strip()
-        display_name = (name or "").strip()
-        org = (org_name or "").strip()
+        info_transcript = _trial_apply_info_transcript(
+            name=name,
+            org_name=org_name,
+            contact=contact,
+            email=email,
+        )
+        extractor = getattr(self, "_user_info_extractor", None) or UserInfoStructuredExtractor()
+        structured_info = await extractor.extract(info_transcript)
+        display_name = structured_info.display_name or normalize_display_name_candidate(name) or ""
+        org = structured_info.org_name or normalize_organization_candidate(org_name) or ""
         contact_text = (contact or "").strip()
+        if structured_info.contact:
+            contact_text = structured_info.contact
+        raw_email = structured_info.email or (email or "").strip()
+        email_text = normalize_email_candidate(raw_email) or ""
         product = (interested_product or "").strip()
         concern_text = (concern or "").strip()
         if not sid:
             return TrialCredentialsResponse(ok=False, message="缺少会话标识，请刷新后重试。")
-        if not (display_name and org and contact_text):
-            return TrialCredentialsResponse(ok=False, message="请完整填写姓名、单位、联系方式。")
-        contact_hit = extract_contact(contact_text)
-        if not contact_hit:
+        if not (display_name and org and (contact_text or email_text)):
+            return TrialCredentialsResponse(ok=False, message="请完整填写姓名、单位，并至少填写联系方式或邮箱。")
+        contact_hit = extract_contact(contact_text) if contact_text else None
+        if contact_text and not contact_hit:
             return TrialCredentialsResponse(ok=False, message="联系方式校验失败，请填写手机号或微信号。")
+        if raw_email and not email_text:
+            return TrialCredentialsResponse(ok=False, message="邮箱格式校验失败，请检查后重试。")
 
+        lead_contact_type = contact_hit.contact_type if contact_hit else ""
+        lead_contact_value = contact_hit.value if contact_hit else ""
+        capture_contact_type = lead_contact_type or ("email" if email_text else "")
+        capture_contact_value = lead_contact_value or email_text
         await self._lead_capture_repository.try_insert_lead(
             session_id=sid,
-            contact_type=contact_hit.contact_type,
-            contact_value=contact_hit.value,
+            contact_type=capture_contact_type,
+            contact_value=capture_contact_value,
             visitor_type=None,
         )
         profile = await self._chat_session_profile_repository.get_profile(session_id=sid)
@@ -913,8 +962,9 @@ class QAService:
                 "wants_trial": True,
                 "name": display_name,
                 "org_name": org,
-                "contact_type": contact_hit.contact_type,
-                "contact_value": contact_hit.value,
+                "contact_type": lead_contact_type,
+                "contact_value": lead_contact_value,
+                "email": email_text,
                 "interested_product": product,
                 "concern": concern_text,
             }
@@ -940,24 +990,68 @@ class QAService:
             message="提交成功，我们会尽快与您联系。",
         )
 
-    async def visitor_profile_summary(self, *, session_id: str) -> VisitorProfileResponse:
+    async def _persist_v5_chat_lead_for_admin(
+        self,
+        *,
+        session_id: str,
+        question: str,
+        scene: str,
+    ) -> bool:
+        """把 V5 普通对话中留下的联系方式同步到后台客户管理。"""
         sid = (session_id or "").strip()
         if not sid:
-            return VisitorProfileResponse(ok=False)
+            return False
         profile = await self._chat_session_profile_repository.get_profile(session_id=sid)
-        parts = _visitor_profile_parts(profile)
-        interests = profile.interests if profile and isinstance(profile.interests, dict) else {}
-        session_meta = interests.get("_session") if isinstance(interests.get("_session"), dict) else {}
-        return VisitorProfileResponse(
-            ok=True,
-            name=parts["name"],
-            org_name=parts["org_name"],
-            contact=parts["contact"],
-            interested_product=parts["interested_product"],
-            concern=parts.get("concern", ""),
-            module_scope=parts["module_scope"],
-            trial_account_issued=bool(session_meta.get("trial_account_issued")),
+        interests = dict(profile.interests) if profile and isinstance(profile.interests, dict) else {}
+        lead = dict(interests.get("_lead") or {})
+        contact_hit = extract_contact(question)
+        email_text = extract_email_text_candidate(question) or str(lead.get("email") or "").strip()
+        contact_type = contact_hit.contact_type if contact_hit else str(lead.get("contact_type") or "").strip()
+        contact_value = contact_hit.value if contact_hit else str(lead.get("contact_value") or "").strip()
+        if (not contact_type or not contact_value) and email_text:
+            contact_type = "email"
+            contact_value = email_text
+        if not contact_type or not contact_value:
+            return False
+
+        visitor_type = str(getattr(profile, "visitor_type", "") or "").strip()
+        if not visitor_type:
+            detected = detect_visitor_type(question)
+            visitor_type = detected if detected != "unknown" else ""
+        saved = await self._lead_capture_repository.try_insert_lead(
+            session_id=sid,
+            contact_type=contact_type,
+            contact_value=contact_value,
+            visitor_type=visitor_type or None,
         )
+
+        display_name = str(getattr(profile, "display_name", "") or lead.get("name") or "").strip()
+        org_name = str(getattr(profile, "org_name", "") or lead.get("org_name") or "").strip()
+        lead.update(
+            {
+                "contact_type": contact_type,
+                "contact_value": contact_value,
+                "interested_product": str(lead.get("interested_product") or scene or "").strip(),
+            }
+        )
+        if email_text:
+            lead["email"] = email_text
+        if display_name:
+            lead["name"] = display_name
+        if org_name:
+            lead["org_name"] = org_name
+        interests["_lead"] = lead
+        admin_meta = dict(interests.get("_admin") or {})
+        admin_meta.setdefault("follow_up_status", "待跟进")
+        admin_meta.setdefault("test_account_status", "待发放")
+        interests["_admin"] = admin_meta
+        await self._chat_session_profile_repository.upsert_profile(
+            session_id=sid,
+            display_name=display_name or None,
+            org_name=org_name or None,
+            interests=interests,
+        )
+        return saved
 
     @staticmethod
     def _auto_skill_instruction_for_v2(question: str) -> str:
@@ -1542,19 +1636,7 @@ class QAService:
         documents = await self._yuque_loader.fetch_documents_for_bootstrap(query=bootstrap_query)
         chunks = self._chunk_documents(documents)
         embeddings = await self._embedder.embed_texts([chunk.text for chunk in chunks])
-        stored_chunks = [
-            StoredChunk(
-                chunk_id=chunk.chunk_id,
-                doc_id=chunk.doc_id,
-                title=chunk.title,
-                url=chunk.url,
-                text=chunk.text,
-                order=chunk.order,
-            )
-            for chunk in chunks
-        ]
-        self._vector_store.rebuild(chunks=stored_chunks, embeddings=embeddings)
-        await self._document_repository.replace_documents(chunks)
+        await self._document_repository.replace_documents(chunks, embeddings=embeddings)
         return len(documents), len(chunks)
 
     def _chunk_documents(self, documents: List[YuqueDocument]) -> List[TextChunk]:

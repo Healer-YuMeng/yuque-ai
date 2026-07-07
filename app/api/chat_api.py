@@ -34,7 +34,6 @@ from app.schemas.chat import (
     TrialCredentialsRequest,
     TrialCredentialsResponse,
     VisitorTrialApplyRequest,
-    VisitorProfileResponse,
     GuideDocTitlesResponse,
     ResetSessionRequest,
     HealthResponse,
@@ -447,17 +446,10 @@ async def visitor_trial_apply(
         name=request.name,
         org_name=request.org_name,
         contact=request.contact,
+        email=request.email,
         interested_product=request.interested_product,
         concern=request.concern,
     )
-
-
-@router.get("/visitor/profile", response_model=VisitorProfileResponse)
-async def visitor_profile(
-    session_id: str = Query(..., min_length=1, max_length=120),
-    qa_service: QAService = Depends(get_qa_service),
-) -> VisitorProfileResponse:
-    return await qa_service.visitor_profile_summary(session_id=session_id)
 
 
 @router.post("/index/rebuild", response_model=RebuildIndexResponse)

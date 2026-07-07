@@ -294,4 +294,4 @@ async def test_guidance_branch_triggers_lead_nudge_after_round_5() -> None:
     resp = await orch.answer(question="我想继续了解", session_id="s-nudge")
     assert resp.lead_nudge_triggered is True
     assert resp.debug and resp.debug.get("lead_nudge_reason") == "rounds"
-    assert ("留下电话或微信" in resp.answer) or ("留下联系方式" in resp.answer)
+    assert ("申请测试账号" in resp.answer) or ("留下联系方式" in resp.answer)

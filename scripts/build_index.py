@@ -16,7 +16,7 @@ from app.storage.vector_store import VectorStore
 async def main() -> None:
     load_dotenv()
     bootstrap_query = (os.getenv("BOOTSTRAP_QUERY") or "退款").strip()
-    session_factory = DatabaseSessionFactory(str(settings.sqlite_path))
+    session_factory = DatabaseSessionFactory(settings.database_url)
     service = QAService(
         yuque_loader=YuqueLoader(
             token=settings.yuque_token,
@@ -24,7 +24,7 @@ async def main() -> None:
             timeout_s=settings.yuque_timeout_s,
             scope=settings.yuque_scope,
         ),
-        vector_store=VectorStore(vector_dir=settings.vector_dir),
+        vector_store=VectorStore(session_factory=session_factory),
         document_repository=DocumentRepository(session_factory),
         qa_log_repository=QALogRepository(session_factory),
         lead_capture_repository=LeadCaptureRepository(session_factory),

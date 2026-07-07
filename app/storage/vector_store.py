@@ -1,16 +1,10 @@
 from __future__ import annotations
 
-import json
-from dataclasses import asdict, dataclass
-from pathlib import Path
+import math
+from dataclasses import dataclass
 from typing import List, Sequence
 
-import numpy as np
-
-try:
-    import faiss  # type: ignore
-except Exception:  # pragma: no cover - optional runtime dependency
-    faiss = None
+from app.db.session import DatabaseSessionFactory
 
 
 @dataclass(frozen=True)
@@ -29,93 +23,75 @@ class RetrievedChunk:
     score: float
 
 
+def normalize_vector(values: Sequence[float]) -> list[float]:
+    norm = math.sqrt(sum(float(v) * float(v) for v in values))
+    if norm <= 0:
+        return [float(v) for v in values]
+    return [float(v) / norm for v in values]
+
+
+def format_pgvector(values: Sequence[float]) -> str:
+    normalized = normalize_vector(values)
+    return "[" + ",".join(f"{v:.8f}" for v in normalized) + "]"
+
+
 class VectorStore:
-    def __init__(self, *, vector_dir: Path) -> None:
-        self._vector_dir = vector_dir
-        self._index_path = vector_dir / "index.faiss"
-        self._matrix_path = vector_dir / "index.npy"
-        self._meta_path = vector_dir / "chunks.json"
-        self._chunks: List[StoredChunk] = []
-        self._index = None
-        self._matrix: np.ndarray | None = None
-        self._dimension: int | None = None
-        self._load()
+    """PostgreSQL + pgvector backed vector storage and similarity search."""
 
-    def rebuild(self, *, chunks: Sequence[StoredChunk], embeddings: Sequence[Sequence[float]]) -> None:
-        vectors = np.array(embeddings, dtype="float32")
-        if vectors.size == 0:
-            self._chunks = []
-            self._index = None
-            self._dimension = None
-            self._persist()
-            return
+    def __init__(self, *, session_factory: DatabaseSessionFactory) -> None:
+        self._session_factory = session_factory
 
-        self._dimension = int(vectors.shape[1])
-        vectors = self._normalize(vectors)
-        if faiss is not None:
-            self._index = faiss.IndexFlatIP(self._dimension)
-            self._index.add(vectors)
-        self._matrix = vectors
-        self._chunks = list(chunks)
-        self._persist()
+    async def search(self, query_embedding: Sequence[float], top_k: int) -> List[RetrievedChunk]:
+        if not self._session_factory.is_postgres or top_k <= 0:
+            return []
 
-    def search(self, query_embedding: Sequence[float], top_k: int) -> List[RetrievedChunk]:
-        if self._index is None or not self._chunks:
-            if self._matrix is None:
-                return []
-        query = np.array([query_embedding], dtype="float32")
-        query = self._normalize(query)
-        if self._index is not None and faiss is not None:
-            scores, indices = self._index.search(query, top_k)
-        else:
-            similarities = np.dot(self._matrix, query[0])  # type: ignore[arg-type]
-            ranked = np.argsort(-similarities)[:top_k]
-            scores = np.array([[float(similarities[i]) for i in ranked]], dtype="float32")
-            indices = np.array([ranked], dtype="int64")
+        query_vector = format_pgvector(query_embedding)
+        conn = await self._session_factory.connect()
+        try:
+            rows = await conn.fetchall(
+                """
+                SELECT
+                    c.chunk_id,
+                    c.doc_id,
+                    d.title,
+                    d.url,
+                    COALESCE(c.chunk_text, c.snippet) AS chunk_text,
+                    c.chunk_order,
+                    (1 - (c.embedding <=> ?::vector)) AS score
+                FROM chunks c
+                JOIN documents d ON d.doc_id = c.doc_id
+                WHERE c.embedding IS NOT NULL
+                ORDER BY c.embedding <=> ?::vector
+                LIMIT ?
+                """,
+                (query_vector, query_vector, top_k),
+            )
+        finally:
+            await conn.close()
+
         results: List[RetrievedChunk] = []
-        for score, idx in zip(scores[0], indices[0]):
-            if idx < 0 or idx >= len(self._chunks):
-                continue
-            results.append(RetrievedChunk(chunk=self._chunks[idx], score=float(score)))
+        for row in rows:
+            results.append(
+                RetrievedChunk(
+                    chunk=StoredChunk(
+                        chunk_id=str(row["chunk_id"]),
+                        doc_id=str(row["doc_id"]),
+                        title=str(row["title"] or ""),
+                        url=str(row["url"] or ""),
+                        text=str(row["chunk_text"] or ""),
+                        order=int(row["chunk_order"] or 0),
+                    ),
+                    score=float(row["score"] or 0.0),
+                )
+            )
         return results
 
-    def chunk_count(self) -> int:
-        return len(self._chunks)
-
-    def _persist(self) -> None:
-        self._vector_dir.mkdir(parents=True, exist_ok=True)
-        if self._index is None and self._matrix is None:
-            if self._index_path.exists():
-                self._index_path.unlink()
-            if self._matrix_path.exists():
-                self._matrix_path.unlink()
-            self._meta_path.write_text("[]", encoding="utf-8")
-            return
-        if self._index is not None and faiss is not None:
-            faiss.write_index(self._index, str(self._index_path))
-            if self._matrix_path.exists():
-                self._matrix_path.unlink()
-        elif self._index_path.exists():
-            self._index_path.unlink()
-        if self._matrix is not None and faiss is None:
-            np.save(self._matrix_path, self._matrix)
-        payload = [asdict(chunk) for chunk in self._chunks]
-        self._meta_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    def _load(self) -> None:
-        if faiss is not None and self._index_path.exists():
-            self._index = faiss.read_index(str(self._index_path))
-            self._dimension = self._index.d
-        elif self._matrix_path.exists():
-            self._matrix = np.load(self._matrix_path)
-            self._dimension = int(self._matrix.shape[1]) if self._matrix.size else None
-        if self._meta_path.exists():
-            items = json.loads(self._meta_path.read_text(encoding="utf-8"))
-            self._chunks = [StoredChunk(**item) for item in items]
-
-    @staticmethod
-    def _normalize(vectors: np.ndarray) -> np.ndarray:
-        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
-        return vectors / norms
-
+    async def chunk_count(self) -> int:
+        if not self._session_factory.is_postgres:
+            return 0
+        conn = await self._session_factory.connect()
+        try:
+            value = await conn.fetchval("SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL")
+            return int(value or 0)
+        finally:
+            await conn.close()

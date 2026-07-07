@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -13,14 +14,20 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Resp
 
 from app.core.config import settings
 from app.core.datetime_util import sqlite_utc_to_cst
+from app.core.yuque_credentials import default_yuque_scope_for_profile, yuque_token_for_profile
+from app.data.yuque_loader import YuqueLoader, YuqueLoaderError
 from app.db.admin_customers import DEFAULT_PAGE_SIZE, AdminCustomerRepository, AdminCustomerRow
 from app.db.repositories import AdminSceneIntroRepository, AdminSceneIntroRow, AdminVideoAssetRepository, AdminVideoAssetRow
+from app.service.media_answer_orchestrator import _DocContext, collect_media_from_doc_contexts
 from app.schemas.admin import (
     AdminAuthStatusResponse,
     AdminCustomerFollowUpUpdateRequest,
     AdminCustomerListResponse,
     AdminCustomerResponse,
     AdminCustomerSummaryResponse,
+    AdminKnowledgeDocResponse,
+    AdminKnowledgeTocNodeResponse,
+    AdminKnowledgeTocResponse,
     AdminSceneIntroListResponse,
     AdminSceneIntroResponse,
     AdminSceneIntroUpdateRequest,
@@ -135,12 +142,26 @@ async def upload_admin_video(
     scene_dir = upload_root / "videos" / scene_key
     scene_dir.mkdir(parents=True, exist_ok=True)
 
-    stored_filename = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{uuid4().hex[:12]}{extension}"
+    filename_stem = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{uuid4().hex[:12]}"
+    stored_filename = f"{filename_stem}.mp4" if extension != ".mp4" else f"{filename_stem}{extension}"
     target = (scene_dir / stored_filename).resolve()
-    if scene_dir.resolve() not in target.parents:
+    scene_dir_resolved = scene_dir.resolve()
+    if scene_dir_resolved not in target.parents:
         raise HTTPException(status_code=400, detail="非法视频保存路径")
 
-    file_size = await _save_upload_file(file=file, target=target, max_bytes=settings.admin_video_max_bytes)
+    if extension == ".mp4":
+        file_size = await _save_upload_file(file=file, target=target, max_bytes=settings.admin_video_max_bytes)
+    else:
+        source_filename = f"{filename_stem}_source{extension}"
+        source_target = (scene_dir / source_filename).resolve()
+        if scene_dir_resolved not in source_target.parents:
+            raise HTTPException(status_code=400, detail="非法视频保存路径")
+        await _save_upload_file(file=file, target=source_target, max_bytes=settings.admin_video_max_bytes)
+        try:
+            file_size = await _transcode_video_for_web(source=source_target, target=target)
+        finally:
+            source_target.unlink(missing_ok=True)
+
     rel_path = f"videos/{scene_key}/{stored_filename}"
     file_url = f"/admin-media/videos/{scene_key}/{stored_filename}"
     row = await repo.insert_video(
@@ -151,7 +172,7 @@ async def upload_admin_video(
         stored_filename=stored_filename,
         file_path=rel_path,
         file_url=file_url,
-        mime_type=mime_type,
+        mime_type="video/mp4",
         file_size=file_size,
     )
     return _video_response(row)
@@ -242,9 +263,75 @@ async def customer_summary(
     )
 
 
+@router.get("/knowledge/toc", response_model=AdminKnowledgeTocResponse)
+async def admin_knowledge_toc(
+    owner: str = "",
+    token_profile: str = "",
+    _admin_username: str = Depends(require_admin_auth),
+) -> AdminKnowledgeTocResponse:
+    loader, scope = _build_admin_yuque_loader(owner=owner, token_profile=token_profile)
+    try:
+        nodes = await loader.get_book_toc(book=scope)
+        return AdminKnowledgeTocResponse(
+            scope=scope,
+            items=[
+                AdminKnowledgeTocNodeResponse(
+                    uuid=node.uuid,
+                    parent_uuid=node.parent_uuid,
+                    level=node.level,
+                    node_type=node.type,
+                    title=node.title,
+                    url=node.url,
+                    doc_id=str(node.doc_id or "") or _slug_tail_from_url(node.url),
+                    selectable=bool(node.doc_id or _slug_tail_from_url(node.url)),
+                )
+                for node in nodes
+            ],
+        )
+    except YuqueLoaderError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    finally:
+        await loader.close()
+
+
+@router.get("/knowledge/docs/{doc_ref}", response_model=AdminKnowledgeDocResponse)
+async def admin_knowledge_doc(
+    doc_ref: str,
+    owner: str = "",
+    token_profile: str = "",
+    _admin_username: str = Depends(require_admin_auth),
+) -> AdminKnowledgeDocResponse:
+    ref = (doc_ref or "").strip()
+    if not ref:
+        raise HTTPException(status_code=400, detail="缺少文档标识")
+    loader, scope = _build_admin_yuque_loader(owner=owner, token_profile=token_profile)
+    try:
+        doc = await loader.get_doc(book=scope, id_or_slug=ref)
+        media = collect_media_from_doc_contexts(
+            [_DocContext(doc_id=doc.doc_id, title=doc.title, url=doc.url, snippet="", body=doc.body)],
+            question=doc.title,
+            max_images=30,
+            max_videos=10,
+            primary_doc_title=doc.title,
+        )
+        return AdminKnowledgeDocResponse(
+            doc_id=doc.doc_id,
+            title=doc.title,
+            url=doc.url,
+            body=doc.body,
+            media=media,
+        )
+    except YuqueLoaderError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    finally:
+        await loader.close()
+
+
 @router.get("/customers", response_model=AdminCustomerListResponse)
 async def list_customers(
     q: str = "",
+    follow_up_status: str = "",
+    consult_time_order: str = "desc",
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     _admin_username: str = Depends(require_admin_auth),
@@ -252,7 +339,13 @@ async def list_customers(
 ) -> AdminCustomerListResponse:
     size = max(1, min(int(page_size), 50))
     page_num = max(1, int(page))
-    items, total = await repo.list_customers(query=q, page=page_num, page_size=size)
+    items, total = await repo.list_customers(
+        query=q,
+        follow_up_status=follow_up_status,
+        consult_time_order=consult_time_order,
+        page=page_num,
+        page_size=size,
+    )
     total_pages = (total + size - 1) // size if total > 0 else 0
     return AdminCustomerListResponse(
         items=[_customer_response(row) for row in items],
@@ -357,6 +450,44 @@ def _normalize_scene(scene_key: str) -> str:
     return scene
 
 
+def _build_admin_yuque_loader(*, owner: str = "", token_profile: str = "") -> tuple[YuqueLoader, str]:
+    profile = (token_profile or "").strip() or None
+    token = yuque_token_for_profile(profile)
+    if not token:
+        raise HTTPException(status_code=503, detail="未配置语雀 Token，无法读取知识库")
+    scope = _compute_admin_yuque_scope(owner=owner, token_profile=profile)
+    if not scope:
+        raise HTTPException(status_code=503, detail="未配置语雀知识库作用域 YUQUE_SCOPE")
+    return (
+        YuqueLoader(
+            token=token,
+            base_url=settings.yuque_base_url,
+            timeout_s=settings.yuque_timeout_s,
+            scope=scope,
+        ),
+        scope,
+    )
+
+
+def _compute_admin_yuque_scope(*, owner: str = "", token_profile: str | None = None) -> str:
+    default_scope = default_yuque_scope_for_profile(token_profile).strip().strip("/")
+    owner_clean = (owner or "").strip().strip("/")
+    if not owner_clean:
+        return default_scope
+    if not default_scope or "/" not in default_scope:
+        return owner_clean
+    _default_owner, repo = default_scope.split("/", 1)
+    return f"{owner_clean}/{repo}"
+
+
+def _slug_tail_from_url(url: str) -> str:
+    value = (url or "").strip().rstrip("/")
+    if not value:
+        return ""
+    parts = [part for part in value.split("/") if part]
+    return parts[-1] if parts else ""
+
+
 def _safe_original_filename(filename: str) -> str:
     name = PurePath(filename).name.strip()
     return name or "video"
@@ -382,6 +513,56 @@ async def _save_upload_file(*, file: UploadFile, target: Path, max_bytes: int) -
         target.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="视频文件为空")
     return total
+
+
+async def _transcode_video_for_web(*, source: Path, target: Path) -> int:
+    target.unlink(missing_ok=True)
+    command = [
+        settings.admin_video_ffmpeg_path,
+        "-y",
+        "-i",
+        str(source),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        str(target),
+    ]
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail="服务器未安装 ffmpeg，无法将视频转换为网页可播放格式") from exc
+
+    _stdout, stderr = await process.communicate()
+    if process.returncode != 0:
+        target.unlink(missing_ok=True)
+        error_tail = (stderr or b"").decode("utf-8", errors="ignore")[-240:].strip()
+        detail = "视频转码失败，请确认视频文件可正常播放，或先转换为 MP4/H.264 后再上传"
+        if error_tail:
+            detail = f"{detail}：{error_tail}"
+        raise HTTPException(status_code=400, detail=detail)
+
+    if not target.is_file():
+        raise HTTPException(status_code=500, detail="视频转码完成但未生成 MP4 文件")
+    file_size = target.stat().st_size
+    if file_size <= 0:
+        target.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail="视频转码后文件为空")
+    return file_size
 
 
 def _video_response(row: AdminVideoAssetRow) -> AdminVideoAssetResponse:
@@ -418,7 +599,11 @@ def _customer_response(row: AdminCustomerRow) -> AdminCustomerResponse:
         session_id=row.session_id,
         display_name=row.display_name,
         org_name=row.org_name,
+        role_category=row.role_category,
+        consult_scene=row.consult_scene,
+        consult_time=sqlite_utc_to_cst(row.consult_time),
         contact=row.contact,
+        email=row.email,
         follow_up_status=row.follow_up_status,
         trial_account=row.trial_account,
         updated_at=sqlite_utc_to_cst(row.updated_at),

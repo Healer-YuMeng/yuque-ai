@@ -55,6 +55,14 @@ async def test_profile_extractor_keeps_full_honorific_and_splits_org() -> None:
 
 
 @pytest.mark.asyncio
+async def test_profile_extractor_keeps_principal_honorific() -> None:
+    ex = ProfileExtractor()
+    upd = await ex.extract_update(question="我是王校长", history=[], current_profile=None)
+    assert upd.display_name == "王校长"
+    assert upd.visitor_type == "institution_decision_maker"
+
+
+@pytest.mark.asyncio
 async def test_profile_extractor_does_not_treat_grade_as_name() -> None:
     ex = ProfileExtractor()
     upd = await ex.extract_update(question="我时高年级", history=[], current_profile=None)
@@ -100,3 +108,24 @@ async def test_profile_extractor_does_not_treat_generic_org_teacher_as_name_or_o
     assert not upd.display_name
     assert not upd.org_name
     assert upd.visitor_type == "teacher"
+
+
+@pytest.mark.asyncio
+async def test_profile_extractor_cleans_org_prefix_noise() -> None:
+    ex = ProfileExtractor()
+    upd = await ex.extract_update(question="我的单位是是xx，想了解智能招生", history=[], current_profile=None)
+    assert upd.org_name == "xx"
+
+
+@pytest.mark.asyncio
+async def test_profile_extractor_reads_office_location_as_org() -> None:
+    ex = ProfileExtractor()
+    upd = await ex.extract_update(question="我的办公地点是有为中学", history=[], current_profile=None)
+    assert upd.org_name == "有为中学"
+
+
+@pytest.mark.asyncio
+async def test_profile_extractor_strips_employment_suffix_from_org() -> None:
+    ex = ProfileExtractor()
+    upd = await ex.extract_update(question="我在有为中学就职", history=[], current_profile=None)
+    assert upd.org_name == "有为中学"

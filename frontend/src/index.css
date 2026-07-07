@@ -113,6 +113,9 @@ body {
 }
 
 .admin-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 15;
   height: 104px;
   display: flex;
   align-items: center;
@@ -148,6 +151,8 @@ body {
   font-size: 17px;
   font-weight: 700;
   color: #697487;
+  pointer-events: none;
+  user-select: none;
 }
 
 .admin-topbar-account {
@@ -233,9 +238,21 @@ body {
   border: 1px solid #9cb7ff;
   background: #ffffff;
   color: #5d677a;
-  font-size: 26px;
+  border-radius: 12px;
+  font-size: 34px;
+  font-weight: 700;
   line-height: 1;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.18s ease, color 0.18s ease, background 0.18s ease;
+}
+
+.admin-sidebar-close:hover {
+  border-color: #2d6cff;
+  color: #1f56d9;
+  background: #eef4ff;
 }
 
 .admin-nav {
@@ -279,6 +296,7 @@ body {
   border: none;
   padding: 0;
   z-index: 10;
+  cursor: pointer;
 }
 
 .admin-main {
@@ -688,6 +706,191 @@ body {
   font-weight: 600;
 }
 
+.admin-empty-state--compact {
+  min-height: 180px;
+}
+
+.admin-yuque-panel {
+  max-width: 1680px;
+  margin-top: 38px;
+}
+
+.admin-yuque-toolbar,
+.admin-yuque-grid,
+.admin-yuque-toc,
+.admin-yuque-doc {
+  box-sizing: border-box;
+}
+
+.admin-yuque-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 24px 28px;
+  background: #ffffff;
+  border: 1px solid #d7dfeb;
+  border-radius: 22px;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+}
+
+.admin-yuque-toolbar h2 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 800;
+  color: #192132;
+}
+
+.admin-yuque-toolbar p {
+  margin: 8px 0 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: #768299;
+}
+
+.admin-yuque-grid {
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.admin-yuque-toc,
+.admin-yuque-doc {
+  background: #ffffff;
+  border: 1px solid #d7dfeb;
+  border-radius: 22px;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+}
+
+.admin-yuque-toc {
+  padding: 12px;
+  max-height: 720px;
+  overflow: auto;
+}
+
+.admin-yuque-node {
+  width: 100%;
+  min-height: 42px;
+  border: none;
+  border-radius: 12px;
+  background: transparent;
+  color: #293244;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  font-size: 15px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.admin-yuque-node:hover:not(:disabled),
+.admin-yuque-node--active {
+  background: #eef4ff;
+  color: #245ee8;
+}
+
+.admin-yuque-node--disabled {
+  color: #7b879a;
+  cursor: default;
+  font-weight: 800;
+}
+
+.admin-yuque-node-mark {
+  width: 14px;
+  flex: 0 0 auto;
+  color: currentColor;
+  opacity: 0.74;
+}
+
+.admin-yuque-doc {
+  min-height: 720px;
+  padding: 28px;
+  overflow: hidden;
+}
+
+.admin-yuque-doc-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid #e3e9f3;
+}
+
+.admin-yuque-doc-head h2 {
+  margin: 0;
+  color: #182132;
+  font-size: 22px;
+  font-weight: 850;
+}
+
+.admin-yuque-doc-head a {
+  color: #245ee8;
+  font-size: 14px;
+  font-weight: 800;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.admin-yuque-doc-body {
+  margin: 20px 0 0;
+  max-height: 620px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #263244;
+  font-size: 15px;
+  line-height: 1.75;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  background: #f8fafd;
+  border: 1px solid #e4ebf5;
+  border-radius: 16px;
+  padding: 18px;
+}
+
+.admin-yuque-media {
+  margin-top: 20px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.admin-yuque-image-card,
+.admin-yuque-video-card {
+  border: 1px solid #dbe7f7;
+  border-radius: 16px;
+  background: #f8fbff;
+  overflow: hidden;
+  color: #263244;
+  text-decoration: none;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.04);
+}
+
+.admin-yuque-image-card img,
+.admin-yuque-video-card video {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: contain;
+  background: #ffffff;
+  border-bottom: 1px solid #e4ebf5;
+}
+
+.admin-yuque-image-card span,
+.admin-yuque-video-card div {
+  display: block;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 750;
+  color: #536178;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .admin-page-head--toolbar {
   display: flex;
   align-items: flex-start;
@@ -722,7 +925,14 @@ body {
   max-width: 1680px;
 }
 
+.admin-customers-toolbar {
+  display: flex;
+  align-items: stretch;
+  gap: 14px;
+}
+
 .admin-customers-search {
+  flex: 1;
   width: 100%;
   box-sizing: border-box;
   border: 1px solid #d7dfeb;
@@ -739,6 +949,32 @@ body {
 
 .admin-customers-search::placeholder {
   color: #94a3b8;
+}
+
+.admin-customers-filter {
+  min-width: 220px;
+  box-sizing: border-box;
+  border: 1px solid #d7dfeb;
+  border-radius: 14px;
+  background: #ffffff;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  color: #64748b;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.admin-customers-filter select {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: #1f2937;
+  font-size: 15px;
+  font-weight: 700;
+  outline: none;
 }
 
 .admin-customers-table-wrap {
@@ -767,6 +1003,39 @@ body {
   background: #f8fafc;
   color: #64748b;
   font-weight: 700;
+}
+
+.admin-sort-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.admin-sort-icon {
+  width: 34px;
+  height: 22px;
+  border-radius: 999px;
+  border: 0;
+  background: #eaf1ff;
+  color: #2563eb;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.admin-sort-icon:hover {
+  background: #dbe8ff;
+}
+
+.admin-sort-direction {
+  font-size: 11px;
 }
 
 .admin-customers-table td {
@@ -2626,6 +2895,12 @@ body {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.msg-inline-action {
+  margin-top: 8px;
+  display: flex;
+  justify-content: flex-start;
 }
 
 .trial-apply-button {
@@ -4649,6 +4924,11 @@ button:disabled {
     0 14px 30px rgba(99, 102, 241, 0.16);
 }
 
+.focus-scene-btn--locked:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
 .focus-extra-block {
   margin-top: 10px;
   display: flex;
@@ -5204,6 +5484,11 @@ button:disabled {
     0 12px 26px rgba(37, 99, 235, 0.14);
 }
 
+.app-shell--visitor .focus-scene-btn--locked:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
 .app-shell--visitor .focus-scene-btn-icon {
   flex: 0 0 auto;
   width: 46px;
@@ -5668,19 +5953,24 @@ button:disabled {
   font-size: 1.1em;
 }
 
+.app-shell--visitor .msg.assistant.msg--inactivity .bubble {
+  font-size: 16px;
+  line-height: 1.65;
+}
+
 .app-shell--visitor .msg.assistant .stream-stage--pending {
   font-size: 19px;
 }
 
 .app-shell--visitor .friend-v5-tag-chip {
-  font-size: 17px;
+  font-size: 15px;
   padding: 12px 16px;
   border-radius: 10px;
   gap: 18px;
 }
 
 .app-shell--visitor .friend-v5-tag-chip::after {
-  font-size: 17px;
+  font-size: 15px;
   margin-left: 10px;
 }
 
@@ -5967,14 +6257,14 @@ button:disabled {
   }
 
   .app-shell--visitor .visitor-dialog-title {
-    font-size: 20px;
+    font-size: 18px;
   }
 
   .app-shell--visitor .visitor-dialog-field input,
   .app-shell--visitor .visitor-dialog-field textarea,
   .app-shell--visitor .visitor-dialog-btn,
   .app-shell--visitor .visitor-dialog-error {
-    font-size: 16px;
+    font-size: 14px;
   }
 
   .visitor-mobile-scene-bar {
@@ -6049,13 +6339,14 @@ button:disabled {
   .app-shell--visitor.app-shell--visitor-scene-open .visitor-scene-column {
     display: flex;
     position: fixed;
-    left: 12px;
-    right: 12px;
+    left: 16px;
+    right: 16px;
     top: calc(56px + env(safe-area-inset-top, 0px));
     bottom: calc(12px + env(safe-area-inset-bottom, 0px));
     z-index: 50;
     margin: 0;
-    padding: 14px;
+    padding: 10px 10px 12px;
+    box-sizing: border-box;
     border-radius: 22px;
     border: 1px solid rgba(255, 255, 255, 0.88);
     background:
@@ -6067,6 +6358,11 @@ button:disabled {
     -webkit-overflow-scrolling: touch;
   }
 
+  .app-shell--visitor.app-shell--visitor-scene-open .visitor-scene-column .focus-scene-title-card {
+    min-height: 42px;
+    padding: 0 44px 0 12px;
+  }
+
   .app-shell--visitor.app-shell--visitor-scene-open .visitor-scene-column .focus-scene-sidebar {
     flex: 1 1 auto;
     min-height: 0;
@@ -6075,17 +6371,20 @@ button:disabled {
 
   .visitor-scene-overlay-close {
     display: inline-flex;
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 1;
     align-items: center;
     justify-content: center;
-    align-self: flex-end;
-    width: 36px;
-    height: 36px;
-    margin-bottom: 4px;
+    width: 28px;
+    height: 28px;
+    margin-bottom: 0;
     border: 1px solid #d7e3f6;
     border-radius: 999px;
     background: #fff;
     color: #64748b;
-    font-size: 24px;
+    font-size: 20px;
     line-height: 1;
     cursor: pointer;
     font-family: inherit;
@@ -6093,15 +6392,45 @@ button:disabled {
 
   .visitor-dialog-mask {
     align-items: flex-end;
-    padding: 0;
+    padding: 12px;
   }
 
   .visitor-dialog-card {
-    width: 100%;
+    width: min(332px, calc(100vw - 32px));
     max-height: min(88dvh, 640px);
     overflow-y: auto;
-    border-radius: 18px 18px 0 0;
-    padding: 18px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+    border-radius: 18px;
+    padding: 14px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .app-shell--visitor .visitor-dialog-title {
+    font-size: 18px;
+  }
+
+  .app-shell--visitor .visitor-dialog-field {
+    gap: 4px;
+    font-size: 11px;
+  }
+
+  .app-shell--visitor .visitor-dialog-field input,
+  .app-shell--visitor .visitor-dialog-field textarea,
+  .app-shell--visitor .visitor-dialog-error {
+    font-size: 14px;
+  }
+
+  .app-shell--visitor .visitor-dialog-field input {
+    height: 44px;
+  }
+
+  .app-shell--visitor .visitor-dialog-actions {
+    gap: 6px;
+    margin-top: 2px;
+  }
+
+  .app-shell--visitor .visitor-dialog-btn {
+    min-width: 80px;
+    height: 34px;
+    font-size: 14px;
   }
 
   .visitor-workspace-drawer {
@@ -6117,7 +6446,7 @@ button:disabled {
   }
 }
 
-@media (max-width: 480px) {
+@media (max-width: 640px) {
   .app-shell--visitor .consult-top-brand-title {
     font-size: 14px;
     max-width: min(48vw, 180px);
@@ -6130,8 +6459,8 @@ button:disabled {
   .app-shell--visitor .focus-scene-btn {
     flex-direction: row;
     justify-content: flex-start;
-    min-height: 64px;
-    padding: 12px 14px;
+    min-height: 54px;
+    padding: 10px 12px;
     text-align: left;
   }
 
@@ -6183,6 +6512,21 @@ button:disabled {
 
   .admin-customers-table {
     min-width: 720px;
+  }
+
+  .admin-yuque-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .admin-yuque-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-yuque-toc,
+  .admin-yuque-doc {
+    max-height: none;
+    min-height: auto;
   }
 }
 

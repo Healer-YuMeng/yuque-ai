@@ -9,7 +9,7 @@ services:
       APP_ENV: production
       HOST: 0.0.0.0
       PORT: 8000
-      FRONTEND_PORT: "${FRONTEND_PORT:-8000}"
+      FRONTEND_PORT: "${HTTPS_PORT:-443}"
       LLM_PROVIDER: "${LLM_PROVIDER:-openai}"
       LLM_MODEL: "${LLM_MODEL:-qwen3.7-plus}"
       LLM_BASE_URL: "${LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
@@ -39,20 +39,44 @@ services:
     image: "${SERVER_DOCKER_REGISTRY:-youwei.tencentcloudcr.com}/${SERVER_DOCKER_NAMESPACE:-yuque-rag-demo}/${FRONTEND_IMAGE_NAME:-yuque-rag-demo-frontend}:${IMAGE_TAG:-latest}"
     container_name: yuque-rag-demo-frontend
     restart: unless-stopped
+    environment:
+      PUBLIC_DOMAIN: "${PUBLIC_DOMAIN:-educhat.youwei-ai.com}"
+      TLS_CERT_PATH_IN_CONTAINER: /etc/nginx/certs/fullchain.pem
+      TLS_KEY_PATH_IN_CONTAINER: /etc/nginx/certs/privkey.pem
+    volumes:
+      - "${TLS_CERT_PATH:-./deploy/certs/fullchain.pem}:/etc/nginx/certs/fullchain.pem:ro"
+      - "${TLS_KEY_PATH:-./deploy/certs/privkey.pem}:/etc/nginx/certs/privkey.pem:ro"
     depends_on:
       backend:
         condition: service_healthy
     ports:
-      - "${FRONTEND_PORT:-8000}:80"
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
     command:
       - /bin/sh
       - -c
       - |
-        cat > /etc/nginx/conf.d/default.conf <<'NGINX'
+        cat > /etc/nginx/conf.d/default.conf <<NGINX
         server {
           listen 80;
-          server_name _;
+          listen [::]:80;
+          server_name $${PUBLIC_DOMAIN};
+          return 301 https://$${PUBLIC_DOMAIN}$$request_uri;
+        }
+
+        server {
+          listen 443 ssl;
+          listen [::]:443 ssl;
+          http2 on;
+          server_name $${PUBLIC_DOMAIN};
           client_max_body_size 500m;
+
+          ssl_certificate $${TLS_CERT_PATH_IN_CONTAINER};
+          ssl_certificate_key $${TLS_KEY_PATH_IN_CONTAINER};
+          ssl_session_timeout 10m;
+          ssl_session_cache shared:SSL:10m;
+          ssl_protocols TLSv1.2 TLSv1.3;
+          ssl_prefer_server_ciphers on;
 
           root /usr/share/nginx/html;
           index index.html;

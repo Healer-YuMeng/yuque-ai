@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, List, Optional, Sequence
 
 from app.conversation.contact_extractor import extract_contact
+from app.conversation.user_info_cleaner import extract_email_text_candidate
 from app.conversation.friend_persona_v5 import build_friend_v5_system_prompt_with_scene_intro, scene_description
 from app.conversation.friend_product_playbook_v5 import scene_name_to_admin_key
 from app.conversation.skill_catalog import SKILL_CATALOG, SkillRoute
 from app.conversation.profile_extractor import ProfileExtractor
 from app.core.config import settings
 from app.core.logger import get_logger
+from app.data.yuque_loader import strip_yuque_leaks_from_text
 from app.db.repositories import ChatMessageRow
 
 logger = get_logger(__name__)
@@ -21,10 +24,12 @@ from app.schemas.chat_v5 import ChatV5DonePayload, FriendV5SourceItem
 from app.service.friend_v5_tags import (
     SCENE_TO_TOC_TITLE,
     FriendV5TagStreamFilter,
+    case_tag_for_scene,
     classify_friend_v5_tag,
     explore_product_tag_for_title,
     explore_product_title_from_tag,
-    fallback_tags_for_scene,
+    guide_tag_for_scene,
+    subdir_explore_tag_for_title,
     scene_for_toc_title,
     price_tag_for_scene,
     product_title_from_tag,
@@ -39,9 +44,20 @@ from app.service.friend_v5_yuque_deep_reader import (
 
 
 _MANUAL_YUQUE_HINT_RE = re.compile(
-    r"(课程|产品|方案|指南|文档|手册|介绍|案例|乐高|AI|人工智能|项目化|招生|实验室|校本)"
+    r"(课程|产品|方案|指南|文档|手册|介绍|案例|乐高|AI|人工智能|项目化|招生|实验室|校本|比赛|赛事|竞赛|认证|证书)"
 )
-_FOLLOWUP_CONFIRM_RE = re.compile(r"^(需要|继续|好|好的|可以|想了解|详细说说|展开|讲讲|要|嗯|行)(?:[，。,.!！?？\s].*)?$")
+_MANUAL_CASE_INTENT_RE = re.compile(
+    r"(?:具体案例|课堂案例|落地案例|真实案例|学校案例|优秀案例|案例库|"
+    r"想看.{0,6}案例|看看.{0,6}案例|了解.{0,6}案例|"
+    r"有没有案例|有哪些案例)"
+)
+_MANUAL_COMPETITION_INTENT_RE = re.compile(r"(?:比赛|赛事|竞赛|认证|证书|考级)")
+_MANUAL_PLATFORM_INTRO_INTENT_RE = re.compile(
+    r"(?:课程大纲|课程体系|课程安排|课程设置|课程内容|课表|师资培训|师训|培训安排|"
+    r"怎么上课|如何上课|课堂怎么组织|课堂组织|实施节奏|落地步骤)"
+)
+_FOLLOWUP_CONFIRM_RE = re.compile(r"^(需要|继续|好|好的|可以|想了解|详细说说|展开|讲讲|要|嗯|行|安排)(?:[，。,.!！?？\s].*)?$")
+_TRIAL_APPLY_AFFIRM_RE = re.compile(r"^(需要|继续|好|好的|可以|要|嗯|行|安排)$")
 _FOLLOWUP_TOPIC_RE = re.compile(r"需要我(?:和你|帮你)?详细介绍(.+?)的内容吗")
 _IDENTITY_FOLLOWUP_LINE = "您这边是校长/负责人，还是老师、家长、学生呢？我按您的关注点来介绍。"
 _IDENTITY_REPEAT_RE = re.compile(
@@ -60,20 +76,44 @@ _GENERIC_FALLBACK_LINE_RE = re.compile(
 )
 _CASE_SECTION_TITLE = "案例与社区"
 _CASE_LIBRARY_TITLE = "优秀案例库"
+_CASE_COMPETITION_TITLE = "相关赛事及认证"
 _PLATFORM_SECTION_TITLE = "平台介绍"
-_GUIDE_SOURCES_HINT = "使用指南中的详细操作链接已整理在下方参考资料，您可点击查阅。"
-_PUBLIC_YUQUE_SHARE_URLS: dict[tuple[str, str], str] = {
-    ("guide", "人工智能通识课程"): "https://www.yuque.com/suesun-yb1bi/sspenu/sbdx665n47rz9rt5?singleDoc#%20《人工智能通识课程》",
-    ("guide", "跨学科项目式学习"): "https://www.yuque.com/suesun-yb1bi/sspenu/dl4rxzdb0ahgq42n?singleDoc#%20《跨学科项目式学习》",
-    ("guide", "智能招生"): "https://www.yuque.com/suesun-yb1bi/sspenu/pmg3pix4w4e6g1zd?singleDoc#%20《智能招生》",
-    ("case", "人工智能通识课程"): "https://www.yuque.com/suesun-yb1bi/sspenu/pynfez9lydaxq7gg?singleDoc#%20《人工智能通识课程》",
-    ("case", "跨学科项目式学习"): "https://www.yuque.com/suesun-yb1bi/sspenu/ztzk0v4ggl934d86?singleDoc#%20《跨学科项目式学习》",
-    ("case", "相关赛事及认证"): "https://www.yuque.com/suesun-yb1bi/sspenu/kfuc54vihosyzlvo?singleDoc#%20《相关赛事及认证》",
-}
+_GUIDE_SOURCES_HINT = "详细资料你可以点击下方参考资料查看。"
+# 推荐标签节奏：转化型标签按对话轮次设最早出现闸门，避免每轮都重复出现
+_CASE_TAG_MIN_TURN = 3
+_TRIAL_TAG_MIN_TURN = 4
 _CASE_KB_FALLBACK_ANSWER = (
     "目前在上海、江苏、成都多所K12学校均有落地实施的具体案例，"
-    "需了解更为具体的案例介绍，方便的话可以留下您的联系方式。"
+    "您可以申请测试账号，我把测试账号发给您。"
 )
+_LEGACY_CONTACT_OFFER_LINE = (
+    "如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。"
+)
+_CONTACT_OFFER_LINE = "您可以申请测试账号，我把测试账号发给您。"
+
+
+class _V5PerformanceTimer:
+    def __init__(self) -> None:
+        now = time.monotonic()
+        self._started_at = now
+        self._last_mark_at = now
+        self._stages_ms: dict[str, int] = {}
+
+    def mark(self, stage: str) -> None:
+        key = (stage or "").strip()
+        if not key:
+            return
+        now = time.monotonic()
+        elapsed_ms = max(0, int(round((now - self._last_mark_at) * 1000)))
+        self._stages_ms[key] = self._stages_ms.get(key, 0) + elapsed_ms
+        self._last_mark_at = now
+
+    def snapshot(self) -> dict[str, Any]:
+        total_ms = max(0, int(round((time.monotonic() - self._started_at) * 1000)))
+        return {
+            "total_ms": total_ms,
+            "stages_ms": dict(self._stages_ms),
+        }
 
 
 @dataclass(frozen=True)
@@ -132,6 +172,7 @@ class FriendDialogOrchestratorV5:
         trigger_type: str,
         history: Sequence[ChatMessageRow],
     ) -> AsyncIterator[dict[str, Any]]:
+        perf_timer = _V5PerformanceTimer()
         yield _stage("profile", "小为正在记住这次对话里的关键信息...")
         profile = await self._profile_repo.get_profile(session_id=session_id)
         update = await self._profile_extractor.extract_update(
@@ -148,6 +189,12 @@ class FriendDialogOrchestratorV5:
                 interests=update.interests,
             )
             profile = await self._profile_repo.get_profile(session_id=session_id)
+            if profile is not None and (update.display_name or update.org_name):
+                profile = await _sync_profile_identity_into_lead(
+                    profile_repo=self._profile_repo,
+                    session_id=session_id,
+                    profile=profile,
+                )
 
         profile = await _persist_contact_from_question(
             profile_repo=self._profile_repo,
@@ -156,6 +203,13 @@ class FriendDialogOrchestratorV5:
             profile=profile,
             scene=scene,
         )
+        profile = await _persist_email_from_question(
+            profile_repo=self._profile_repo,
+            session_id=session_id,
+            question=question,
+            profile=profile,
+        )
+        perf_timer.mark("profile")
 
         deep_read = FriendV5YuqueDeepReadResult()
         scene_query_rewrite: dict[str, Any] = {}
@@ -164,10 +218,7 @@ class FriendDialogOrchestratorV5:
         scene_guide_continuation = False
         if trigger_type == "scene":
             scene_query = toc_title_for_scene(scene)
-            catalog_focus = _resolve_platform_intro_focus(
-                product_title=scene_query,
-                toc_nodes=self._toc_nodes,
-            )
+            catalog_focus = _resolve_scene_default_focus(scene=scene, toc_nodes=self._toc_nodes)
             if catalog_focus is None:
                 catalog_focus = _best_toc_match(
                     question=scene_query,
@@ -214,16 +265,21 @@ class FriendDialogOrchestratorV5:
                 search_keywords=_derive_search_keywords(question),
                 media=deep_read.media,
                 profile_fields=_profile_fields(profile),
+                trial_apply_available=True,
                 fallback_used=False,
-                debug={
-                    "pipeline": "friend_v5",
-                    "scene": scene,
-                    "trigger_type": trigger_type,
-                    "cross_scene_redirect": True,
-                    "redirect_product": product_title,
-                    "tag_route": _tag_route_debug(tag_route),
-                    "conversion_state": tags_result.conversion_state,
-                },
+                debug=_with_performance_debug(
+                    {
+                        "pipeline": "friend_v5",
+                        "scene": scene,
+                        "trigger_type": trigger_type,
+                        "cross_scene_redirect": True,
+                        "redirect_product": product_title,
+                        "tag_route": _tag_route_debug(tag_route),
+                        "conversion_state": tags_result.conversion_state,
+                    },
+                    perf_timer,
+                    final_stage="direct_response",
+                ),
             )
             yield {"event": "done", "data": payload.model_dump()}
             return
@@ -236,6 +292,23 @@ class FriendDialogOrchestratorV5:
         ):
             case_focus, case_query, is_case = _resolve_case_library_focus(
                 product_title=_product_title_from_question(question, scene=scene),
+                scene=scene,
+                history=history,
+                toc_nodes=self._toc_nodes,
+            )
+            if is_case and case_focus is not None:
+                catalog_focus = case_focus
+                scene_query = case_query
+                scene_case_continuation = True
+                case_product_switch = True
+        if (
+            trigger_type != "scene"
+            and not case_product_switch
+            and _looks_like_manual_case_question(question, scene=scene)
+            and not _is_other_scene_root_product(question, scene=scene)
+        ):
+            case_focus, case_query, is_case = _resolve_case_library_focus(
+                product_title=toc_title_for_scene(scene),
                 scene=scene,
                 history=history,
                 toc_nodes=self._toc_nodes,
@@ -261,6 +334,29 @@ class FriendDialogOrchestratorV5:
                 scene_query = guide_query
                 scene_guide_continuation = True
                 guide_product_switch = True
+        if (
+            trigger_type != "scene"
+            and not case_product_switch
+            and not guide_product_switch
+            and _looks_like_competition_question(question)
+        ):
+            competition_focus = _resolve_competition_focus(toc_nodes=self._toc_nodes)
+            if competition_focus is not None:
+                catalog_focus = competition_focus
+                scene_query = _CASE_COMPETITION_TITLE
+        if (
+            trigger_type == "manual"
+            and not case_product_switch
+            and not guide_product_switch
+            and _should_anchor_manual_query_to_scene_platform(question=question, scene=scene)
+        ):
+            platform_focus = _resolve_platform_intro_focus(
+                product_title=toc_title_for_scene(scene),
+                toc_nodes=self._toc_nodes,
+            )
+            if platform_focus is not None:
+                catalog_focus = platform_focus
+                scene_query = toc_title_for_scene(scene) or question
         if tag_route.focus_node is not None and not case_product_switch and not guide_product_switch:
             catalog_focus = tag_route.focus_node
             scene_query = tag_route.target_title or question
@@ -272,8 +368,16 @@ class FriendDialogOrchestratorV5:
                 parsed_tags=[],
                 toc_nodes=self._toc_nodes,
             )
+        topical_container_titles = _topical_container_child_titles(
+            scene=scene,
+            trigger_type=trigger_type,
+            route_kind=tag_route.kind,
+            focus_node=catalog_focus,
+            toc_nodes=self._toc_nodes,
+        )
         case_branch_used = False
         skill_route: Optional[SkillRoute] = None
+        perf_timer.mark("routing")
 
         if tag_route.kind == "price":
             answer = _price_handoff_answer(scene=scene, profile=profile)
@@ -295,26 +399,31 @@ class FriendDialogOrchestratorV5:
                 search_keywords=_derive_search_keywords(question),
                 media=deep_read.media,
                 profile_fields=_profile_fields(profile),
+                trial_apply_available=True,
                 fallback_used=False,
-                debug={
-                    "pipeline": "friend_v5",
-                    "scene": scene,
-                    "trigger_type": trigger_type,
-                    "tag_route": _tag_route_debug(tag_route),
-                    "next_followup_topic": None,
-                    "skill_route": None,
-                    "mcp_route": {"mode": "price_direct"},
-                    "doc_deep_read_used": False,
-                    "doc_deep_read": deep_read.debug,
-                    "case_branch_used": False,
-                    "conversion_state": tags_result.conversion_state,
-                    "search_keyword_count": 1,
-                    "web_source_count": 0,
-                    "yuque_source_count": 0,
-                    "catalog_tag_source": "fixed_v5_navigation",
-                    "catalog_tag_node_count": len(self._toc_nodes),
-                    "catalog_focus_node": _catalog_focus_debug(catalog_focus),
-                },
+                debug=_with_performance_debug(
+                    {
+                        "pipeline": "friend_v5",
+                        "scene": scene,
+                        "trigger_type": trigger_type,
+                        "tag_route": _tag_route_debug(tag_route),
+                        "next_followup_topic": None,
+                        "skill_route": None,
+                        "mcp_route": {"mode": "price_direct"},
+                        "doc_deep_read_used": False,
+                        "doc_deep_read": deep_read.debug,
+                        "case_branch_used": False,
+                        "conversion_state": tags_result.conversion_state,
+                        "search_keyword_count": 1,
+                        "web_source_count": 0,
+                        "yuque_source_count": 0,
+                        "catalog_tag_source": "fixed_v5_navigation",
+                        "catalog_tag_node_count": len(self._toc_nodes),
+                        "catalog_focus_node": _catalog_focus_debug(catalog_focus),
+                    },
+                    perf_timer,
+                    final_stage="direct_response",
+                ),
             )
             yield {"event": "done", "data": payload.model_dump()}
             return
@@ -417,15 +526,24 @@ class FriendDialogOrchestratorV5:
             and self._yuque_deep_reader
             and catalog_focus
             and tag_route.kind != "case"
+            and not topical_container_titles
         ):
             mcp_route = _mcp_route_debug(f"tag_{tag_route.kind or 'toc'}", scene_query or question, catalog_focus)
             yield _stage("yuque_deep_read", "小为正在读取语雀文档正文和图文视频...")
             try:
-                deep_read = await _read_deep_by_focus_or_query(
-                    reader=self._yuque_deep_reader,
-                    focus=catalog_focus,
-                    question=scene_query or question,
-                )
+                if tag_route.kind == "guide":
+                    deep_read = await _read_guide_deep_by_query_or_focus(
+                        reader=self._yuque_deep_reader,
+                        focus=catalog_focus,
+                        scene=scene,
+                        question=question,
+                    )
+                else:
+                    deep_read = await _read_deep_by_focus_or_query(
+                        reader=self._yuque_deep_reader,
+                        focus=catalog_focus,
+                        question=scene_query or question,
+                    )
             except Exception:
                 deep_read = FriendV5YuqueDeepReadResult(debug={"mode": "deep_read_error"})
 
@@ -434,7 +552,11 @@ class FriendDialogOrchestratorV5:
             and trigger_type == "manual"
             and self._yuque_deep_reader
             and catalog_focus
-            and (followup_topic or self._should_lookup_yuque(question=question, trigger_type=trigger_type))
+            and (
+                followup_topic
+                or self._should_lookup_yuque(question=question, trigger_type=trigger_type)
+                or _should_anchor_manual_query_to_scene_platform(question=question, scene=scene)
+            )
         ):
             mcp_route = _mcp_route_debug("followup_topic" if followup_topic else "manual_toc", scene_query or question, catalog_focus)
             yield _stage("yuque_deep_read", "小为正在读取语雀文档正文和图文视频...")
@@ -475,6 +597,13 @@ class FriendDialogOrchestratorV5:
         if not deep_read.used and self._should_lookup_yuque(question=question, trigger_type=trigger_type):
             yield _stage("yuque_links", "小为正在找相关语雀补充阅读入口...")
             yuque_sources = await self._lookup_yuque_sources(question)
+        if tag_route.kind == "guide" or scene_guide_continuation:
+            guide_reference_query = _guide_reference_query(question=question, scene=scene)
+            if guide_reference_query:
+                guide_reference_sources = await self._lookup_yuque_sources(guide_reference_query)
+                if guide_reference_sources:
+                    yuque_sources = _dedupe_sources([*guide_reference_sources, *yuque_sources], existing=[])
+        perf_timer.mark("yuque")
 
         skill_route = route_skill(question)
         if skill_route is None and deep_read.used:
@@ -507,33 +636,44 @@ class FriendDialogOrchestratorV5:
                 search_keywords=_derive_search_keywords(question),
                 media=deep_read.media,
                 profile_fields=_profile_fields(profile),
+                trial_apply_available=_should_offer_trial_apply(
+                    question=question,
+                    history=history,
+                    profile=profile,
+                    route_kind="case",
+                    answer=answer,
+                ),
                 fallback_used=True,
-                debug={
-                    "pipeline": "friend_v5",
-                    "scene": scene,
-                    "trigger_type": trigger_type,
-                    "scene_query_rewrite": scene_query_rewrite,
-                    "tag_route": _tag_route_debug(tag_route),
-                    "scene_case_continuation": scene_case_continuation,
-                    "scene_guide_continuation": scene_guide_continuation,
-                    "case_product_switch": case_product_switch,
-                    "guide_product_switch": guide_product_switch,
-                    "web_search_fallback_enabled": False,
-                    "skill_route": None,
-                    "mcp_route": mcp_route,
-                    "doc_deep_read_used": False,
-                    "doc_deep_read": deep_read.debug,
-                    "case_toc_miss": tag_route.kind == "case" and not deep_read.used,
-                    "case_branch_used": case_branch_used,
-                    "case_kb_fallback": True,
-                    "conversion_state": tags_result.conversion_state,
-                    "search_keyword_count": len(_derive_search_keywords(question)),
-                    "web_source_count": 0,
-                    "yuque_source_count": 0,
-                    "catalog_tag_source": "fixed_v5_navigation",
-                    "catalog_tag_node_count": len(self._toc_nodes),
-                    "catalog_focus_node": _catalog_focus_debug(catalog_focus),
-                },
+                debug=_with_performance_debug(
+                    {
+                        "pipeline": "friend_v5",
+                        "scene": scene,
+                        "trigger_type": trigger_type,
+                        "scene_query_rewrite": scene_query_rewrite,
+                        "tag_route": _tag_route_debug(tag_route),
+                        "scene_case_continuation": scene_case_continuation,
+                        "scene_guide_continuation": scene_guide_continuation,
+                        "case_product_switch": case_product_switch,
+                        "guide_product_switch": guide_product_switch,
+                        "web_search_fallback_enabled": False,
+                        "skill_route": None,
+                        "mcp_route": mcp_route,
+                        "doc_deep_read_used": False,
+                        "doc_deep_read": deep_read.debug,
+                        "case_toc_miss": tag_route.kind == "case" and not deep_read.used,
+                        "case_branch_used": case_branch_used,
+                        "case_kb_fallback": True,
+                        "conversion_state": tags_result.conversion_state,
+                        "search_keyword_count": len(_derive_search_keywords(question)),
+                        "web_source_count": 0,
+                        "yuque_source_count": 0,
+                        "catalog_tag_source": "fixed_v5_navigation",
+                        "catalog_tag_node_count": len(self._toc_nodes),
+                        "catalog_focus_node": _catalog_focus_debug(catalog_focus),
+                    },
+                    perf_timer,
+                    final_stage="direct_response",
+                ),
             )
             yield {"event": "done", "data": payload.model_dump()}
             return
@@ -584,6 +724,10 @@ class FriendDialogOrchestratorV5:
             case_answer_mode=case_answer_mode,
             case_toc_miss=tag_route.kind == "case" and not deep_read.used,
             product_focus=tag_route.target_title or "",
+            directory_overview=_directory_overview_prompt_block(
+                focus_node=catalog_focus,
+                child_titles=topical_container_titles,
+            ),
         )
         parser = FriendV5TagStreamFilter(scene=scene)
         answer_parts: List[str] = []
@@ -592,6 +736,7 @@ class FriendDialogOrchestratorV5:
 
         # 语雀深读未命中时，是否开启模型联网搜索兜底（可由开关控制）
         enable_web_search = (not deep_read.used) and settings.chat_v5_web_search_enabled
+        perf_timer.mark("prompt_build")
         try:
             stream_iter = self._generator.stream(
                 system_prompt=system_prompt,
@@ -612,12 +757,15 @@ class FriendDialogOrchestratorV5:
                 if visible:
                     answer_parts.append(visible)
                     yield {"event": "token", "data": {"token": visible}}
+        perf_timer.mark("generation")
 
         parsed = parser.finish()
         answer = parsed.answer or "".join(answer_parts).strip()
         answer = _strip_inline_urls(answer)
         answer = _strip_internal_status_leaks(answer)
         answer = _soften_assumptive_phrasing(answer)
+        answer = _normalize_lead_confirmation_phrasing(answer)
+        answer = _strip_knowledge_gap_disclaimer(answer)
 
         source_items = _dedupe_sources(_source_urls_to_items(parsed.source_urls), existing=web_sources)
         if source_items:
@@ -659,6 +807,16 @@ class FriendDialogOrchestratorV5:
             history=history,
             trigger_type=trigger_type,
         )
+        answer = _normalize_contact_offer_copy(answer)
+        trial_apply_available = _should_offer_trial_apply(
+            question=question,
+            history=history,
+            profile=profile,
+            route_kind=tag_route.kind,
+            answer=answer,
+        )
+        if trial_apply_available and not _contact_offer_already_present(answer, history):
+            answer = _append_contact_offer(answer)
         rhythm_tags = _apply_recommendation_tag_rhythm(
             content_tags=catalog_tags.tags,
             question=question,
@@ -681,39 +839,43 @@ class FriendDialogOrchestratorV5:
             search_keywords=merged_keywords,
             media=display_media,
             profile_fields=_profile_fields(profile),
+            trial_apply_available=trial_apply_available,
             fallback_used=False,
-            debug={
-                "pipeline": "friend_v5",
-                "scene": scene,
-                "trigger_type": trigger_type,
-                "scene_query_rewrite": scene_query_rewrite,
-                "tag_route": _tag_route_debug(tag_route),
-                "scene_case_continuation": scene_case_continuation,
-                "scene_guide_continuation": scene_guide_continuation,
-                "case_product_switch": case_product_switch,
-                "guide_product_switch": guide_product_switch,
-                "next_followup_topic": next_followup_topic,
-                "followup_sibling_topic": followup_sibling_topic,
-                "web_search_fallback_enabled": enable_web_search,
-                "skill_route": _skill_route_debug(skill_route),
-                "mcp_route": mcp_route,
-                "doc_deep_read_used": bool(deep_read.used),
-                "media_suppressed": media_suppressed,
-                "admin_scene_video_count": len(admin_scene_media.videos),
-                "admin_scene_video_scene": admin_media_scene,
-                "media_display_mode": media_display_mode,
-                "media_intro": media_intro,
-                "doc_deep_read": deep_read.debug,
-                "case_toc_miss": tag_route.kind == "case" and not deep_read.used,
-                "case_branch_used": case_branch_used,
-                "conversion_state": rhythm_tags.conversion_state,
-                "search_keyword_count": len(merged_keywords),
-                "web_source_count": len([item for item in merged_sources if item.source_type == "web"]),
-                "yuque_source_count": len([item for item in merged_sources if item.source_type == "yuque"]),
-                "catalog_tag_source": "fixed_v5_navigation",
-                "catalog_tag_node_count": len(self._toc_nodes),
-                "catalog_focus_node": _catalog_focus_debug(catalog_tags.focus_node),
-            },
+            debug=_with_performance_debug(
+                {
+                    "pipeline": "friend_v5",
+                    "scene": scene,
+                    "trigger_type": trigger_type,
+                    "scene_query_rewrite": scene_query_rewrite,
+                    "tag_route": _tag_route_debug(tag_route),
+                    "scene_case_continuation": scene_case_continuation,
+                    "scene_guide_continuation": scene_guide_continuation,
+                    "case_product_switch": case_product_switch,
+                    "guide_product_switch": guide_product_switch,
+                    "next_followup_topic": next_followup_topic,
+                    "followup_sibling_topic": followup_sibling_topic,
+                    "web_search_fallback_enabled": enable_web_search,
+                    "skill_route": _skill_route_debug(skill_route),
+                    "mcp_route": mcp_route,
+                    "doc_deep_read_used": bool(deep_read.used),
+                    "media_suppressed": media_suppressed,
+                    "admin_scene_video_count": len(admin_scene_media.videos),
+                    "admin_scene_video_scene": admin_media_scene,
+                    "media_display_mode": media_display_mode,
+                    "media_intro": media_intro,
+                    "doc_deep_read": deep_read.debug,
+                    "case_toc_miss": tag_route.kind == "case" and not deep_read.used,
+                    "case_branch_used": case_branch_used,
+                    "conversion_state": rhythm_tags.conversion_state,
+                    "search_keyword_count": len(merged_keywords),
+                    "web_source_count": len([item for item in merged_sources if item.source_type == "web"]),
+                    "yuque_source_count": len([item for item in merged_sources if item.source_type == "yuque"]),
+                    "catalog_tag_source": "fixed_v5_navigation",
+                    "catalog_tag_node_count": len(self._toc_nodes),
+                    "catalog_focus_node": _catalog_focus_debug(catalog_tags.focus_node),
+                },
+                perf_timer,
+            ),
         )
         yield {"event": "done", "data": payload.model_dump()}
 
@@ -731,6 +893,7 @@ class FriendDialogOrchestratorV5:
         case_answer_mode: bool = False,
         case_toc_miss: bool = False,
         product_focus: str = "",
+        directory_overview: str = "",
     ) -> str:
         hist_lines: List[str] = []
         for row in list(history)[-8:]:
@@ -779,6 +942,7 @@ class FriendDialogOrchestratorV5:
             f"【最近对话】\n{chr(10).join(hist_lines) if hist_lines else '（暂无）'}\n\n"
             f"【语雀补充阅读链接】\n{chr(10).join(yuque_lines) if yuque_lines else '（本轮不提供语雀链接）'}\n\n"
             f"{deep_block + chr(10) + chr(10) if deep_read.used else ''}"
+            f"{directory_overview + chr(10) + chr(10) if directory_overview else ''}"
             f"{skill_block}"
             f"【用户这轮想了解】\n{question}\n\n"
             f"{yuque_instruction}"
@@ -836,6 +1000,18 @@ def _stage(stage: str, detail: str) -> dict[str, Any]:
     return {"event": "stage", "data": {"stage": stage, "detail": detail}}
 
 
+def _with_performance_debug(
+    debug: dict[str, Any],
+    timer: _V5PerformanceTimer,
+    *,
+    final_stage: str = "finalize",
+) -> dict[str, Any]:
+    timer.mark(final_stage)
+    out = dict(debug)
+    out["performance"] = timer.snapshot()
+    return out
+
+
 def _profile_fields(profile: Any) -> dict[str, Any]:
     if profile is None:
         return {}
@@ -871,6 +1047,230 @@ def _profile_block(profile: Any) -> str:
     if interests and not lines:
         lines.append(f"兴趣参考：{interests}")
     return "\n".join(lines) if lines else "（暂无）"
+
+
+def _lead_already_collected(profile: Any) -> bool:
+    interests = getattr(profile, "interests", None)
+    if not isinstance(interests, dict):
+        return False
+    lead = interests.get("_lead")
+    if not isinstance(lead, dict):
+        return False
+    if str(lead.get("contact_value") or "").strip():
+        return True
+    if str(lead.get("email") or "").strip():
+        return True
+    return False
+
+
+def _contact_offer_line(*, deliverable: str = "测试账号") -> str:
+    item = (deliverable or "测试账号").strip() or "测试账号"
+    return f"您可以申请测试账号，我把{item}发给您。"
+
+
+def _history_has_contact_offer(history: Sequence[ChatMessageRow]) -> bool:
+    markers = (_CONTACT_OFFER_LINE, _LEGACY_CONTACT_OFFER_LINE, "您可以申请测试账号", "申请测试账号")
+    for row in history[-8:]:
+        if getattr(row, "role", "") != "assistant":
+            continue
+        content = str(getattr(row, "content", "") or "")
+        if any(marker in content for marker in markers):
+            return True
+    return False
+
+
+def _is_strong_lead_intent(question: str, route_kind: str) -> bool:
+    if route_kind in {"price", "trial"}:
+        return True
+    text = (question or "").strip()
+    if not text:
+        return False
+    return bool(
+        re.search(
+            r"(价格|报价|费用|试用|测试账号|合作|落地|采购|对接|联系方式|联系[一-龥]{0,4}方式|电话|微信|试一试(?:这个)?产品|想试一试(?:这个)?产品|体验(?:一下)?产品)",
+            text,
+        )
+    )
+
+
+def _is_trial_apply_followup_confirmation(question: str, history: Sequence[ChatMessageRow]) -> bool:
+    text = (question or "").strip()
+    if not text or not _FOLLOWUP_CONFIRM_RE.match(text):
+        return False
+    for row in reversed(history[-6:]):
+        if getattr(row, "role", "") != "assistant":
+            continue
+        content = str(getattr(row, "content", "") or "")
+        if "测试账号" in content and (
+            "需要我帮您安排" in content
+            or "申请一个测试账号" in content
+            or "申请个测试账号" in content
+            or "上手试试" in content
+            or "我帮您安排" in content
+            or "帮您登记安排" in content
+            or "您可以先申请" in content
+            or _CONTACT_OFFER_LINE in content
+            or "您可以申请测试账号" in content
+        ):
+            return True
+    return False
+
+
+def _normalize_contact_offer_copy(text: str) -> str:
+    out = (text or "").strip()
+    if not out:
+        return out
+    out = out.replace(_LEGACY_CONTACT_OFFER_LINE, _CONTACT_OFFER_LINE)
+    out = out.replace("如果您现在不方便继续看，也可以先申请测试账号。", _CONTACT_OFFER_LINE)
+    out = re.sub(r"我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。?", "", out)
+    out = out.replace("如果您有需求，可以点击下方申请按钮，留下您的联系方式！", _CONTACT_OFFER_LINE)
+    out = out.replace("您可以点击下方申请按钮，留下您的联系方式！", _CONTACT_OFFER_LINE)
+    out = re.sub(
+        r"您方便留个邮箱吗[？?]?我把(.+?)发您参考[。.]?",
+        lambda match: _contact_offer_line(deliverable=match.group(1)),
+        out,
+    )
+    out = re.sub(
+        r"您方便留个(?:邮箱|联系方式|微信|电话)吗[？?]?",
+        _CONTACT_OFFER_LINE,
+        out,
+    )
+    out = re.sub(
+        r"我这里有一份完整案例资料，可以发给您参考。[。.]?",
+        _contact_offer_line(deliverable="完整案例资料") + "。",
+        out,
+    )
+    out = re.sub(
+        r"案例细节比较多，我稍后结合您的学校场景，整理一份针对性的介绍发您参考[？?]?",
+        _contact_offer_line(deliverable="针对性的介绍"),
+        out,
+    )
+    out = re.sub(
+        r"您这边方便提供一下学校名称和联系方式吗[？?]我帮您安排开通[。.]?",
+        _CONTACT_OFFER_LINE,
+        out,
+    )
+    out = re.sub(
+        r"您这边方便提供一下(?:学校名称和)?联系方式吗[？?](?:我帮您安排开通[。.]?)?",
+        _CONTACT_OFFER_LINE,
+        out,
+    )
+    out = re.sub(
+        r"麻烦发下学校名称和联系方式[，,]我让顾问把账号发您[，,]后续有不清楚的随时问[。.]?",
+        _CONTACT_OFFER_LINE,
+        out,
+    )
+    out = re.sub(
+        r"麻烦发下(?:学校名称和)?联系方式[，,]我让顾问把账号发您[。.]?",
+        _CONTACT_OFFER_LINE,
+        out,
+    )
+    out = re.sub(rf"(?:{re.escape(_CONTACT_OFFER_LINE)}\s*){{2,}}", _CONTACT_OFFER_LINE, out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
+def _recent_assistant_invited_trial_apply(history: Sequence[ChatMessageRow]) -> bool:
+    invite_markers = (
+        _CONTACT_OFFER_LINE,
+        "您可以申请测试账号",
+        "申请测试账号",
+        "申请一个测试账号",
+        "申请个测试账号",
+        "需要我帮您安排",
+        "我帮您安排",
+        "帮您登记安排",
+        "您可以先申请",
+    )
+    for row in reversed(history[-8:]):
+        if getattr(row, "role", "") != "assistant":
+            continue
+        content = str(getattr(row, "content", "") or "")
+        if "测试账号" in content and any(marker in content for marker in invite_markers):
+            return True
+    return False
+
+
+def _user_affirms_trial_invite(question: str, *, history: Sequence[ChatMessageRow]) -> bool:
+    text = (question or "").strip()
+    if not text or not _TRIAL_APPLY_AFFIRM_RE.match(text):
+        return False
+    return _recent_assistant_invited_trial_apply(history)
+
+
+def _contact_offer_already_present(answer: str, history: Sequence[ChatMessageRow]) -> bool:
+    base = (answer or "").strip()
+    if _CONTACT_OFFER_LINE in base or "您可以申请测试账号" in base:
+        return True
+    return _history_has_contact_offer(history)
+
+
+def _answer_contains_contact_offer(answer: str) -> bool:
+    base = (answer or "").strip()
+    if not base:
+        return False
+    if _CONTACT_OFFER_LINE in base:
+        return True
+    legacy = _CONTACT_OFFER_LINE.rstrip("。")
+    return legacy in base or "您可以申请测试账号" in base
+
+
+def _should_offer_trial_apply(
+    *,
+    question: str,
+    history: Sequence[ChatMessageRow],
+    profile: Any,
+    route_kind: str,
+    answer: str = "",
+) -> bool:
+    if _lead_already_collected(profile):
+        return False
+    if _is_strong_lead_intent(question, route_kind):
+        return True
+    if _is_trial_apply_followup_confirmation(question, history):
+        return True
+    if _user_affirms_trial_invite(question, history=history):
+        return True
+    if _answer_contains_contact_offer(answer):
+        return True
+    if _v5_turn_index(history) >= 5 and not _history_has_contact_offer(history):
+        return True
+    return False
+
+
+def _append_contact_offer(answer: str) -> str:
+    base = _normalize_contact_offer_copy(answer)
+    if not base:
+        return _CONTACT_OFFER_LINE
+    if _CONTACT_OFFER_LINE in base:
+        return base
+    return f"{base}\n\n{_CONTACT_OFFER_LINE}"
+
+
+async def _sync_profile_identity_into_lead(
+    *,
+    profile_repo: Any,
+    session_id: str,
+    profile: Any,
+) -> Any:
+    interests = dict(profile.interests) if profile and isinstance(getattr(profile, "interests", None), dict) else {}
+    lead = dict(interests.get("_lead") or {})
+    if not lead:
+        return profile
+    changed = False
+    display_name = str(getattr(profile, "display_name", "") or "").strip()
+    org_name = str(getattr(profile, "org_name", "") or "").strip()
+    if display_name and lead.get("name") != display_name:
+        lead["name"] = display_name
+        changed = True
+    if org_name and lead.get("org_name") != org_name:
+        lead["org_name"] = org_name
+        changed = True
+    if not changed:
+        return profile
+    interests["_lead"] = lead
+    await profile_repo.upsert_profile(session_id=session_id, interests=interests)
+    return await profile_repo.get_profile(session_id=session_id)
 
 
 def _source_urls_to_items(urls: list[str]) -> list[FriendV5SourceItem]:
@@ -932,6 +1332,9 @@ def _rewrite_public_yuque_sources(
         if not is_yuque_source:
             rewritten.append(item)
             continue
+        if _yuque_doc_identity(url) and _yuque_doc_identity(url) != _yuque_doc_identity(public_url):
+            rewritten.append(item.model_copy(update={"source_type": "yuque"}))
+            continue
         rewritten.append(
             item.model_copy(
                 update={
@@ -945,12 +1348,36 @@ def _rewrite_public_yuque_sources(
 
 
 def _public_yuque_share_url_for_focus(focus: Optional[dict[str, Any]]) -> str:
+    """使用指南 / 优秀案例库 命中的聚焦节点，直接用其语雀 TOC 链接生成对外分享地址。
+
+    整库已公开分享，故无需维护写死的 URL 白名单——目录更新后链接自动跟随。
+    """
+    if not focus:
+        return ""
     path = [str(item or "").strip() for item in (focus or {}).get("path") or [] if str(item or "").strip()]
     directory = _public_yuque_share_directory(path)
-    title = _public_yuque_share_title(path)
-    if not directory or not title:
+    if not directory:
         return ""
-    return _PUBLIC_YUQUE_SHARE_URLS.get((directory, title), "")
+    url = str((focus or {}).get("url") or "").strip()
+    if not url or "yuque.com/" not in url:
+        return ""
+    return _ensure_yuque_single_doc(url)
+
+
+def _ensure_yuque_single_doc(url: str) -> str:
+    value = (url or "").strip()
+    if not value or "singleDoc" in value:
+        return value
+    sep = "&" if "?" in value else "?"
+    return f"{value}{sep}singleDoc"
+
+
+def _yuque_doc_identity(url: str) -> str:
+    value = (url or "").strip()
+    if not value:
+        return ""
+    value = value.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    return value.lower()
 
 
 def _public_yuque_share_title_for_focus(focus: Optional[dict[str, Any]]) -> str:
@@ -1001,6 +1428,16 @@ def _derive_search_keywords(question: str) -> List[str]:
     return _dedupe_keywords([question])
 
 
+def _guide_reference_query(*, question: str, scene: str) -> str:
+    raw = (question or "").strip()
+    if not raw:
+        return ""
+    if "使用指南" in raw:
+        return raw
+    title = toc_title_for_scene(scene)
+    return f"{title} 使用指南".strip() if title else raw
+
+
 def _apply_recommendation_tag_rhythm(
     *,
     content_tags: Sequence[str],
@@ -1019,48 +1456,160 @@ def _apply_recommendation_tag_rhythm(
         mapped_scene = scene_for_toc_title(explored)
         if mapped_scene:
             effective_scene = mapped_scene
-    tags = fallback_tags_for_scene(effective_scene)
+
+    topical_exploration = _topical_container_explore_tags(
+        scene=effective_scene,
+        trigger_type=trigger_type,
+        route_kind=route_kind,
+        focus_node=focus_node,
+        toc_nodes=toc_nodes,
+    )
+    if topical_exploration:
+        return _TagRhythmResult(
+            tags=_dedupe_tag_list([subdir_explore_tag_for_title(title) for title in topical_exploration if title])[:3],
+            conversion_state=_conversion_state(
+                turn_index=turn_index,
+                stage="topical_container_exploration",
+                trigger_type=trigger_type,
+                route_kind=route_kind,
+                seen_guide=False,
+                seen_case=False,
+                case_allowed=False,
+                trial_allowed=False,
+            ),
+        )
+
     seen_guide = route_kind == "guide" or _history_has_tag_kind(history=history, scene=effective_scene, kind="guide")
     seen_case = route_kind == "case" or _history_has_tag_kind(history=history, scene=effective_scene, kind="case")
-    stage = "fixed_entry"
 
-    if seen_guide:
-        tags[0] = price_tag_for_scene(effective_scene)
-        stage = "guide_to_price"
-
-    used_explore_products = False
-    # 仅在「刚看完优秀案例库」这一轮展示其他产品的探索标签；后续恢复常规节奏
+    # 刚看完优秀案例库这一轮：横向推荐平台介绍下的其他产品，引导发现更多场景
     if route_kind == "case":
         explore_tags = _platform_intro_explore_tags(scene=effective_scene, toc_nodes=toc_nodes, limit=3)
         if explore_tags:
-            tags = explore_tags
-            used_explore_products = True
-            stage = "case_to_explore_products"
-        else:
-            tags[0] = price_tag_for_scene(effective_scene)
-            stage = "case_to_price"
+            return _TagRhythmResult(
+                tags=_dedupe_tag_list(explore_tags)[:3],
+                conversion_state=_conversion_state(
+                    turn_index=turn_index,
+                    stage="case_to_explore_products",
+                    trigger_type=trigger_type,
+                    route_kind=route_kind,
+                    seen_guide=seen_guide,
+                    seen_case=seen_case,
+                    case_allowed=True,
+                    trial_allowed=turn_index >= _TRIAL_TAG_MIN_TURN,
+                ),
+            )
 
-    if not used_explore_products:
-        tags[2] = trial_tag_for_scene(effective_scene)
-    tags = _dedupe_tag_list(tags)[:3]
-    if len(tags) < 3 and not used_explore_products:
-        for fallback in fallback_tags_for_scene(effective_scene):
+    # 转化型标签的轮次闸门：第 N 轮起才允许进入候选，更早的轮次用目录探索标签顶上
+    case_allowed = turn_index >= _CASE_TAG_MIN_TURN
+    trial_allowed = turn_index >= _TRIAL_TAG_MIN_TURN
+
+    # 第 1 位主导航：看过使用指南后切换为价格，否则为使用指南
+    tags: List[str] = [price_tag_for_scene(effective_scene) if seen_guide else guide_tag_for_scene(effective_scene)]
+    if case_allowed:
+        tags.append(case_tag_for_scene(effective_scene))
+    if trial_allowed:
+        tags.append(trial_tag_for_scene(effective_scene))
+
+    # 闸门未开 / 仍有空位：用「当前目录自己目录下的子目录」补齐（动态 TOC）；
+    # 排除左侧四个平级场景标题，避免把同级场景误当作子目录推荐。
+    exploration = _scene_subdir_explore_tags(
+        scene=effective_scene,
+        focus_node=focus_node,
+        toc_nodes=toc_nodes,
+    )
+    if not exploration:
+        exploration = _clean_content_tags(content_tags)
+    scene_title_norms = _scene_title_norms()
+    seen_wrapped_subdir_norms = _history_wrapped_subdir_title_norms(history)
+    current_wrapped_subdir_norm = _norm_for_match(_wrapped_subdir_title_from_tag(question))
+    if current_wrapped_subdir_norm and trigger_type == "tag":
+        seen_wrapped_subdir_norms = set(seen_wrapped_subdir_norms)
+        seen_wrapped_subdir_norms.add(current_wrapped_subdir_norm)
+    suppressed_seen_subdir = False
+    if trigger_type in {"manual", "tag"} and seen_wrapped_subdir_norms:
+        filtered_exploration: List[str] = []
+        for raw_title in exploration:
+            if _norm_for_match(raw_title) in seen_wrapped_subdir_norms:
+                suppressed_seen_subdir = True
+                continue
+            filtered_exploration.append(raw_title)
+        exploration = filtered_exploration
+    if suppressed_seen_subdir:
+        case_tag = case_tag_for_scene(effective_scene)
+        tags = [item for item in tags if _norm_for_match(item) != _norm_for_match(case_tag)]
+        trial_tag = trial_tag_for_scene(effective_scene)
+        if _norm_for_match(trial_tag) not in {_norm_for_match(item) for item in tags}:
+            tags.append(trial_tag)
+    for raw_title in exploration:
+        if len(tags) >= 3:
+            break
+        if _norm_for_match(raw_title) in scene_title_norms:
+            continue
+        tag = subdir_explore_tag_for_title(raw_title)
+        if not tag:
+            continue
+        if _norm_for_match(tag) not in {_norm_for_match(item) for item in tags}:
+            tags.append(tag)
+    # 无任何可探索目录时，用转化型标签兜底补齐（第 1 位已是指南/价格，不再重复）
+    if len(tags) < 3:
+        fallback_order = (
+            (trial_tag_for_scene(effective_scene), case_tag_for_scene(effective_scene))
+            if suppressed_seen_subdir
+            else (case_tag_for_scene(effective_scene), trial_tag_for_scene(effective_scene))
+        )
+        for fallback in fallback_order:
             if len(tags) >= 3:
                 break
-            if _norm_for_match(fallback) not in {_norm_for_match(tag) for tag in tags}:
+            if _norm_for_match(fallback) not in {_norm_for_match(item) for item in tags}:
                 tags.append(fallback)
+    tags = _dedupe_tag_list(tags)[:3]
+
+    if seen_guide and case_allowed and trial_allowed:
+        stage = "full_funnel"
+    elif seen_guide:
+        stage = "guide_to_price"
+    elif case_allowed or trial_allowed:
+        stage = "conversion_unlocked"
+    else:
+        stage = "exploration_only"
 
     return _TagRhythmResult(
         tags=tags,
-        conversion_state={
-            "turn_index": turn_index,
-            "stage": stage,
-            "trigger_type": trigger_type,
-            "tag_route_kind": route_kind,
-            "seen_guide": seen_guide,
-            "seen_case": seen_case,
-        },
+        conversion_state=_conversion_state(
+            turn_index=turn_index,
+            stage=stage,
+            trigger_type=trigger_type,
+            route_kind=route_kind,
+            seen_guide=seen_guide,
+            seen_case=seen_case,
+            case_allowed=case_allowed,
+            trial_allowed=trial_allowed,
+        ),
     )
+
+
+def _conversion_state(
+    *,
+    turn_index: int,
+    stage: str,
+    trigger_type: str,
+    route_kind: str,
+    seen_guide: bool,
+    seen_case: bool,
+    case_allowed: bool,
+    trial_allowed: bool,
+) -> dict[str, Any]:
+    return {
+        "turn_index": turn_index,
+        "stage": stage,
+        "trigger_type": trigger_type,
+        "tag_route_kind": route_kind,
+        "seen_guide": seen_guide,
+        "seen_case": seen_case,
+        "case_allowed": case_allowed,
+        "trial_allowed": trial_allowed,
+    }
 
 
 def _v5_turn_index(history: Sequence[ChatMessageRow]) -> int:
@@ -1127,8 +1676,7 @@ def _media_display_mode_for_turn(media: ChatMediaBundle) -> str:
 def _media_intro_for_turn(*, scene: str, media: ChatMediaBundle) -> str:
     if not media.videos:
         return ""
-    title = toc_title_for_scene(scene)
-    return f"可以先看这段{title}的演示视频，直观感受一下实际效果。"
+    return "您可以先通过下面这个视频，了解咱们这个产品及其应用场景。"
 
 
 async def _load_admin_scene_media(
@@ -1250,6 +1798,10 @@ def _resolve_tag_route(
     if explore_title:
         focus = _resolve_platform_intro_focus(product_title=explore_title, toc_nodes=toc_nodes)
         return _TagRouteResult(kind="explore_product", target_title=explore_title, focus_node=focus)
+    wrapped_subdir_title = _wrapped_subdir_title_from_tag(question)
+    if wrapped_subdir_title:
+        focus = _focus_by_mapped_tag(question=wrapped_subdir_title, toc_nodes=toc_nodes)
+        return _TagRouteResult(kind="toc", target_title=wrapped_subdir_title, focus_node=focus)
     focus = _best_toc_match(question=question, scene="", parsed_tags=[], toc_nodes=toc_nodes)
     return _TagRouteResult(kind="toc", target_title=(question or "").strip(), focus_node=focus)
 
@@ -1289,6 +1841,19 @@ def _history_has_seen_guide(history: Sequence[ChatMessageRow]) -> bool:
     return _history_active_content_branch(history) == "guide"
 
 
+def _wrapped_subdir_title_from_tag(tag: str) -> str:
+    raw = (tag or "").strip()
+    match = re.match(r"^想看看(.+?)？$", raw)
+    if not match:
+        return ""
+    title = (match.group(1) or "").strip()
+    if not title:
+        return ""
+    if "的产品的" in title:
+        return ""
+    return title
+
+
 def _history_active_content_branch(history: Sequence[ChatMessageRow]) -> Optional[str]:
     active: Optional[str] = None
     for row in history:
@@ -1299,6 +1864,18 @@ def _history_active_content_branch(history: Sequence[ChatMessageRow]) -> Optiona
         if kind in {"case", "guide"}:
             active = kind
     return active
+
+
+def _history_wrapped_subdir_title_norms(history: Sequence[ChatMessageRow]) -> set[str]:
+    out: set[str] = set()
+    for row in history:
+        if getattr(row, "role", "") != "user":
+            continue
+        title = _wrapped_subdir_title_from_tag(str(getattr(row, "content", "") or ""))
+        norm = _norm_for_match(title)
+        if norm:
+            out.add(norm)
+    return out
 
 
 def _resolve_guide_focus(
@@ -1326,6 +1903,29 @@ def _resolve_platform_intro_focus(
     return _focus_under_path([_PLATFORM_SECTION_TITLE, title], toc_nodes)
 
 
+def _resolve_scene_default_focus(
+    *,
+    scene: str,
+    toc_nodes: Sequence[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """场景入口默认聚焦节点。
+
+    人工智能通识教育默认先落到「腾讯青少年人工智能课程」正文；
+    其他场景保持原有的场景总目录聚焦。
+    """
+    scene_title = toc_title_for_scene(scene)
+    focus = _resolve_platform_intro_focus(product_title=scene_title, toc_nodes=toc_nodes)
+    if not focus:
+        return None
+    if _norm_for_match(scene) != _norm_for_match("人工智能通识教育"):
+        return focus
+    preferred = _focus_under_path(
+        [_PLATFORM_SECTION_TITLE, scene_title, "腾讯青少年人工智能课程"],
+        toc_nodes,
+    )
+    return preferred or focus
+
+
 async def _persist_contact_from_question(
     *,
     profile_repo: Any,
@@ -1347,6 +1947,26 @@ async def _persist_contact_from_question(
     )
     if not str(lead.get("interested_product") or "").strip():
         lead["interested_product"] = toc_title_for_scene(scene)
+    interests["_lead"] = lead
+    await profile_repo.upsert_profile(session_id=session_id, interests=interests)
+    return await profile_repo.get_profile(session_id=session_id)
+
+
+async def _persist_email_from_question(
+    *,
+    profile_repo: Any,
+    session_id: str,
+    question: str,
+    profile: Any,
+) -> Any:
+    email_text = extract_email_text_candidate(question)
+    if not email_text:
+        return profile
+    interests = dict(profile.interests) if profile and isinstance(getattr(profile, "interests", None), dict) else {}
+    lead = dict(interests.get("_lead") or {})
+    if str(lead.get("email") or "").strip() == email_text:
+        return profile
+    lead["email"] = email_text
     interests["_lead"] = lead
     await profile_repo.upsert_profile(session_id=session_id, interests=interests)
     return await profile_repo.get_profile(session_id=session_id)
@@ -1384,12 +2004,210 @@ def _platform_intro_explore_tags(
     return tags
 
 
+def _scene_title_norms() -> set[str]:
+    """左侧四个场景对应的目录标题（含别名），它们是平级目录，不应作为子目录推荐。"""
+    norms: set[str] = set()
+    for scene_key, toc_title in SCENE_TO_TOC_TITLE.items():
+        norms.add(_norm_for_match(scene_key))
+        norms.add(_norm_for_match(toc_title))
+    return norms
+
+
+def _scene_container_node(
+    *,
+    scene: str,
+    toc_nodes: Sequence[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """定位当前场景在语雀目录中的容器节点（如「平台介绍 > 人工智能通识课程」）。"""
+    title_norm = _norm_for_match(toc_title_for_scene(scene))
+    if not title_norm:
+        return None
+    platform_uuid = ""
+    for node in toc_nodes:
+        if _norm_for_match(str(node.get("title") or "")) == _norm_for_match(_PLATFORM_SECTION_TITLE):
+            platform_uuid = str(node.get("uuid") or "")
+            break
+    if platform_uuid:
+        for node in toc_nodes:
+            if (
+                str(node.get("parent_uuid") or "") == platform_uuid
+                and _norm_for_match(str(node.get("title") or "")) == title_norm
+            ):
+                return node
+    for node in toc_nodes:
+        if _norm_for_match(str(node.get("title") or "")) == title_norm:
+            return node
+    return None
+
+
+def _direct_child_titles(
+    *,
+    parent_uuid: str,
+    toc_nodes: Sequence[dict[str, Any]],
+    exclude_norms: set[str],
+    limit: int,
+) -> List[str]:
+    parent_uuid = (parent_uuid or "").strip()
+    if not parent_uuid:
+        return []
+    titles: List[str] = []
+    seen: set[str] = set()
+    for node in toc_nodes:
+        if str(node.get("parent_uuid") or "") != parent_uuid:
+            continue
+        title = str(node.get("title") or "").strip()
+        if not title:
+            continue
+        norm = _norm_for_match(title)
+        if norm in exclude_norms or norm in seen:
+            continue
+        seen.add(norm)
+        titles.append(title[:60])
+        if len(titles) >= limit:
+            break
+    return titles
+
+
+def _scene_subdir_explore_tags(
+    *,
+    scene: str,
+    focus_node: Optional[dict[str, Any]],
+    toc_nodes: Sequence[dict[str, Any]],
+    limit: int = 3,
+) -> List[str]:
+    """当前所在目录「自己目录下的子目录」探索标签，排除四个平级场景标题。
+
+    优先取当前聚焦节点的直接子目录（对话深入后逐层展开），其次回退到当前场景
+    容器节点的直接子目录（场景刚进入时展示场景顶层子目录）。
+    """
+    if not toc_nodes:
+        return []
+    exclude = _scene_title_norms()
+    exclude.add(_norm_for_match(toc_title_for_scene(scene)))
+    focus_uuid = str((focus_node or {}).get("uuid") or "")
+    tags = _direct_child_titles(
+        parent_uuid=focus_uuid,
+        toc_nodes=toc_nodes,
+        exclude_norms=exclude,
+        limit=limit,
+    )
+    if tags:
+        return tags
+    container = _scene_container_node(scene=scene, toc_nodes=toc_nodes)
+    if container:
+        return _direct_child_titles(
+            parent_uuid=str(container.get("uuid") or ""),
+            toc_nodes=toc_nodes,
+            exclude_norms=exclude,
+            limit=limit,
+        )
+    return []
+
+
+def _topical_container_explore_tags(
+    *,
+    scene: str,
+    trigger_type: str,
+    route_kind: str,
+    focus_node: Optional[dict[str, Any]],
+    toc_nodes: Sequence[dict[str, Any]],
+    limit: int = 3,
+) -> List[str]:
+    """当用户已点进某个中间目录时，优先展示该目录下的具体课程子项。"""
+    if trigger_type != "tag" or route_kind != "toc" or not focus_node or not toc_nodes:
+        return []
+    focus_title_norm = _norm_for_match(str(focus_node.get("title") or ""))
+    scene_title_norm = _norm_for_match(toc_title_for_scene(scene))
+    if not focus_title_norm or focus_title_norm == scene_title_norm:
+        return []
+    titles = _direct_child_titles(
+        parent_uuid=str(focus_node.get("uuid") or ""),
+        toc_nodes=toc_nodes,
+        exclude_norms=_scene_title_norms(),
+        limit=limit,
+    )
+    return titles if len(titles) >= 3 else []
+
+
+def _topical_container_child_titles(
+    *,
+    scene: str,
+    trigger_type: str,
+    route_kind: str,
+    focus_node: Optional[dict[str, Any]],
+    toc_nodes: Sequence[dict[str, Any]],
+    limit: int = 3,
+) -> List[str]:
+    return _topical_container_explore_tags(
+        scene=scene,
+        trigger_type=trigger_type,
+        route_kind=route_kind,
+        focus_node=focus_node,
+        toc_nodes=toc_nodes,
+        limit=limit,
+    )
+
+
+def _directory_overview_prompt_block(
+    *,
+    focus_node: Optional[dict[str, Any]],
+    child_titles: Sequence[str],
+) -> str:
+    title = str((focus_node or {}).get("title") or "").strip()
+    items = [str(item or "").strip() for item in child_titles if str(item or "").strip()]
+    if not title or len(items) < 3:
+        return ""
+    lines = [f"{idx}. {name}" for idx, name in enumerate(items[:3], start=1)]
+    return (
+        "【当前命中目录】\n"
+        f"当前命中的是语雀目录「{title}」。\n"
+        "这不是单个课程文档，不要直接默认展开成其中某一个课程。\n"
+        "请先说明这个目录下目前有哪些拓展课程，再轻问用户想先看哪一个。\n"
+        "当前可优先介绍的 3 个课程是：\n"
+        f"{chr(10).join(lines)}"
+    )
+
+
 def _scene_mcp_mode(*, scene_case_continuation: bool, scene_guide_continuation: bool) -> str:
     if scene_case_continuation:
         return "scene_case_library"
     if scene_guide_continuation:
         return "scene_guide"
     return "scene_toc"
+
+
+def _looks_like_manual_case_question(question: str, *, scene: str) -> bool:
+    raw = (question or "").strip()
+    if not raw:
+        return False
+    if classify_friend_v5_tag(raw, scene=scene) in {"guide", "case", "price", "trial"}:
+        return False
+    norm = _norm_for_match(raw)
+    if norm in {"案例"}:
+        return True
+    return bool(_MANUAL_CASE_INTENT_RE.search(norm))
+
+
+def _looks_like_competition_question(question: str) -> bool:
+    raw = (question or "").strip()
+    if not raw:
+        return False
+    return bool(_MANUAL_COMPETITION_INTENT_RE.search(_norm_for_match(raw)))
+
+
+def _should_anchor_manual_query_to_scene_platform(question: str, *, scene: str) -> bool:
+    raw = (question or "").strip()
+    if not raw or not toc_title_for_scene(scene):
+        return False
+    if classify_friend_v5_tag(raw, scene=scene) in {"guide", "case", "price", "trial"}:
+        return False
+    if _looks_like_manual_case_question(raw, scene=scene):
+        return False
+    if _looks_like_competition_question(raw):
+        return False
+    if _is_other_scene_root_product(raw, scene=scene):
+        return False
+    return bool(_MANUAL_PLATFORM_INTRO_INTENT_RE.search(_norm_for_match(raw)))
 
 
 def _is_bare_product_question(question: str, *, scene: str) -> bool:
@@ -1463,6 +2281,29 @@ def _resolve_case_library_focus(
     if focus is None:
         return None, title, False
     return focus, title, True
+
+
+def _resolve_competition_focus(*, toc_nodes: Sequence[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    focus = _focus_under_path([_CASE_SECTION_TITLE, _CASE_COMPETITION_TITLE], toc_nodes)
+    if focus is not None:
+        return focus
+    case_root = _case_section_node(toc_nodes)
+    if case_root is None:
+        return None
+    children = _children_by_parent(toc_nodes)
+    descendants = _descendants(case_root, children)
+    fallback: Optional[dict[str, Any]] = None
+    for node in descendants:
+        title = str(node.get("title") or "").strip()
+        if not title:
+            continue
+        if any(word in title for word in ("赛事", "认证", "比赛", "竞赛")):
+            if str(node.get("doc_id") or "").strip() or str(node.get("node_type") or "").strip() == "doc":
+                return node
+            fallback = fallback or node
+    if fallback is None:
+        return None
+    return _first_readable_descendant(fallback, toc_nodes) or fallback
 
 
 def _topic_already_discussed(title: str, discussed: str) -> bool:
@@ -1658,9 +2499,10 @@ def _strip_redundant_identity_question(
 
 
 def _strip_inline_urls(text: str) -> str:
-    """正文不直接展示链接：Markdown 链接保留标题文本，裸链接（含 www. 开头）整体移除。"""
+    """正文不直接展示链接：Markdown 链接保留标题文本，裸链接与语雀路径整体移除。"""
     out = re.sub(r"\[([^\]]+)\]\((?:https?://|www\.)[^)]+\)", r"\1", text or "")
     out = re.sub(r"(?:https?://|www\.)[^\s)\]}>\"'，。、；;：]+", "", out)
+    out = strip_yuque_leaks_from_text(out)
     out = re.sub(r"[ \t]+\n", "\n", out)
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out.strip()
@@ -1691,13 +2533,38 @@ def _soften_assumptive_phrasing(text: str) -> str:
     if not out:
         return out
     out = re.sub(r"^(您好，我是小为。)\s*\1+", r"\1", out)
+    out = re.sub(r"^收到。", "好的。", out)
+    out = re.sub(r"^收到，", "好的，", out)
+    out = out.replace("腾讯这条线", "腾讯青少年人工智能课程这套内容")
+    out = out.replace("这块默认以腾讯青少年人工智能课程为主线，包含", "腾讯青少年人工智能课程是一套包含")
+    out = out.replace("默认以腾讯青少年人工智能课程为主线，包含", "腾讯青少年人工智能课程是一套包含")
+    out = out.replace("这块默认把腾讯青少年人工智能课程作为主线先介绍，包含", "腾讯青少年人工智能课程是一套包含")
+    out = out.replace("默认把腾讯青少年人工智能课程作为主线先介绍，包含", "腾讯青少年人工智能课程是一套包含")
+    out = out.replace("这块默认先推腾讯青少年人工智能课程，是一套", "腾讯青少年人工智能课程是一套")
+    out = out.replace("默认先推腾讯青少年人工智能课程，是一套", "腾讯青少年人工智能课程是一套")
+    out = out.replace("这块默认先讲腾讯青少年人工智能课程，是一套", "腾讯青少年人工智能课程是一套")
+    out = out.replace("默认先讲腾讯青少年人工智能课程，是一套", "腾讯青少年人工智能课程是一套")
+    out = out.replace("这块默认是腾讯青少年人工智能课程，提供", "腾讯青少年人工智能课程提供")
+    out = out.replace("默认是腾讯青少年人工智能课程，提供", "腾讯青少年人工智能课程提供")
+    out = out.replace("这块主要推腾讯青少年人工智能课程，是一套", "腾讯青少年人工智能课程是一套")
+    out = out.replace("主要推腾讯青少年人工智能课程，是一套", "腾讯青少年人工智能课程是一套")
     out = out.replace("咱们学校", "您学校")
     out = out.replace("咱们这边学校", "您学校")
     out = out.replace("咱们这边", "您这边")
+    out = out.replace("平台操作挺直观的。", "这块上手其实不复杂。")
+    out = out.replace("进工作台能看到", "您一进工作台先能看到")
     out = out.replace("您学校大概有多少老师专门负责这块接待工作", "您这边目前大概有多少位老师在负责这块接待")
-    out = out.replace("目前资料里没包含具体的操作指南细节", "具体操作我把指南放下面，您可以先看")
-    out = out.replace("目前提供的资料里暂时没有具体的操作使用指南细节", "具体操作我把指南放下面，您可以先看")
-    out = out.replace("目前提供的资料中暂无具体的操作使用指南细节", "具体操作我把指南放下面，您可以先看")
+    out = out.replace("目前资料里没包含具体的操作指南细节", "")
+    out = out.replace("目前提供的资料里暂时没有具体的操作使用指南细节", "")
+    out = out.replace("目前提供的资料中暂无具体的操作使用指南细节", "")
+    out = out.replace("刚调取的这份资料正文目前是空的，没法直接给您展示具体的操作指南。", "")
+    out = out.replace("这份资料正文目前是空的，没法直接给您展示具体的操作指南。", "")
+    out = out.replace("正文目前是空的", "")
+    out = out.replace("没法直接给您展示具体的操作指南", "")
+    out = out.replace("还没细化到具体的操作手册", "")
+    out = re.sub(r"因为文档里没直接展示具体操作步骤[，,]?", "", out)
+    out = re.sub(r"因为资料里没直接展示具体操作步骤[，,]?", "", out)
+    out = out.replace("目前资料里主要展示的是功能逻辑和场景价值", "目前这块先能帮您看到整体思路和应用方向")
     out = out.replace(
         "您平时晚上大概要处理多少条这类消息？",
         "您这边更想先看它能替老师省下哪些重复回复，还是先看怎么试用？",
@@ -1710,6 +2577,29 @@ def _soften_assumptive_phrasing(text: str) -> str:
         "您这边目前大概有多少位老师在负责这块接待",
         "您这边更想先看试点怎么跑，还是先看老师要配合到什么程度",
     )
+    out = re.sub(r"[ ]{2,}", " ", out)
+    return out.strip()
+
+
+def _normalize_lead_confirmation_phrasing(text: str) -> str:
+    out = (text or "").strip()
+    if not out:
+        return out
+    out = re.sub(
+        r"^([^，。！？\n]{1,16}您好)[，,]\s*称呼信息我已经帮您登记啦[。.]?\s*",
+        r"\1。 ",
+        out,
+    )
+    replacements = {
+        "单位信息我已经帮您登记啦": "单位信息为您登记完成",
+        "联系方式我已经帮您登记啦": "联系方式为您登记完成",
+        "邮箱信息我已经帮您登记啦": "邮箱信息为您登记完成",
+        "联系方式都齐了": "联系方式为您登记完成",
+    }
+    for old, new in replacements.items():
+        out = out.replace(old, new)
+    out = re.sub(r"[^。！？\n]*这名字听着[^。！？\n]*[。！？]", "", out)
+    out = re.sub(r"[^。！？\n]*这个学校听起来[^。！？\n]*[。！？]", "", out)
     out = re.sub(r"[ ]{2,}", " ", out)
     return out.strip()
 
@@ -1749,6 +2639,51 @@ def _cross_scene_redirect_answer(*, scene: str, product: str) -> str:
     )
 
 
+def _strip_knowledge_gap_disclaimer(text: str) -> str:
+    """去掉「资料不够细/暂无操作步骤或案例细节」类对外表述。"""
+    out = (text or "").strip()
+    if not out:
+        return out
+    clause_patterns = (
+        r"(?:因为|由于|不过|只是|只是说)[，,]?\s*\*{0,2}[^，。！？\n]*?(?:"
+        r"还没细化|没有细化|暂未细化|未细化|没细化|没包含具体|暂无具体|暂时没有具体|还没写到具体|"
+        r"没展开具体案例细节|没有更细的案例正文|资料里没有写得很细|"
+        r"没直接展示|没法直接展示|没有直接展示|未直接展示|"
+        r"文档里(?:还)?没|资料里(?:还)?没|资料中(?:还)?没|提供的资料(?:里|中)?(?:暂时)?(?:没|未|暂无)"
+        r")[^，。！？\n]*?\*{0,2}[，,]?",
+        r"\*{0,2}[^，。！？\n]*?(?:"
+        r"还没细化到具体的操作步骤|没有细化到具体操作|目前还没有细化到具体操作步骤|"
+        r"目前这块内容还没有细化到具体操作|具体操作我把指南放下面，您可以先看|"
+        r"没展开具体案例细节|没有更细的案例正文|资料里没有写得很细|"
+        r"文档里没直接展示具体操作步骤|资料里没直接展示具体操作步骤|没直接展示具体操作步骤"
+        r")[^，。！？\n]*?\*{0,2}[，,]?",
+    )
+    for pattern in clause_patterns:
+        out = re.sub(pattern, "", out)
+    sentence_patterns = (
+        r"[^。！？\n]*?(?:"
+        r"还没细化到具体的操作步骤|没有细化到具体操作|目前还没有细化到具体操作步骤|"
+        r"目前这块内容还没有细化到具体操作|具体操作我把指南放下面，您可以先看|"
+        r"目前资料里没包含具体的操作指南细节|目前提供的资料里暂时没有具体的操作使用指南细节|"
+        r"目前提供的资料中暂无具体的操作使用指南细节|资料里没包含具体的操作指南细节|"
+        r"没展开具体案例细节|没有更细的案例正文|资料里没有写得很细|"
+        r"文档里没直接展示具体操作步骤|资料里没直接展示具体操作步骤|没直接展示具体操作步骤"
+        r")[^。！？\n]*[。！？]",
+    )
+    for pattern in sentence_patterns:
+        out = re.sub(pattern, "", out)
+    out = re.sub(r"\*\*", "", out)
+    out = re.sub(r"[，,]\s*[，,]+", "，", out)
+    out = re.sub(r"[，,]\s*([。！？])", r"\1", out)
+    out = re.sub(r"([。！？])\s*([。！？])+", r"\1", out)
+    out = re.sub(r"\s{2,}", " ", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
+_strip_guide_content_gap_disclaimer = _strip_knowledge_gap_disclaimer
+
+
 def _append_guide_inline_link(
     answer: str,
     sources: Sequence[FriendV5SourceItem],
@@ -1762,7 +2697,7 @@ def _append_guide_inline_link(
     )
     title = toc_title_for_scene(scene) or (yuque.title if yuque else "")
     if yuque and yuque.url:
-        link_line = f"详细操作请点击：[{title}使用指南]({yuque.url})"
+        link_line = f"详细资料你可以点击查看：[{title}使用指南]({yuque.url})"
     else:
         link_line = _GUIDE_SOURCES_HINT
     if _GUIDE_SOURCES_HINT in text:
@@ -1786,13 +2721,8 @@ def _price_handoff_answer(*, scene: str, profile: Any) -> str:
         f"{prefix}{title}的价格会根据学校规模、使用场景、账号数量和服务支持范围来确定，"
         "通常需要先做一次简单沟通，才能给到更准确的方案区间。\n\n"
     )
-    if name:
-        ask = "我可以先帮您登记，后续安排顾问对接详细报价。方便留个微信或电话吗？"
-    elif org:
-        ask = "我可以先帮您登记，后续安排顾问对接详细报价。方便告诉我怎么称呼您，并留个微信或电话吗？"
-    else:
-        ask = "我可以先帮您登记，后续安排顾问对接详细报价。方便留下您的称呼和联系方式吗？"
-    return body + ask
+    _ = (name, org)
+    return body + _CONTACT_OFFER_LINE
 
 
 def _tag_route_debug(route: _TagRouteResult) -> dict[str, Any]:
@@ -1991,6 +2921,14 @@ def _case_library_node(toc_nodes: Sequence[dict[str, Any]]) -> Optional[dict[str
     return fallback_library or fallback_section
 
 
+def _case_section_node(toc_nodes: Sequence[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    case_section_norm = _norm_for_match(_CASE_SECTION_TITLE)
+    for node in toc_nodes:
+        if _norm_for_match(str(node.get("title") or "")) == case_section_norm:
+            return node
+    return None
+
+
 async def _read_deep_by_focus_or_query(
     *,
     reader: Any,
@@ -2007,6 +2945,25 @@ async def _read_deep_by_focus_or_query(
     if allow_search_fallback:
         return await reader.read(question=question)
     return FriendV5YuqueDeepReadResult(debug={"mode": "toc_focus_read_miss"})
+
+
+async def _read_guide_deep_by_query_or_focus(
+    *,
+    reader: Any,
+    focus: Optional[dict[str, Any]],
+    scene: str,
+    question: str,
+) -> FriendV5YuqueDeepReadResult:
+    guide_query = _guide_reference_query(question=question, scene=scene)
+    if guide_query:
+        result = await reader.read(question=guide_query)
+        if getattr(result, "used", False):
+            return result
+    return await _read_deep_by_focus_or_query(
+        reader=reader,
+        focus=focus,
+        question=guide_query or question,
+    )
 
 
 def _attach_toc_navigation(nodes: List[dict[str, Any]]) -> None:
@@ -2052,7 +3009,7 @@ def _focus_by_mapped_tag(
     question: str,
     toc_nodes: Sequence[dict[str, Any]],
 ) -> Optional[dict[str, Any]]:
-    """兼容旧调用：按标题直接定位语雀目录；目录分组无 doc_id 时下钻到首个可读子文档。"""
+    """按标题定位语雀目录；课程集合目录保留容器，普通分组再下钻到首个可读子文档。"""
     title = (question or "").strip()
     if not title or not toc_nodes:
         return None
@@ -2065,6 +3022,14 @@ def _focus_by_mapped_tag(
     if matched is None:
         return None
     if str(matched.get("doc_id") or "").strip():
+        return matched
+    child_titles = _direct_child_titles(
+        parent_uuid=str(matched.get("uuid") or ""),
+        toc_nodes=toc_nodes,
+        exclude_norms=set(),
+        limit=3,
+    )
+    if len(child_titles) >= 3:
         return matched
     # 分组标题（TITLE）没有 doc_id，下钻到第一个带 doc_id 的子文档
     child = _first_readable_descendant(matched, toc_nodes)

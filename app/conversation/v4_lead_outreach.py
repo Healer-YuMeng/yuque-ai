@@ -187,7 +187,7 @@ def _build_v4_nudge_text(
         (
             "contact",
             not lead_meta.get("contact_value"),
-            "我这里有一份完整案例资料，可以发给您参考。方便留一个联系方式吗？我安排顾问发给您。",
+            "您可以申请测试账号，我把完整案例资料发给您",
         ),
     ]
     for field, missing, text in checks:

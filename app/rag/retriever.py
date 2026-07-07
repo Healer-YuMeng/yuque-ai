@@ -74,7 +74,7 @@ class Retriever:
 
         logger.info("retrieval_mode=vector question=%r", question)
         query_embedding = await self._embedder.embed_query(question)
-        hits = self._vector_store.search(query_embedding, self._top_k)
+        hits = await self._vector_store.search(query_embedding, self._top_k)
         logger.info("vector_hits=%d top_k=%d", len(hits), self._top_k)
 
         if anchors:

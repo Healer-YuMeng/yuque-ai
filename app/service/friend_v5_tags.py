@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Literal
 
+from app.data.yuque_loader import strip_yuque_leaks_from_text
+
 TAG_START = "[TAGS]"
 TAG_END = "[END_TAGS]"
 SOURCE_START = "[SOURCES]"
@@ -24,6 +26,11 @@ SCENE_TO_TOC_TITLE: dict[str, str] = {
     "学校AI场景定制": "学校AI场景定制",
 }
 
+# 案例标签对外展示用更短的产品名；解析时需还原为语雀 TOC 标题。
+_CASE_TAG_PRODUCT_SHORT: dict[str, str] = {
+    "人工智能通识课程": "人工智能通识课",
+}
+
 
 def toc_title_for_scene(scene: str) -> str:
     title = SCENE_TO_TOC_TITLE.get((scene or "").strip())
@@ -32,12 +39,29 @@ def toc_title_for_scene(scene: str) -> str:
 
 def guide_tag_for_scene(scene: str) -> str:
     title = toc_title_for_scene(scene)
-    return f"想看看{title}的产品的使用指南？"
+    return f"想看看{title}的使用指南？"
+
+
+def case_tag_product_label(scene: str) -> str:
+    toc_title = toc_title_for_scene(scene)
+    return _CASE_TAG_PRODUCT_SHORT.get(toc_title, toc_title)
+
+
+def resolve_case_tag_product_title(label: str) -> str:
+    raw = (label or "").strip()
+    if not raw:
+        return ""
+    reverse = {short: toc for toc, short in _CASE_TAG_PRODUCT_SHORT.items()}
+    if raw in reverse:
+        return reverse[raw]
+    for toc_title in SCENE_TO_TOC_TITLE.values():
+        if raw == toc_title:
+            return toc_title
+    return raw
 
 
 def case_tag_for_scene(scene: str) -> str:
-    title = toc_title_for_scene(scene)
-    return f"想看看{title}的产品的优秀案例库？"
+    return f"{case_tag_product_label(scene)}的优秀案例库。"
 
 
 def trial_tag_for_scene(scene: str) -> str:
@@ -55,9 +79,19 @@ def explore_product_tag_for_title(title: str) -> str:
     return f"想了解一下{clean}产品？" if clean else ""
 
 
+def subdir_explore_tag_for_title(title: str) -> str:
+    """把语雀子目录标题包装成统一问句风格的推荐标签。"""
+    clean = (title or "").strip()
+    return f"想看看{clean}？" if clean else ""
+
+
 _EXPLORE_PRODUCT_TAG_RE = re.compile(r"^想了解一下(.+?)产品？$")
+_CASE_TAG_PRODUCT_RE = re.compile(r"^(.+?)的优秀案例库。$")
+_GUIDE_TAG_RE = re.compile(r"^想看看(.+?)的使用指南？$")
 _PRODUCT_FROM_TAG_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^想看看(.+?)的产品的使用指南？$"),
+    _GUIDE_TAG_RE,
+    _CASE_TAG_PRODUCT_RE,
     re.compile(r"^想看看(.+?)的产品的优秀案例库？$"),
     re.compile(r"^想申请测试账号，试一试(.+?)的产品？$"),
     re.compile(r"^想要了解一下(.+?)产品的价格？$"),
@@ -72,8 +106,11 @@ def try_product_title_from_tag(tag: str) -> str:
         match = pattern.match(raw)
         if match:
             title = (match.group(1) or "").strip()
-            if title:
-                return title
+            if not title:
+                continue
+            if pattern is _CASE_TAG_PRODUCT_RE:
+                return resolve_case_tag_product_title(title)
+            return title
     return ""
 
 
@@ -308,6 +345,7 @@ def _clean_answer(answer: str) -> str:
     # markdown 链接只保留文字、去掉裸链接
     text = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1", text)
     text = re.sub(r"https?://[^\s)\]}>\"'，。、；;：]+", "", text)
+    text = strip_yuque_leaks_from_text(text)
     text = re.sub(r"(?m)^[ \t]*://[^\s]+[ \t]*$", "", text)
     text = re.sub(r"https?://\s*$", "", text)
     text = re.sub(r"://\s*$", "", text)

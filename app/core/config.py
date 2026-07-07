@@ -46,11 +46,11 @@ class Settings:
     port: int = _env_int("PORT", 8000)
 
     data_dir: Path = BASE_DIR / "data_runtime"
-    vector_dir: Path = BASE_DIR / "data_runtime" / "vector_store"
     sqlite_path: Path = BASE_DIR / "data_runtime" / "rag_mvp.db"
     database_url: str = _env("DATABASE_URL", str(BASE_DIR / "data_runtime" / "rag_mvp.db"))
     admin_upload_dir: Path = BASE_DIR / "data_runtime" / "admin_uploads"
     admin_video_max_bytes: int = _env_int("ADMIN_VIDEO_MAX_BYTES", 500 * 1024 * 1024)
+    admin_video_ffmpeg_path: str = _env("ADMIN_VIDEO_FFMPEG_PATH", "ffmpeg")
     admin_auth_enabled: bool = _env_bool("ADMIN_AUTH_ENABLED", True)
     admin_username: str = _env("ADMIN_USERNAME", "admin")
     admin_password: str = _env("ADMIN_PASSWORD", "admin123456")
@@ -109,6 +109,7 @@ class Settings:
     mcp_search_tool: str = _env("YUQUE_MCP_SEARCH_TOOL", "yuque_search")
     mcp_get_doc_tool: str = _env("YUQUE_MCP_GET_DOC_TOOL", "yuque_get_doc")
     mcp_timeout_s: float = _env_float("YUQUE_MCP_TIMEOUT_S", 20.0)
+    mcp_cache_ttl_s: float = _env_float("YUQUE_MCP_CACHE_TTL_S", 600.0)
     force_mcp_fallback: bool = _env_bool("FORCE_MCP_FALLBACK", False)
     auto_mcp_tool_router: bool = _env_bool("AUTO_MCP_TOOL_ROUTER", False)
     intent_llm_enabled: bool = _env_bool("INTENT_LLM_ENABLED", False)
@@ -212,7 +213,6 @@ class Settings:
 
     def ensure_runtime_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.vector_dir.mkdir(parents=True, exist_ok=True)
         self.admin_upload_dir.mkdir(parents=True, exist_ok=True)
 
 

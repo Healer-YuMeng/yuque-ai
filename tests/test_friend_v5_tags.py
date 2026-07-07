@@ -1,6 +1,31 @@
 from __future__ import annotations
 
-from app.service.friend_v5_tags import FriendV5TagStreamFilter, FriendV5TagParseResult, fallback_tags_for_scene
+from app.service.friend_v5_tags import (
+    FriendV5TagStreamFilter,
+    FriendV5TagParseResult,
+    case_tag_for_scene,
+    fallback_tags_for_scene,
+    guide_tag_for_scene,
+    try_product_title_from_tag,
+)
+
+
+def test_guide_tag_for_scene_omits_product_wording() -> None:
+    assert guide_tag_for_scene("人工智能通识教育") == "想看看人工智能通识课程的使用指南？"
+    assert try_product_title_from_tag("想看看人工智能通识课程的使用指南？") == "人工智能通识课程"
+    assert try_product_title_from_tag("想看看人工智能通识课程的产品的使用指南？") == "人工智能通识课程"
+
+
+def test_case_tag_for_scene_uses_short_user_message() -> None:
+    assert case_tag_for_scene("人工智能通识教育") == "人工智能通识课的优秀案例库。"
+    assert case_tag_for_scene("跨学科项目化学习") == "跨学科项目式学习的优秀案例库。"
+    assert case_tag_for_scene("智能招生") == "智能招生的优秀案例库。"
+    assert case_tag_for_scene("学校AI场景定制") == "学校AI场景定制的优秀案例库。"
+
+
+def test_try_product_title_from_case_tag_resolves_short_label() -> None:
+    assert try_product_title_from_tag("人工智能通识课的优秀案例库。") == "人工智能通识课程"
+    assert try_product_title_from_tag("想看看人工智能通识课程的产品的优秀案例库？") == "人工智能通识课程"
 
 
 def test_tag_filter_hides_split_marker_from_stream() -> None:

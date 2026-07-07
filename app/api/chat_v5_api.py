@@ -58,7 +58,7 @@ async def chat_v5_stream(request: ChatV5Request, qa_service: QAService = Depends
             yield _sse("error", {"message": _chat_stream_error_message(exc)})
         except Exception:
             logger.exception("chat_v5_stream_unhandled")
-            yield _sse("error", {"message": "V5 流式问答失败，请稍后重试。"})
+            yield _sse("error", {"message": "这次回复暂时没有成功发出，请稍后重试。"})
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
