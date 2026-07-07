@@ -2,10 +2,19 @@
 export const VISITOR_WELCOME_TEXT =
   "您好，欢迎了解人工智能教育平台。\n我可以帮您介绍平台功能、适用场景、使用方式和案例。请您先在左侧选择您关注的场景进行咨询。";
 
-export const INACTIVITY_REMINDER_TEXT =
+/** 历史待机提示（localStorage 里可能仍存在） */
+export const INACTIVITY_REMINDER_LEGACY_TEXT =
   "如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。";
 
+export const INACTIVITY_REMINDER_TEXT =
+  "如果现在不方便继续看，您可以申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系。";
+
 export const INACTIVITY_MS = 120_000;
+
+export function isInactivityReminderCopy(text: string): boolean {
+  const normalized = (text || "").trim();
+  return normalized === INACTIVITY_REMINDER_TEXT || normalized === INACTIVITY_REMINDER_LEGACY_TEXT;
+}
 
 export const VISITOR_QUICK_QUESTIONS: { label: string; text: string }[] = [
   { label: "平台是做什么的？", text: "你们平台是做什么的？" },

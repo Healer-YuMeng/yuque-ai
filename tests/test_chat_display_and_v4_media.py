@@ -109,7 +109,8 @@ def test_v4_nudge_contact_offer_provides_value_before_contact() -> None:
     text, asked = _build_v4_nudge_text(profile=profile, lead_meta={}, session_meta={})
     assert asked == "contact"
     assert "完整案例资料" in text
-    assert "发给您参考" in text
+    assert "申请测试账号" in text
+    assert "发给您" in text
     assert "手机号" not in text
     assert "微信" not in text
 

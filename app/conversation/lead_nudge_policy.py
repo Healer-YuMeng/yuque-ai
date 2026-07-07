@@ -42,7 +42,7 @@ class LeadNudgePolicy:
                 return LeadNudgeDecision(
                     triggered=True,
                     reason="rounds",
-                    text="如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。",
+                    text="您可以申请测试账号，我把测试账号发给您。",
                 )
 
         last_assistant_time = self._latest_assistant_time(history)
@@ -53,7 +53,7 @@ class LeadNudgePolicy:
                 return LeadNudgeDecision(
                     triggered=True,
                     reason="stay",
-                    text="如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。",
+                    text="您可以申请测试账号，我把测试账号发给您。",
                 )
         return LeadNudgeDecision(triggered=False)
 

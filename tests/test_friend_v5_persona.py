@@ -41,7 +41,7 @@ def test_friend_v5_prompt_emphasizes_role_specific_human_style_and_boundaries() 
 def test_friend_v5_prompt_handles_user_info_confirmation_naturally() -> None:
     prompt = build_friend_v5_system_prompt()
 
-    assert "如果用户有进一步需求，可以轻量提示“如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。”" in prompt
+    assert "如果用户有进一步需求，可以轻量提示“您可以申请测试账号，我把测试账号发给您。”" in prompt
     assert "不要继续依次追问称呼、单位、联系方式或邮箱" in prompt
     assert "不要说“我记岔了”“我记错了”“特别备注”这类容易出戏的话" in prompt
     assert "用户刚补充一个字段后，不要回得像登记表回执" in prompt

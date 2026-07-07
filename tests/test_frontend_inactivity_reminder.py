@@ -9,7 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_visitor_inactivity_reminder_waits_120_seconds() -> None:
     visitor_sales = (ROOT / "frontend/src/visitorSales.ts").read_text(encoding="utf-8")
     assert "export const INACTIVITY_MS = 120_000;" in visitor_sales
-    assert "如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。" in visitor_sales
+    assert "如果现在不方便继续看，您可以申请测试账号" in visitor_sales
+    assert "我让顾问把测试账号发您，后续顾问会和您联系" in visitor_sales
 
 
 def test_visitor_inactivity_reminder_requires_no_pending_reply() -> None:
@@ -135,15 +136,19 @@ def test_trial_apply_dialog_includes_optional_email_field() -> None:
 
 def test_inactivity_reminder_shows_trial_apply_button() -> None:
     app = (ROOT / "frontend/src/App.tsx").read_text(encoding="utf-8")
+    visitor_sales = (ROOT / "frontend/src/visitorSales.ts").read_text(encoding="utf-8")
     assert "const showInlineTrialApplyButton =" in app
     assert 'isInactivityReminderMessage(item) || (item.trialApplyAvailable && item.isFriendV5)' in app
+    assert "trialApplyAvailable: true" in app
+    assert "isInactivityReminder: true" in app
     assert 'className="msg-inline-action"' in app
     assert "申请测试账号" in app
+    assert "export function isInactivityReminderCopy" in visitor_sales
 
 
 def test_v4_trial_apply_offer_uses_unified_contact_copy() -> None:
     app = (ROOT / "frontend/src/App.tsx").read_text(encoding="utf-8")
-    assert '"如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。"' in app
+    assert 'INACTIVITY_REMINDER_TEXT' in app
     assert "需要我给您提供这个模块的测试账号吗？" not in app
 
 
@@ -187,6 +192,14 @@ def test_selected_focus_scene_button_is_disabled_to_prevent_repeat_click() -> No
     assert "const isFocusSceneDisabled = (scene: FocusScene) =>" in app
     assert "Boolean(activeFocusScene && activeFocusScene === scene)" in app
     assert "disabled={isStreaming || isFocusSceneDisabled(scene)}" in app
+
+
+def test_friend_v5_cross_scene_tag_syncs_left_scene_selection() -> None:
+    app = (ROOT / "frontend/src/App.tsx").read_text(encoding="utf-8")
+    assert "const applyFocusSceneSelection = useCallback((scene: FocusScene) =>" in app
+    assert "if (scene !== activeFocusScene) {" in app
+    assert "applyFocusSceneSelection(scene);" in app
+    assert 'void askQuestion(tag, true, { triggerType: "tag", scene });' in app
 
 
 def test_admin_customers_table_includes_email_column() -> None:

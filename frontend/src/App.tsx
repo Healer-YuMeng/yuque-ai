@@ -33,6 +33,7 @@ import { normalizeMarkdownAutolinks } from "./markdownAutolink";
 import {
   INACTIVITY_MS,
   INACTIVITY_REMINDER_TEXT,
+  isInactivityReminderCopy,
   VISITOR_QUICK_QUESTIONS,
   looksLikeContactInUserMessage,
   looksLikeDeclineFollowup,
@@ -66,7 +67,7 @@ function isInactivityReminderMessage(item: ChatItem): boolean {
   return (
     item.isInactivityReminder === true ||
     item.id.startsWith("inact-") ||
-    item.text === INACTIVITY_REMINDER_TEXT
+    isInactivityReminderCopy(item.text)
   );
 }
 const FOCUS_SCENE_ITEMS = ["人工智能通识教育", "智能招生", "跨学科项目化学习", "学校AI场景定制"] as const;
@@ -77,6 +78,10 @@ const SCENE_TO_TOC_TITLE: Record<FocusScene, string> = {
   跨学科项目化学习: "跨学科项目式学习",
   智能招生: "智能招生",
   学校AI场景定制: "学校AI场景定制",
+};
+
+const CASE_TAG_PRODUCT_TO_TOC: Record<string, string> = {
+  人工智能通识课: "人工智能通识课程",
 };
 
 type AdminSceneKey = "general_ai_course" | "project_based_learning" | "smart_enrollment" | "school_ai_custom";
@@ -100,6 +105,8 @@ type AdminVideoPreviewAsset = {
 function resolveSceneForFriendV5Tag(tag: string, fallback: FocusScene): FocusScene {
   const patterns = [
     /^想看看(.+?)的产品的使用指南？$/,
+    /^想看看(.+?)的使用指南？$/,
+    /^(.+?)的优秀案例库。$/,
     /^想看看(.+?)的产品的优秀案例库？$/,
     /^想申请测试账号，试一试(.+?)的产品？$/,
     /^想要了解一下(.+?)产品的价格？$/,
@@ -109,9 +116,10 @@ function resolveSceneForFriendV5Tag(tag: string, fallback: FocusScene): FocusSce
     const match = (tag || "").trim().match(pattern);
     const product = match?.[1]?.trim();
     if (!product) continue;
+    const tocProduct = CASE_TAG_PRODUCT_TO_TOC[product] || product;
     for (const scene of FOCUS_SCENE_ITEMS) {
       const tocTitle = SCENE_TO_TOC_TITLE[scene];
-      if (product === scene || product === tocTitle) return scene;
+      if (tocProduct === scene || tocProduct === tocTitle || product === scene || product === tocTitle) return scene;
     }
   }
   return fallback;
@@ -646,7 +654,50 @@ function sanitizeFriendV5AnswerText(text: string): string {
   out = out.replace(/苹果\s*STAM(?!E)/gi, "苹果 STEAM");
   out = out.replace(/(?<!E)IDAS\s*-?\s*PBL/gi, "IDEAS-PBL");
   out = out.replace(/IDEAS\s+PBL/gi, "IDEAS-PBL");
-  return stripTrialAccountDisclosure(out.trim());
+  out = stripTrialAccountDisclosure(stripYuqueLeaksFromText(out.trim()));
+  preservedLinks.forEach((link, index) => {
+    out = out.replace(`__FRIEND_V5_MD_LINK_${index}__`, link);
+  });
+  return out.trim();
+}
+
+function firstFriendV5YuqueSourceUrl(sources: FriendV5SourceItem[] | undefined): string {
+  for (const item of sources || []) {
+    const normalized = normalizeFriendV5SourceUrl(item.url || "");
+    if (normalized) return normalized;
+  }
+  return "";
+}
+
+function alignGuideInlineLinkWithSources(text: string, sources: FriendV5SourceItem[] | undefined): string {
+  const sourceUrl = firstFriendV5YuqueSourceUrl(sources);
+  if (!sourceUrl) return text || "";
+  let out = text || "";
+  out = out.replace(/\[([^\]]*使用指南)\]\(\s*\)/g, (_match, label: string) => `[${label}](${sourceUrl})`);
+  out = out.replace(
+    /详细资料你可以点击查看：\s*(?!\[)([^\n]+?使用指南)/g,
+    (_match, label: string) => `详细资料你可以点击查看：[${label.trim()}](${sourceUrl})`,
+  );
+  return out;
+}
+
+function extractGuideInlineLink(text: string, sources: FriendV5SourceItem[] | undefined): { label: string; url: string } | null {
+  const sourceUrl = firstFriendV5YuqueSourceUrl(sources);
+  if (!sourceUrl) return null;
+  const match = (text || "").match(
+    /详细资料你可以点击查看：\s*(?:\[([^\]]*使用指南)\]\([^\)]*\)|([^\n]+?使用指南))/,
+  );
+  const label = (match?.[1] || match?.[2] || "").trim();
+  if (!label) return null;
+  return { label, url: sourceUrl };
+}
+
+function stripGuideInlineLinkText(text: string): string {
+  const out = (text || "").replace(
+    /\n*\s*详细资料你可以点击查看：\s*(?:\[[^\]]*使用指南\]\([^\)]*\)|[^\n]+?使用指南)\s*/g,
+    "\n\n",
+  );
+  return out.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function stripTrialAccountDisclosure(text: string): string {
@@ -658,8 +709,53 @@ function stripTrialAccountDisclosure(text: string): string {
   return out.trim();
 }
 
-function softenFriendV5StreamingText(text: string): string {
+function stripYuqueLeaksFromText(text: string): string {
   let out = text || "";
+  out = out.replace(/(?:https?:\/\/)?(?:www\.)?yuque\.com\/[^\s)\]}>"'，。、；;：]+/gi, "");
+  out = out.replace(/:\/\/[^\s)\]}>"'，。、；;：]+/g, "");
+  out = out.replace(/(?<![\w./@-])\/?[a-zA-Z0-9][\w-]*\/[a-zA-Z0-9][\w-]*\/[a-zA-Z0-9][\w-]{8,}(?![\w./@-])/g, "");
+  out = out.replace(/(?<![\w./@-])\/?[a-zA-Z0-9][\w-]*\/[a-zA-Z0-9][\w-]+(?![\w./@-])/g, "");
+  out = out.replace(/(?<![\w./@-])\/[a-zA-Z0-9_-]{3,}(?![\w./@-])/g, "");
+  out = out.replace(/(?<![\w./@-])\/[a-zA-Z0-9_-]{7,}(?=[a-zA-Z0-9_-]*\d)(?![\w./@-])/g, "");
+  out = out.replace(/(?<![\w./@-])[a-zA-Z0-9_-]{8,}(?=[a-zA-Z0-9_-]*\d)(?![\w./@-])/g, "");
+  out = out.replace(/([。！？!?])\s*[a-zA-Z0-9_-]{2,6}(?=[a-zA-Z0-9_-]*\d)(?![\w./@-])/g, "$1");
+  out = out.replace(/(?<![\w./@-])[a-z0-9]+(?:-[a-z0-9][\w-]*)+(?:[。.，,；;!！?？]+)?(?=\s|$)/g, "");
+  out = out.replace(/([。！？])[。.，,；;!！?？]+(?=\s|$)/g, "$1");
+  out = out.replace(/[ \t]{2,}/g, " ");
+  out = out.replace(/[ \t]+\n/g, "\n");
+  out = out.replace(/\n{3,}/g, "\n\n");
+  return out.trim();
+}
+
+function stripTrailingArtifactTail(text: string): string {
+  let out = text || "";
+  const trimLineTail = (line: string) => {
+    let next = line;
+    next = next.replace(
+      /([。！？!?）】》」』\u4e00-\u9fa5])\s*(?:\/|:\/\/)[^\u4e00-\u9fa5\s]{1,32}$/g,
+      "$1",
+    );
+    next = next.replace(
+      /([。！？!?）】》」』\u4e00-\u9fa5])\s*[/:a-zA-Z0-9._-]{2,32}(?=[/:a-zA-Z0-9._-]*\d)(?=[^\u4e00-\u9fa5A-Za-z]*$)/g,
+      "$1",
+    );
+    next = next.replace(
+      /([。！？!?）】》」』\u4e00-\u9fa5])\s*[a-z0-9._-]{6,24}(?=[^\u4e00-\u9fa5A-Z]*$)/g,
+      "$1",
+    );
+    return next.trimEnd();
+  };
+  out = out
+    .split("\n")
+    .map((line) => trimLineTail(line))
+    .join("\n");
+  out = trimLineTail(out);
+  return out.trim();
+}
+
+function softenFriendV5StreamingText(text: string): string {
+  let out = stripYuqueLeaksFromText(text || "");
+  out = stripTrailingArtifactTail(out);
   out = out.replace(/^收到。/, "好的。");
   out = out.replace(/^收到，/, "好的，");
   out = out.replace("腾讯这条线", "腾讯青少年人工智能课程这套内容");
@@ -835,6 +931,7 @@ const MAX_STORED_SESSIONS = 40;
 const MAX_MESSAGES_PER_SESSION = 100;
 /** 流式 token 批量刷 UI 间隔（毫秒），避免逐字 setState */
 const STREAM_FLUSH_MS = 48;
+const FRIEND_V5_STREAM_HOLDBACK_CHARS = 32;
 /** 会话写入 localStorage 防抖（毫秒） */
 const STORAGE_DEBOUNCE_MS = 800;
 
@@ -860,6 +957,18 @@ function ensureUniqueMessageIds(messages: ChatItem[], sessionId: string): ChatIt
     }
     seen.add(nextId);
     return { ...message, id: nextId };
+  });
+}
+
+function refreshInactivityReminderMessages(messages: ChatItem[]): ChatItem[] {
+  return messages.map((message) => {
+    if (!isInactivityReminderMessage(message)) return message;
+    return {
+      ...message,
+      text: INACTIVITY_REMINDER_TEXT,
+      isInactivityReminder: true,
+      trialApplyAvailable: true,
+    };
   });
 }
 
@@ -931,7 +1040,13 @@ function normalizeSessionForVisitor(s: SessionState): SessionState {
     trialApplicationSubmitted: s.trialApplicationSubmitted ?? false,
   };
   if (s.messages && s.messages.length > 0) {
-    return { ...s, messages: refreshVisitorWelcomeText(ensureUniqueMessageIds(s.messages, s.id)), ...flags };
+    return {
+      ...s,
+      messages: refreshInactivityReminderMessages(
+        refreshVisitorWelcomeText(ensureUniqueMessageIds(s.messages, s.id)),
+      ),
+      ...flags,
+    };
   }
   const wid = `welcome-${s.id}`;
   return { ...s, messages: emptySessionMessages(wid), ...flags };
@@ -1270,7 +1385,13 @@ function App() {
                 inactivityPromptSent: true,
                 messages: [
                   ...sess.messages,
-                  { id: aid, role: "assistant", text: INACTIVITY_REMINDER_TEXT, isInactivityReminder: true },
+                  {
+                    id: aid,
+                    role: "assistant",
+                    text: INACTIVITY_REMINDER_TEXT,
+                    isInactivityReminder: true,
+                    trialApplyAvailable: true,
+                  },
                 ],
               },
         );
@@ -2092,6 +2213,14 @@ function App() {
 
     const flushStreamText = () => {
       if (!streamTextBuf) return;
+      if (isFriendV5Request && !pendingDonePayload) {
+        if (streamTextBuf.length <= FRIEND_V5_STREAM_HOLDBACK_CHARS) return;
+        const emitLen = streamTextBuf.length - FRIEND_V5_STREAM_HOLDBACK_CHARS;
+        const chunk = streamTextBuf.slice(0, emitLen);
+        streamTextBuf = streamTextBuf.slice(emitLen);
+        appendTokenToMessage(chunk);
+        return;
+      }
       const chunk = streamTextBuf;
       streamTextBuf = "";
       appendTokenToMessage(chunk);
@@ -2116,6 +2245,14 @@ function App() {
         streamFlushTimer = null;
       }
       flushStreamText();
+    };
+
+    const discardPendingStreamText = () => {
+      if (streamFlushTimer != null) {
+        window.clearTimeout(streamFlushTimer);
+        streamFlushTimer = null;
+      }
+      streamTextBuf = "";
     };
 
     const appendTokenToMessage = (token: string) => {
@@ -2199,9 +2336,9 @@ function App() {
         : itemTextWithGuideOffer(
             serverAnswer,
             guideTopicHit,
-            "如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。",
+            INACTIVITY_REMINDER_TEXT,
           );
-      const hasUnifiedTrialApplyOffer = finalText.includes("如果您现在不方便继续看，也可以先申请测试账号。我让顾问把测试账号发您，后续顾问会和您联系，您有空再慢慢看。");
+      const hasUnifiedTrialApplyOffer = finalText.includes(INACTIVITY_REMINDER_TEXT);
       setSessions((prev) =>
         prev.map((session) =>
           session.id === sessionId
@@ -2351,8 +2488,10 @@ function App() {
             const token = String(payload.token || "");
             if (token) {
               receivedAnyToken = true;
-              streamTextBuf += token;
-              scheduleStreamFlush();
+              if (!isFriendV5Request) {
+                streamTextBuf += token;
+                scheduleStreamFlush();
+              }
             }
           } else if (parsed.event === "stage") {
             const payload = JSON.parse(parsed.data || "{}") as Record<string, unknown>;
@@ -2433,7 +2572,7 @@ function App() {
       } else if (err?.name === "AbortError") {
         fallbackText = "请求已中断。";
       } else if (errMsg === "stream_unavailable") {
-        fallbackText = "流式服务不可用（未收到有效响应），请确认后端已启动或稍后重试。";
+        fallbackText = "这次回复暂时没有成功发出，请稍后重试。";
       } else {
         fallbackText = errMsg || "请求失败，请稍后重试。";
       }
@@ -2447,8 +2586,7 @@ function App() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ session_id: sessionId, chat_mode: isFriendV5Request ? "friend_v5" : "visitor_sales" }),
           });
-          fallbackText =
-            `${fallbackText}\n\n检测到会话状态异常，已自动重置当前会话上下文。请直接重试这条问题。`;
+          fallbackText = `${fallbackText}\n\n系统已自动恢复，请重新发送刚才的问题。`;
         } catch {
           // 忽略重置失败，保留原始错误提示
         }
@@ -2481,11 +2619,14 @@ function App() {
       if (elapsedTimer != null) {
         window.clearInterval(elapsedTimer);
       }
-      flushStreamTextNow();
       if (pendingDonePayload) {
+        // done 已携带最终答案时，直接用最终文本收口，避免把尾部缓冲 token 先刷到界面造成闪烁。
+        discardPendingStreamText();
         const payload = pendingDonePayload;
         pendingDonePayload = null;
         applyDonePayload(payload);
+      } else {
+        flushStreamTextNow();
       }
       controllerRef.current = null;
       setStreamingAssistantId(null);
@@ -2495,18 +2636,18 @@ function App() {
     }
   };
 
-  const handleFocusSceneShortcut = (scene: (typeof FOCUS_SCENE_ITEMS)[number]) => {
-    if (isStreaming) return;
+  const applyFocusSceneSelection = useCallback((scene: FocusScene) => {
     setVisitorMobileSceneOpen(false);
     setActiveFocusScene(scene);
-    if (IS_VISITOR_ROUTE) {
-      setHasPickedFocusScene(true);
-    } else {
-      setHasPickedFocusScene(true);
-    }
+    setHasPickedFocusScene(true);
     setSelectedGuideNodeId(null);
     setSelectedYuqueDocs([]);
     if (IS_VISITOR_ROUTE) void loadAdminSceneVideoPreview(scene);
+  }, [loadAdminSceneVideoPreview]);
+
+  const handleFocusSceneShortcut = (scene: (typeof FOCUS_SCENE_ITEMS)[number]) => {
+    if (isStreaming) return;
+    applyFocusSceneSelection(scene);
     if (chatV5Enabled) {
       void askQuestion(scene, true, {
         hideUserMessage: false,
@@ -3375,8 +3516,12 @@ function App() {
                           (item.media.videos.length > 0 || item.media.images.length > 0)
                       );
                       let displayText = item.text || "";
+                      const guideInlineLink =
+                        item.role === "assistant" && item.isFriendV5 ? extractGuideInlineLink(displayText, item.sources) : null;
                       if (item.role === "assistant") {
                         if (item.isFriendV5) {
+                          displayText = alignGuideInlineLinkWithSources(displayText, item.sources);
+                          displayText = stripGuideInlineLinkText(displayText);
                           displayText = sanitizeFriendV5AnswerText(displayText);
                         } else if (IS_VISITOR_ROUTE) {
                           displayText = stripTrialAccountDisclosure(displayText);
@@ -3448,15 +3593,33 @@ function App() {
                                       {normalizeMarkdownAutolinks(displayText)}
                                     </ReactMarkdown>
                                   ) : null}
+                                  {guideInlineLink ? (
+                                    <p>
+                                      详细资料你可以点击查看：
+                                      <a href={guideInlineLink.url} target="_blank" rel="noreferrer noopener">
+                                        {guideInlineLink.label}
+                                      </a>
+                                    </p>
+                                  ) : null}
                                   {shouldLeadWithMedia ? null : renderInlineMediaBlock(item, "tail")}
                                 </div>
                               ) : displayText.trim() ? (
                                 isStreaming && item.role === "assistant" && item.id === streamingAssistantId ? (
                                   <div className="bubble-stream-text">{displayText}</div>
                                 ) : (
-                                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
-                                    {normalizeMarkdownAutolinks(displayText)}
-                                  </ReactMarkdown>
+                                  <>
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
+                                      {normalizeMarkdownAutolinks(displayText)}
+                                    </ReactMarkdown>
+                                    {guideInlineLink ? (
+                                      <p>
+                                        详细资料你可以点击查看：
+                                        <a href={guideInlineLink.url} target="_blank" rel="noreferrer noopener">
+                                          {guideInlineLink.label}
+                                        </a>
+                                      </p>
+                                    ) : null}
+                                  </>
                                 )
                               ) : null}
                             </div>
@@ -3488,6 +3651,9 @@ function App() {
                                       tag,
                                       activeFocusScene || FOCUS_SCENE_ITEMS[0],
                                     );
+                                    if (scene !== activeFocusScene) {
+                                      applyFocusSceneSelection(scene);
+                                    }
                                     void askQuestion(tag, true, { triggerType: "tag", scene });
                                   }}
                                   disabled={isStreaming}

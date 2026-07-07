@@ -1,9 +1,28 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import httpx
+
+# 语雀完整域名链接（含无协议写法）
+_YUQUE_DOMAIN_PATH_RE = re.compile(
+    r"(?:https?://)?(?:www\.)?yuque\.com/[^\s)\]}>\"'，。、；;：]+",
+    re.IGNORECASE,
+)
+# 裸路径 owner/repo/doc_slug（文档 slug 通常 ≥8 位，避免误伤普通文本）
+_YUQUE_BARE_REPO_PATH_RE = re.compile(
+    r"(?<![\w./@-])/?[a-zA-Z0-9][\w-]*/[a-zA-Z0-9][\w-]*/[a-zA-Z0-9][\w-]{8,}(?![\w./@-])",
+)
+# 裸路径 owner/repo（链接被截断时常见）
+_YUQUE_BARE_REPO_PAIR_RE = re.compile(
+    r"(?<![\w./@-])/?[a-zA-Z0-9][\w-]*/[a-zA-Z0-9][\w-]+(?![\w./@-])",
+)
+# 单独泄露的 owner login（如 suesun-yb1bi.），限定为小写连字符 slug，避免误伤 IDEAS-PBL 等
+_YUQUE_OWNER_SLUG_LEAK_RE = re.compile(
+    r"(?<![\w./@-])[a-z0-9]+(?:-[a-z0-9][\w-]*)+(?:[。.，,；;!！?？]+)?(?=\s|$)",
+)
 
 
 class YuqueLoaderError(RuntimeError):
@@ -32,6 +51,20 @@ def build_yuque_doc_url(raw: str, *, scope: str = "") -> str:
     if sc:
         return f"https://www.yuque.com/{sc}/{value}"
     return f"https://www.yuque.com/{value}"
+
+
+def strip_yuque_leaks_from_text(text: str) -> str:
+    """从对外展示文本中移除语雀链接与裸路径（owner/repo/slug），防止内部地址泄露。"""
+    out = text or ""
+    out = _YUQUE_DOMAIN_PATH_RE.sub("", out)
+    out = _YUQUE_BARE_REPO_PATH_RE.sub("", out)
+    out = _YUQUE_BARE_REPO_PAIR_RE.sub("", out)
+    out = _YUQUE_OWNER_SLUG_LEAK_RE.sub("", out)
+    out = re.sub(r"([。！？])[。.，,；;!！?？]+(?=\s|$)", r"\1", out)
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    out = re.sub(r"[ \t]+\n", "\n", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
 
 
 @dataclass(frozen=True)
