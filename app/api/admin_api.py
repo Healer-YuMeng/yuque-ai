@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -141,12 +142,26 @@ async def upload_admin_video(
     scene_dir = upload_root / "videos" / scene_key
     scene_dir.mkdir(parents=True, exist_ok=True)
 
-    stored_filename = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{uuid4().hex[:12]}{extension}"
+    filename_stem = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{uuid4().hex[:12]}"
+    stored_filename = f"{filename_stem}.mp4" if extension != ".mp4" else f"{filename_stem}{extension}"
     target = (scene_dir / stored_filename).resolve()
-    if scene_dir.resolve() not in target.parents:
+    scene_dir_resolved = scene_dir.resolve()
+    if scene_dir_resolved not in target.parents:
         raise HTTPException(status_code=400, detail="非法视频保存路径")
 
-    file_size = await _save_upload_file(file=file, target=target, max_bytes=settings.admin_video_max_bytes)
+    if extension == ".mp4":
+        file_size = await _save_upload_file(file=file, target=target, max_bytes=settings.admin_video_max_bytes)
+    else:
+        source_filename = f"{filename_stem}_source{extension}"
+        source_target = (scene_dir / source_filename).resolve()
+        if scene_dir_resolved not in source_target.parents:
+            raise HTTPException(status_code=400, detail="非法视频保存路径")
+        await _save_upload_file(file=file, target=source_target, max_bytes=settings.admin_video_max_bytes)
+        try:
+            file_size = await _transcode_video_for_web(source=source_target, target=target)
+        finally:
+            source_target.unlink(missing_ok=True)
+
     rel_path = f"videos/{scene_key}/{stored_filename}"
     file_url = f"/admin-media/videos/{scene_key}/{stored_filename}"
     row = await repo.insert_video(
@@ -157,7 +172,7 @@ async def upload_admin_video(
         stored_filename=stored_filename,
         file_path=rel_path,
         file_url=file_url,
-        mime_type=mime_type,
+        mime_type="video/mp4",
         file_size=file_size,
     )
     return _video_response(row)
@@ -498,6 +513,56 @@ async def _save_upload_file(*, file: UploadFile, target: Path, max_bytes: int) -
         target.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="视频文件为空")
     return total
+
+
+async def _transcode_video_for_web(*, source: Path, target: Path) -> int:
+    target.unlink(missing_ok=True)
+    command = [
+        settings.admin_video_ffmpeg_path,
+        "-y",
+        "-i",
+        str(source),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        str(target),
+    ]
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail="服务器未安装 ffmpeg，无法将视频转换为网页可播放格式") from exc
+
+    _stdout, stderr = await process.communicate()
+    if process.returncode != 0:
+        target.unlink(missing_ok=True)
+        error_tail = (stderr or b"").decode("utf-8", errors="ignore")[-240:].strip()
+        detail = "视频转码失败，请确认视频文件可正常播放，或先转换为 MP4/H.264 后再上传"
+        if error_tail:
+            detail = f"{detail}：{error_tail}"
+        raise HTTPException(status_code=400, detail=detail)
+
+    if not target.is_file():
+        raise HTTPException(status_code=500, detail="视频转码完成但未生成 MP4 文件")
+    file_size = target.stat().st_size
+    if file_size <= 0:
+        target.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail="视频转码后文件为空")
+    return file_size
 
 
 def _video_response(row: AdminVideoAssetRow) -> AdminVideoAssetResponse:

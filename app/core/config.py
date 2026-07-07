@@ -50,6 +50,7 @@ class Settings:
     database_url: str = _env("DATABASE_URL", str(BASE_DIR / "data_runtime" / "rag_mvp.db"))
     admin_upload_dir: Path = BASE_DIR / "data_runtime" / "admin_uploads"
     admin_video_max_bytes: int = _env_int("ADMIN_VIDEO_MAX_BYTES", 500 * 1024 * 1024)
+    admin_video_ffmpeg_path: str = _env("ADMIN_VIDEO_FFMPEG_PATH", "ffmpeg")
     admin_auth_enabled: bool = _env_bool("ADMIN_AUTH_ENABLED", True)
     admin_username: str = _env("ADMIN_USERNAME", "admin")
     admin_password: str = _env("ADMIN_PASSWORD", "admin123456")
